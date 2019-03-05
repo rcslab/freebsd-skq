@@ -302,6 +302,7 @@ struct thread {
 	int		td_rtcgen;	/* (s) rtc_generation of abs. sleep */
 	size_t		td_vslock_sz;	/* (k) amount of vslock-ed space */
 	struct kcov_info *td_kcov_info;	/* (*) Kernel code coverage data */
+	struct kevq_thred *td_kevq_thred;
 #define	td_endzero td_sigmask
 
 /* Copied during fork1() or create_thread(). */

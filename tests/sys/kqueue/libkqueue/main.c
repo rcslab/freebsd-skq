@@ -29,6 +29,7 @@ extern void test_evfilt_read();
 extern void test_evfilt_signal();
 extern void test_evfilt_vnode();
 extern void test_evfilt_timer();
+extern void test_evfilt_read_m();
 extern void test_evfilt_proc();
 #if HAVE_EVFILT_USER
 extern void test_evfilt_user();
@@ -322,6 +323,7 @@ main(int argc, char **argv)
     int test_signal = 1;
     int test_vnode = 1;
     int test_timer = 1;
+    int test_socket_m = 1;
 #ifdef __FreeBSD__
     int test_user = 1;
 #else
@@ -342,6 +344,8 @@ main(int argc, char **argv)
             test_vnode = 0;
         if (strcmp(argv[0], "--no-user") == 0)
             test_user = 0;
+        if (strcmp(argv[0], "--no-socket_m") == 0)
+            test_socket_m = 0;
         argv++;
         argc--;
     }
@@ -360,6 +364,8 @@ main(int argc, char **argv)
 
     if (test_socket) 
         test_evfilt_read();
+    if (test_socket_m)
+        test_evfilt_read_m();
     if (test_signal) 
         test_evfilt_signal();
     if (test_vnode) 

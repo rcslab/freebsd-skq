@@ -33,6 +33,8 @@
 
 #include <sys/_types.h>
 #include <sys/queue.h>
+#include <sys/lock.h>
+#include <sys/mutex.h>
 
 #define EVFILT_READ		(-1)
 #define EVFILT_WRITE		(-2)
@@ -143,6 +145,7 @@ struct kevent32_freebsd11 {
 #define EV_CLEAR	0x0020		/* clear event state after reporting */
 #define EV_RECEIPT	0x0040		/* force EV_ERROR on success, data=0 */
 #define EV_DISPATCH	0x0080		/* disable event after reporting */
+#define EV_AFFINITY	0x0200		/* in multithreaded mode, this event has hard affinity for the registering thread */
 
 #define EV_SYSFLAGS	0xF000		/* reserved by system */
 #define	EV_DROP		0x1000		/* note should be dropped */
@@ -220,6 +223,9 @@ struct knote;
 SLIST_HEAD(klist, knote);
 struct kqueue;
 TAILQ_HEAD(kqlist, kqueue);
+struct kevq;
+SLIST_HEAD(kevqlist, kevq);
+
 struct knlist {
 	struct	klist	kl_list;
 	void    (*kl_lock)(void *);	/* lock function */
@@ -269,6 +275,10 @@ struct filterops {
 	void	(*f_touch)(struct knote *kn, struct kevent *kev, u_long type);
 };
 
+/* The ioctl to set multithreaded mode
+ */
+#define	FKQMULTI	_IO('f', 89)
+
 /*
  * An in-flux knote cannot be dropped from its kq while the kq is
  * unlocked.  If the KN_SCAN flag is not set, a thread can only set
@@ -283,7 +293,9 @@ struct knote {
 	SLIST_ENTRY(knote)	kn_selnext;	/* for struct selinfo */
 	struct			knlist *kn_knlist;	/* f_attach populated */
 	TAILQ_ENTRY(knote)	kn_tqe;
-	struct			kqueue *kn_kq;	/* which queue we are on */
+	struct			kqueue *kn_kq;	/* which kqueue we are on */
+	struct			kevq *kn_org_kevq; /* the kevq that registered the knote */
+	struct			kevq *kn_kevq; /* the kevq the knote is on */
 	struct 			kevent kn_kevent;
 	void			*kn_hook;
 	int			kn_hookid;
@@ -295,7 +307,9 @@ struct knote {
 #define KN_MARKER	0x20			/* ignore this knote */
 #define KN_KQUEUE	0x40			/* this knote belongs to a kq */
 #define	KN_SCAN		0x100			/* flux set in kqueue_scan() */
+	int			kn_fluxwait;
 	int			kn_influx;
+	struct 		mtx kn_fluxlock;
 	int			kn_sfflags;	/* saved filter flags */
 	int64_t			kn_sdata;	/* saved data field */
 	union {
@@ -321,6 +335,14 @@ struct kevent_copyops {
 	size_t	kevent_size;
 };
 
+struct kevq_thred {
+	u_long		kevq_hashmask;		/* hash mask for kevqs */
+	struct		kevqlist *kevq_hash;	    /* hash table for kevqs */
+	TAILQ_HEAD(, kevq) kevq_tq;
+	struct		mtx lock;		/* the lock for the kevq*/
+};
+
+
 struct thread;
 struct proc;
 struct knlist;
@@ -328,7 +350,7 @@ struct mtx;
 struct rwlock;
 
 void	knote(struct knlist *list, long hint, int lockflags);
-void	knote_fork(struct knlist *list, int pid);
+void knote_fork(struct knlist *list, struct thread *td, int pid);
 struct knlist *knlist_alloc(struct mtx *lock);
 void	knlist_detach(struct knlist *knl);
 void	knlist_add(struct knlist *knl, struct knote *kn, int islocked);
@@ -352,6 +374,7 @@ int 	kqfd_register(int fd, struct kevent *kev, struct thread *p,
 int	kqueue_add_filteropts(int filt, struct filterops *filtops);
 int	kqueue_del_filteropts(int filt);
 
+void kevq_thred_drain(struct kevq_thred *kevq_th);
 #else 	/* !_KERNEL */
 
 #include <sys/cdefs.h>

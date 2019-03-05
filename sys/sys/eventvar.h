@@ -40,27 +40,47 @@
 #define KQ_NEVENTS	8		/* minimize copy{in,out} calls */
 #define KQEXTENT	256		/* linear growth by this amount */
 
+struct kevq {
+	SLIST_ENTRY(kevq)	kevq_th_e; /* entry into kevq_thred's hashtable */
+	TAILQ_ENTRY(kevq)	kq_e;   /* entry into kqueue's list */
+	TAILQ_ENTRY(kevq)	kevq_th_tqe; /* entry into kevq_thred's TAILQ */
+	struct		kqueue *kq;     /* the kq that the kevq belongs to */
+	struct		kevq_thred *kevq_th; /* the thread that the kevq belongs to */
+	struct		mtx lock;		/* the lock for the kevq */
+	TAILQ_HEAD(, knote) kn_head;	/* list of pending knotes */
+	int		kn_count;				/* number of pending knotes */
+#define KEVQ_SLEEP	0x01
+#define KEVQ_CLOSING  0x02
+#define KEVQ_RDY	0x04
+	int		kevq_state;
+	int		kevq_refcnt;
+};
+
 struct kqueue {
 	struct		mtx kq_lock;
 	int		kq_refcnt;
-	TAILQ_ENTRY(kqueue)	kq_list;
-	TAILQ_HEAD(, knote)	kq_head;	/* list of pending event */
-	int		kq_count;		/* number of pending events */
 	struct		selinfo kq_sel;
-	struct		sigio *kq_sigio;
-	struct		filedesc *kq_fdp;
 	int		kq_state;
 #define KQ_SEL		0x01
-#define KQ_SLEEP	0x02
-#define KQ_FLUXWAIT	0x04			/* waiting for a in flux kn */
-#define KQ_ASYNC	0x08
+#define KQ_ASYNC	0x02
+#define	KQ_TASKSCHED	0x04			/* task scheduled */
+#define	KQ_TASKDRAIN	0x08			/* waiting for task to drain */
 #define KQ_CLOSING	0x10
-#define	KQ_TASKSCHED	0x20			/* task scheduled */
-#define	KQ_TASKDRAIN	0x40			/* waiting for task to drain */
+#define KQ_FLAG_INIT 0x20		/* kqueue has been initialized. this flag is set after the first kevent structure is processed */
+#define KQ_FLAG_MULTI 0x40		/* Multi-threaded mode */
+	TAILQ_ENTRY(kqueue)	kq_list;
+	struct		sigio *kq_sigio;
+	struct		filedesc *kq_fdp;
 	int		kq_knlistsize;		/* size of knlist */
 	struct		klist *kq_knlist;	/* list of knotes */
 	u_long		kq_knhashmask;		/* size of knhash */
 	struct		klist *kq_knhash;	/* hash table for knotes */
+	/* only-set: in multithreaded mode */
+	TAILQ_HEAD(, kevq)	kq_kevqlist; /* list of kevqs interested in the kqueue */
+	struct		kevq	*kq_ckevq; /* current kevq for multithreaded kqueue */
+	/* only-set: in single threaded mode */
+	struct		kevq *kq_kevq;
+	/* End only-set */
 	struct		task kq_task;
 	struct		ucred *kq_cred;
 };

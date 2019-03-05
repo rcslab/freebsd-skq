@@ -56,6 +56,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/umtx.h>
 #include <sys/vmmeter.h>
 #include <sys/cpuset.h>
+#include <sys/event.h>
 #ifdef	HWPMC_HOOKS
 #include <sys/pmckern.h>
 #endif
@@ -82,9 +83,9 @@ _Static_assert(offsetof(struct thread, td_flags) == 0xfc,
     "struct thread KBI td_flags");
 _Static_assert(offsetof(struct thread, td_pflags) == 0x104,
     "struct thread KBI td_pflags");
-_Static_assert(offsetof(struct thread, td_frame) == 0x478,
+_Static_assert(offsetof(struct thread, td_frame) == 0x478 + 0x8,
     "struct thread KBI td_frame");
-_Static_assert(offsetof(struct thread, td_emuldata) == 0x530,
+_Static_assert(offsetof(struct thread, td_emuldata) == 0x530 + 0x8,
     "struct thread KBI td_emuldata");
 _Static_assert(offsetof(struct proc, p_flag) == 0xb0,
     "struct proc KBI p_flag");
@@ -444,6 +445,9 @@ thread_free(struct thread *td)
 	cpu_thread_free(td);
 	if (td->td_kstack != 0)
 		vm_thread_dispose(td);
+	if (td->td_kevq_thred != NULL) {
+		kevq_thred_drain(td->td_kevq_thred);
+	}
 	callout_drain(&td->td_slpcallout);
 	uma_zfree(thread_zone, td);
 }
