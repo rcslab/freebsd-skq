@@ -332,6 +332,12 @@ kern_thr_exit(struct thread *td)
 	p = td->td_proc;
 
 	/*
+	 * Release the event queues
+	 */
+	if (td->td_kevq_thred != NULL)
+		kevq_thred_drain(td->td_kevq_thred);
+
+	/*
 	 * If all of the threads in a process call this routine to
 	 * exit (e.g. all threads call pthread_exit()), exactly one
 	 * thread should return to the caller to terminate the process

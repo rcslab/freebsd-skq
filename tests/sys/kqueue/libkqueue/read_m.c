@@ -22,31 +22,37 @@
 #include <semaphore.h>
 #include <pthread.h>
 
-#define THREAD_CNT (100)
-#define PACKET_CNT (5000)
 #define	FKQMULTI	_IO('f', 89)
 #define TEST_DEBUG
 
 struct thread_info {
     pthread_t thrd;
+    int can_crash;
+    pthread_mutex_t lock;
     int evcnt;
     int tid;
 };
 
+/*
+ * Read test
+ */
+
+#define THREAD_CNT (32)
+#define PACKET_CNT (1000)
+
 int g_kqfd;
 int g_sockfd[2];
-int g_end;
 struct thread_info g_thrd_info[THREAD_CNT];
 /* Test threads signals this upon receiving events */
 sem_t g_sem_driver;
 
-static int
-check_sched(void)
+static void
+check_sched(struct thread_info *info, int size)
 {
     int max = 0, min = 999999;
 
-    for(int i = 0; i < THREAD_CNT; i++) {
-        int cur = g_thrd_info[i].evcnt;
+    for(int i = 0; i < size; i++) {
+        int cur = info[i].evcnt;
         if (cur > max) {
             max = cur;
         }
@@ -55,33 +61,36 @@ check_sched(void)
         }
     }
 
+    if ((max - min) > 1) {
 #ifdef TEST_DEBUG
         printf("READ_M: check_sched: max difference is %d\n", max - min);
 #endif
-
-    return (max - min) <= 1;
+        abort();
+    }
 }
 
-static void
-socket_pop()
+static char
+socket_pop(int sockfd)
 {
-    char buf[1];
+    char buf;
 
     /* Drain the read buffer, then make sure there are no more events. */
 #ifdef TEST_DEBUG
     printf("READ_M: popping the read buffer\n");
 #endif
-    if (read(g_sockfd[0], &buf[0], 1) < 1)
+    if (read(sockfd, &buf, 1) < 1)
         err(1, "read(2)");
+
+    return buf;
 }
 
 static void
-socket_push()
+socket_push(int sockfd, char ch)
 {
 #ifdef TEST_DEBUG
-    printf("READ_M: pushing to socket\n");
+    printf("READ_M: pushing to socket %d\n", sockfd);
 #endif
-    if (write(g_sockfd[1], ".", 1) < 1) {
+    if (write(sockfd, &ch, 1) < 1) {
 #ifdef TEST_DEBUG
     printf("READ_M: write failed with %d\n", errno);
 #endif     
@@ -94,32 +103,30 @@ static void*
 test_socket_read_thrd(void* args)
 {
     struct thread_info *info = (struct thread_info *) args;
-
-    struct kevent kev;
-    EV_SET(&kev, g_sockfd[0], EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, &g_sockfd[0]);
-    kev.data = 1;
+    char dat;
+    struct kevent *ret;
 
     while (1) {
 #ifdef TEST_DEBUG
         printf("READ_M: thread %d waiting for events\n", info->tid); 
 #endif
-        kevent_cmp(&kev, kevent_get(g_kqfd));
+        ret = kevent_get(g_kqfd);
 #ifdef TEST_DEBUG
         printf("READ_M: thread %d woke up\n", info->tid); 
 #endif
-        socket_pop();
-        info->evcnt++;
 
+        dat = socket_pop(ret->ident);
+        free(ret);
+
+        if (dat == 'e')
+            break;
+
+        info->evcnt++;
+        
         /* signal the driver */
         sem_post(&g_sem_driver);
-
-        if (g_end) {
-#ifdef TEST_DEBUG
-    printf("READ_M: thread %d exiting...\n", info->tid);
-#endif   
-            break;
-        }
     }
+    
     pthread_exit(0);
 }
 
@@ -127,14 +134,16 @@ static void
 test_socket_read(void)
 {
     int error = 0;
+    const char *test_id = "[Multi]kevent(EVFILT_READ)";
+    test_begin(test_id);    
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, &g_sockfd[0]) < 0) 
+        err(1, "kevent_read socket");
+
     struct kevent kev;
     EV_SET(&kev, g_sockfd[0], EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, &g_sockfd[0]);
 
-    const char *test_id = "[Multi]kevent(EVFILT_READ)";
     sem_init(&g_sem_driver, 0, 0);
-    g_end = 0;
-
-    test_begin(test_id);
 
     error = kevent(g_kqfd, &kev, 1, NULL, 0, NULL);
 
@@ -162,61 +171,211 @@ test_socket_read(void)
 
     for(int i = 0; i < PACKET_CNT; i++) {
 #ifdef TEST_DEBUG
-    printf("READ_M: processing packet %d\n", i);
+        printf("READ_M: processing packet %d\n", i);
 #endif        
-        socket_push();
+        socket_push(g_sockfd[1], '.');
         /* wait for thread events */
         sem_wait(&g_sem_driver);
 
-        if (!check_sched()) {
-#ifdef TEST_DEBUG
-            printf("READ_M: check_sched failed...\n");
-#endif
-            g_end = 1;
-            error = 2;
-            break;
-        }
-
-        if ((i + THREAD_CNT) == PACKET_CNT - 1) {
-            g_end = 1;
-        }
+        check_sched(g_thrd_info, THREAD_CNT);
     }
 
-    /* shutdown the systems */
 
 #ifdef TEST_DEBUG
     printf("READ_M: finished testing, system shutting down...\n");
-#endif   
+#endif
+    for(int i = 0; i < PACKET_CNT; i++) {
+        socket_push(g_sockfd[1], 'e');
+    }
+
     for (int i = 0; i < THREAD_CNT; i++) {
         pthread_join(g_thrd_info[i].thrd, NULL);
     }
 
-    if (!error)
-        success();
-    else
-        err(error, "kevent");
+    EV_SET(&kev, g_sockfd[0], EVFILT_READ, EV_DELETE, 0, 0, &g_sockfd[0]);
+
+    error = kevent(g_kqfd, &kev, 1, NULL, 0, NULL);
+
+    if (error == -1) {
+#ifdef TEST_DEBUG
+        printf("READ_M: kevent delete failed with %d\n", errno);
+#endif   
+        err(1, "kevent_delete");     
+    }
+    
+    close(g_sockfd[0]);
+    close(g_sockfd[1]);
+
+    success();
 }
 
+
+/*
+ * Brutal test
+ */
+
+#define THREAD_BRUTE_CNT (32)
+#define SOCK_BRUTE_CNT (64)
+#define PACKET_BRUTE_CNT (10000)
+#define THREAD_EXIT_PROB (50)
+
+#define RAND_SLEEP (29)
+#define RAND_SEND_SLEEP (13)
+
+
+int brute_sockfd[SOCK_BRUTE_CNT][2];
+struct thread_info brute_threadinfo[THREAD_BRUTE_CNT];
+
+static void*
+test_socket_brutal_worker(void* args)
+{
+    struct thread_info *info = (struct thread_info *) args;
+    char dat;
+    struct kevent *ret;
+
+    while (1) {
+#ifdef TEST_DEBUG
+        printf("READ_M: thread %d waiting for events\n", info->tid); 
+#endif
+        ret = kevent_get(g_kqfd);
+#ifdef TEST_DEBUG
+        printf("READ_M: thread %d woke up\n", info->tid); 
+#endif
+
+        if ((rand() % 100) < THREAD_EXIT_PROB) {
+            pthread_mutex_lock(&info->lock);
+#ifdef TEST_DEBUG
+            printf("READ_M: thread %d trying to fake crash. Can crash: %d\n", info->tid, info->can_crash); 
+#endif
+            if (info->can_crash) {
+                pthread_create(&info->thrd, NULL, test_socket_brutal_worker, info);
+                pthread_mutex_unlock(&info->lock);
+                free(ret);
+                pthread_exit(0);
+            }
+            pthread_mutex_unlock(&info->lock);
+        }
+
+        dat = socket_pop(ret->ident);
+        free(ret);
+
+        if (dat == 'e')
+            break;
+
+        info->evcnt++;
+
+        usleep(rand() % RAND_SLEEP);
+    }
+#ifdef TEST_DEBUG
+        printf("READ_M: thread %d exiting...\n", info->tid); 
+#endif
+    pthread_exit(0);
+
+    return NULL;
+}
+
+static void
+test_socket_brutal()
+{
+    struct kevent kev;
+
+    const char *test_id = "[Multi]kevent(brutal)";
+
+    test_begin(test_id);
+
+    for (int i = 0; i < SOCK_BRUTE_CNT; i++) {
+
+        /* Create a connected pair of full-duplex sockets for testing socket events */
+        if (socketpair(AF_UNIX, SOCK_STREAM, 0, &brute_sockfd[i][0]) < 0) {
+            err(1, "kevent_socket"); 
+        }
+
+        
+        EV_SET(&kev, brute_sockfd[i][0], EVFILT_READ, EV_ADD, 0, 0, &brute_sockfd[i][0]);
+
+        if (kevent(g_kqfd, &kev, 1, NULL, 0, NULL) == -1) {
+            err(1, "kevent_brutal_add");     
+        }
+    }
+
+    srand(time(NULL));
+
+#ifdef TEST_DEBUG
+    printf("READ_M: creating %d threads...\n", THREAD_BRUTE_CNT);
+#endif
+    for (int i = 0; i < THREAD_BRUTE_CNT; i++) {
+        brute_threadinfo[i].tid = i;
+        brute_threadinfo[i].evcnt = 0;
+        brute_threadinfo[i].can_crash = ((i % 10) != 0);
+        pthread_create(&brute_threadinfo[i].thrd, NULL, test_socket_brutal_worker, &brute_threadinfo[i]);
+    }
+
+    sleep(3);
+
+    for(int i = 0; i < PACKET_BRUTE_CNT; i++) {
+#ifdef TEST_DEBUG
+    printf("READ_M: processing packet %d\n", i);
+#endif
+        socket_push(brute_sockfd[rand() % SOCK_BRUTE_CNT][1], '.');
+        usleep(rand() % RAND_SEND_SLEEP);
+    }
+
+    while (1) {
+        int sum = 0;
+        for (int i = 0; i < THREAD_BRUTE_CNT; i++) {
+            sum += brute_threadinfo[i].evcnt;
+        }
+
+        if (sum == PACKET_BRUTE_CNT) {
+            break;
+        }
+
+#ifdef TEST_DEBUG
+    printf("READ_M: waiting for all packets to finish processing. Cur: %d Tgt: %d\n", sum, PACKET_BRUTE_CNT);
+#endif
+        sleep(1);
+    }
+
+    /* shutdown the systems */
+#ifdef TEST_DEBUG
+    printf("READ_M: finished testing, system shutting down...\n");
+#endif
+    for (int i = 0; i < THREAD_BRUTE_CNT; i++) {
+        pthread_mutex_lock(&brute_threadinfo[i].lock);
+        brute_threadinfo[i].can_crash = 0;
+        pthread_mutex_unlock(&brute_threadinfo[i].lock);
+    }
+
+    for(int i = 0; i < THREAD_BRUTE_CNT; i++) {
+        socket_push(brute_sockfd[rand() % SOCK_BRUTE_CNT][1], 'e');
+    }
+
+    for (int i = 0; i < THREAD_BRUTE_CNT; i++) {
+        pthread_join(brute_threadinfo[i].thrd, NULL);
+    }
+
+    for (int i = 0; i < SOCK_BRUTE_CNT; i++) {
+        EV_SET(&kev, brute_sockfd[i][0], EVFILT_READ, EV_DELETE, 0, 0, &brute_sockfd[i][0]);
+
+        if (kevent(g_kqfd, &kev, 1, NULL, 0, NULL) == -1) {
+            err(1, "kevent_brutal_delete");     
+        }
+    }
+
+    success();
+}
 
 void
 test_evfilt_read_m()
 {
-    /* Create a connected pair of full-duplex sockets for testing socket events */
-    if (socketpair(AF_UNIX, SOCK_STREAM, 0, &g_sockfd[0]) < 0) 
-        abort();
-
     g_kqfd = kqueue();
     int error = ioctl(g_kqfd, FKQMULTI);
     if (error == -1) {
-#ifdef TEST_DEBUG
-        printf("READ_M: ioctl failed with %d\n", errno);
-#endif
         err(1, "ioctl");
     }
 
     test_socket_read();
+    test_socket_brutal();
 
     close(g_kqfd);
-    close(g_sockfd[0]);
-    close(g_sockfd[1]);
 }

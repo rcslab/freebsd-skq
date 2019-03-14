@@ -68,6 +68,10 @@ __FBSDID("$FreeBSD$");
 #include <vm/uma.h>
 #include <sys/eventhandler.h>
 
+#ifdef SMP 
+extern struct cpu_group *cpu_top; /* CPU topology */
+#endif
+
 /*
  * Asserts below verify the stability of struct thread and struct proc
  * layout, as exposed by KBI to modules.  On head, the KBI is allowed
@@ -445,9 +449,6 @@ thread_free(struct thread *td)
 	cpu_thread_free(td);
 	if (td->td_kstack != 0)
 		vm_thread_dispose(td);
-	if (td->td_kevq_thred != NULL) {
-		kevq_thred_drain(td->td_kevq_thred);
-	}
 	callout_drain(&td->td_slpcallout);
 	uma_zfree(thread_zone, td);
 }

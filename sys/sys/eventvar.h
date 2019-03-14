@@ -75,12 +75,8 @@ struct kqueue {
 	struct		klist *kq_knlist;	/* list of knotes */
 	u_long		kq_knhashmask;		/* size of knhash */
 	struct		klist *kq_knhash;	/* hash table for knotes */
-	/* only-set: in multithreaded mode */
 	TAILQ_HEAD(, kevq)	kq_kevqlist; /* list of kevqs interested in the kqueue */
 	struct		kevq	*kq_ckevq; /* current kevq for multithreaded kqueue */
-	/* only-set: in single threaded mode */
-	struct		kevq *kq_kevq;
-	/* End only-set */
 	struct		task kq_task;
 	struct		ucred *kq_cred;
 };
