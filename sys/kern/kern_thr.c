@@ -335,7 +335,7 @@ kern_thr_exit(struct thread *td)
 	 * Release the event queues
 	 */
 	if (td->td_kevq_thred != NULL)
-		kevq_thred_drain(td->td_kevq_thred);
+		kevq_thred_drain(td->td_kevq_thred, td);
 
 	/*
 	 * If all of the threads in a process call this routine to

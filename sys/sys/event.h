@@ -224,7 +224,7 @@ SLIST_HEAD(klist, knote);
 struct kqueue;
 TAILQ_HEAD(kqlist, kqueue);
 struct kevq;
-SLIST_HEAD(kevqlist, kevq);
+LIST_HEAD(kevqlist, kevq);
 
 struct knlist {
 	struct	klist	kl_list;
@@ -275,9 +275,15 @@ struct filterops {
 	void	(*f_touch)(struct knote *kn, struct kevent *kev, u_long type);
 };
 
-/* The ioctl to set multithreaded mode
+/*
+ * The ioctl to set multithreaded mode
  */
-#define	FKQMULTI	_IO('f', 89)
+#define	FKQMULTI	_IOW('f', 89, int)
+
+/*
+ * KQ scheduler flags
+ */
+#define KQ_SCHED_QUEUE 	0x1 /* make kq affinitize the knote depending on the cpu it's scheduled */
 
 /*
  * An in-flux knote cannot be dropped from its kq while the kq is
@@ -294,8 +300,11 @@ struct knote {
 	struct			knlist *kn_knlist;	/* f_attach populated */
 	TAILQ_ENTRY(knote)	kn_tqe;
 	struct			kqueue *kn_kq;	/* which kqueue we are on */
-	struct			kevq *kn_org_kevq; /* the kevq that registered the knote */
 	struct			kevq *kn_kevq; /* the kevq the knote is on */
+	/* used by the scheduler */
+	struct			kevq *kn_org_kevq; /* the kevq that registered the knote */
+	struct		kqdom	*kn_kqd; /* the kqdomain the knote belongs to */
+	/* end scheduler */
 	struct 			kevent kn_kevent;
 	void			*kn_hook;
 	int			kn_hookid;
@@ -338,7 +347,7 @@ struct kevent_copyops {
 struct kevq_thred {
 	u_long		kevq_hashmask;		/* hash mask for kevqs */
 	struct		kevqlist *kevq_hash;	    /* hash table for kevqs */
-	TAILQ_HEAD(, kevq) kevq_tq;
+	struct 		kevqlist  kevq_list;
 	struct		mtx lock;		/* the lock for the kevq*/
 };
 
@@ -374,7 +383,7 @@ int 	kqfd_register(int fd, struct kevent *kev, struct thread *p,
 int	kqueue_add_filteropts(int filt, struct filterops *filtops);
 int	kqueue_del_filteropts(int filt);
 
-void kevq_thred_drain(struct kevq_thred *kevq_th);
+void kevq_thred_drain(struct kevq_thred *kevq_th, struct thread *td);
 #else 	/* !_KERNEL */
 
 #include <sys/cdefs.h>

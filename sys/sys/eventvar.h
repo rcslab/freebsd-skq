@@ -41,10 +41,12 @@
 #define KQEXTENT	256		/* linear growth by this amount */
 
 struct kevq {
-	SLIST_ENTRY(kevq)	kevq_th_e; /* entry into kevq_thred's hashtable */
-	TAILQ_ENTRY(kevq)	kq_e;   /* entry into kqueue's list */
-	TAILQ_ENTRY(kevq)	kevq_th_tqe; /* entry into kevq_thred's TAILQ */
-	struct		kqueue *kq;     /* the kq that the kevq belongs to */
+	LIST_ENTRY(kevq)	kevq_th_e; /* entry into kevq_thred's hashtable */
+	LIST_ENTRY(kevq)	kqd_e; /* entry into kqdomain */
+	LIST_ENTRY(kevq)	kq_e; /* entry into kq */
+	LIST_ENTRY(kevq)	kevq_th_tqe; /* entry into kevq_thred's kevq_list */
+	struct		kqueue	*kq;     /* the kq that the kevq belongs to */
+	struct		kqdom	*kevq_kqd; /* the kq domain the kevq is on */
 	struct		kevq_thred *kevq_th; /* the thread that the kevq belongs to */
 	struct		mtx lock;		/* the lock for the kevq */
 	TAILQ_HEAD(, knote) kn_head;	/* list of pending knotes */
@@ -54,6 +56,26 @@ struct kevq {
 #define KEVQ_RDY	0x04
 	int		kevq_state;
 	int		kevq_refcnt;
+
+	/* Used by the scheduler */
+	struct timespec kevq_avg_lat;
+	struct timespec kevq_last_kev;
+	int kevq_last_nkev;
+};
+
+/* TODO: assumed that threads don't get rescheduled across cores */
+struct kqdom {
+	struct mtx	kqd_lock;
+	TAILQ_ENTRY(kqdom) child_e;
+	struct kqdom *parent;
+	int id;
+	struct timespec kqd_avg_lat;
+	cpuset_t cpu_mask;
+	int num_children;
+	int num_kevq;
+	TAILQ_HEAD(, kqdom) children;
+	struct kevqlist kqd_kevqlist; /* list of kevqs on the kdomain, only set for leaf domains*/
+	struct kevq *kqd_ckevq;
 };
 
 struct kqueue {
@@ -75,10 +97,15 @@ struct kqueue {
 	struct		klist *kq_knlist;	/* list of knotes */
 	u_long		kq_knhashmask;		/* size of knhash */
 	struct		klist *kq_knhash;	/* hash table for knotes */
-	TAILQ_HEAD(, kevq)	kq_kevqlist; /* list of kevqs interested in the kqueue */
-	struct		kevq	*kq_ckevq; /* current kevq for multithreaded kqueue */
+	struct		kevq *kq_kevq; /* the kevq for kq, always created, act as buffer queue in multithreaded mode */
 	struct		task kq_task;
 	struct		ucred *kq_cred;
+
+	/* scheduling stuff */
+	struct 		kevqlist  kq_kevqlist; /* list of kevqs for fall-back round robbin */
+	struct		kqdom 	*kq_kqd; /* root domain */
+	struct		kevq	*kq_ckevq; /* current kevq for multithreaded kqueue, used for round robbin */
+	int		kq_sched_flags; /* Scheduler flag for the KQ */
 };
 
 #endif /* !_SYS_EVENTVAR_H_ */

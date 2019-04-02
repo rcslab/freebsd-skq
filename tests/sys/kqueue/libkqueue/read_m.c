@@ -21,14 +21,27 @@
 #include <sys/ioctl.h>
 #include <semaphore.h>
 #include <pthread.h>
+#include <sys/types.h>
+#include <sys/sysctl.h>
+#include <pthread_np.h>
 
-#define	FKQMULTI	_IO('f', 89)
-#define TEST_DEBUG
+/*
+ * The ioctl to set multithreaded mode
+ */
+#define	FKQMULTI	_IOW('f', 89, int)
+
+/*
+ * KQ scheduler flags
+ */
+#define KQ_SCHED_QUEUE 	0x1 /* make kq affinitize the knote depending on the cpu it's scheduled */
+
+//#define TEST_DEBUG
 
 struct thread_info {
     pthread_t thrd;
     int can_crash;
     pthread_mutex_t lock;
+    int group_id;
     int evcnt;
     int tid;
 };
@@ -37,8 +50,8 @@ struct thread_info {
  * Read test
  */
 
-#define THREAD_CNT (32)
-#define PACKET_CNT (1000)
+#define THREAD_CNT (16)
+#define PACKET_CNT (1600)
 
 int g_kqfd;
 int g_sockfd[2];
@@ -98,7 +111,9 @@ socket_push(int sockfd, char ch)
     }
 }
 
-/* for multi threaded read */
+/***************************
+ * Read test
+ ***************************/
 static void*
 test_socket_read_thrd(void* args)
 {
@@ -127,6 +142,11 @@ test_socket_read_thrd(void* args)
         sem_post(&g_sem_driver);
     }
     
+#ifdef TEST_DEBUG
+        printf("READ_M: thread %d exiting\n", info->tid); 
+#endif
+
+    sem_post(&g_sem_driver);
     pthread_exit(0);
 }
 
@@ -184,14 +204,19 @@ test_socket_read(void)
 #ifdef TEST_DEBUG
     printf("READ_M: finished testing, system shutting down...\n");
 #endif
-    for(int i = 0; i < PACKET_CNT; i++) {
+    for(int i = 0; i < THREAD_CNT; i++) {
         socket_push(g_sockfd[1], 'e');
+
+        sem_wait(&g_sem_driver);
     }
 
     for (int i = 0; i < THREAD_CNT; i++) {
         pthread_join(g_thrd_info[i].thrd, NULL);
     }
 
+#ifdef TEST_DEBUG
+    printf("READ_M: clearing kevent...\n");
+#endif
     EV_SET(&kev, g_sockfd[0], EVFILT_READ, EV_DELETE, 0, 0, &g_sockfd[0]);
 
     error = kevent(g_kqfd, &kev, 1, NULL, 0, NULL);
@@ -202,7 +227,205 @@ test_socket_read(void)
 #endif   
         err(1, "kevent_delete");     
     }
+#ifdef TEST_DEBUG
+    printf("READ_M: closing sockets...\n");
+#endif
+    close(g_sockfd[0]);
+    close(g_sockfd[1]);
+
+    success();
+}
+
+/***************************
+ * Queue test
+ ***************************/
+
+#define THREAD_QUEUE_CNT (4)
+#define PACKET_QUEUE_CNT (1000)
+
+static int
+get_ncpu()
+{
+    int mib[4];
+    int numcpu;
+    size_t len = sizeof(numcpu);
+
+    mib[0] = CTL_HW;
+    mib[1] = HW_NCPU;
+
+    sysctl(mib, 2, &numcpu, &len, NULL, 0);
+
+    if (numcpu < 1)
+    {
+        err(1, "< 1 cpu detected");
+    }
+
+    return numcpu;
+}
+
+static void*
+test_socket_queue_thrd(void* args)
+{
+    struct thread_info *info = (struct thread_info *) args;
+    char dat;
+    struct kevent *ret;
+
+    while (1) {
+#ifdef TEST_DEBUG
+        printf("READ_M: thread %d waiting for events\n", info->tid); 
+#endif
+        ret = kevent_get(g_kqfd);
+#ifdef TEST_DEBUG
+        printf("READ_M: thread %d woke up\n", info->tid); 
+#endif
+
+        dat = socket_pop(ret->ident);
+        free(ret);
+
+        if (dat == 'e')
+            break;
+
+        info->evcnt++;
+        
+        /* signal the driver */
+        sem_post(&g_sem_driver);
+    }
     
+#ifdef TEST_DEBUG
+        printf("READ_M: thread %d exiting\n", info->tid); 
+#endif
+
+    sem_post(&g_sem_driver);
+    pthread_exit(0);
+}
+
+static void
+test_socket_queue(void)
+{
+    int error = 0;
+    const char *test_id = "[Multi][Queue]kevent(EVFILT_READ)";
+
+    test_begin(test_id);
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, &g_sockfd[0]) < 0) 
+        err(1, "kevent_read socket");
+
+    struct kevent kev;
+    EV_SET(&kev, g_sockfd[0], EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, &g_sockfd[0]);
+
+    sem_init(&g_sem_driver, 0, 0);
+
+    error = kevent(g_kqfd, &kev, 1, NULL, 0, NULL);
+
+    if (error == -1) {
+#ifdef TEST_DEBUG
+        printf("READ_M: kevent add failed with %d\n", errno);
+#endif   
+        err(1, "kevent_add");     
+    }
+
+    cpuset_t cpuset;
+    int ncpu = get_ncpu();
+    int tid = 0;
+#ifdef TEST_DEBUG
+    printf("READ_M: detected %d cores...\n", ncpu);
+#endif
+
+    struct thread_info **group = malloc(sizeof(struct thread_info*) * ncpu);
+    for (int i = 0; i < ncpu; i++) {
+        group[i] = malloc(sizeof(struct thread_info) * THREAD_QUEUE_CNT);
+        for (int j = 0; j < THREAD_QUEUE_CNT; j++) {
+            group[i][j].tid = tid;
+            tid++;
+            group[i][j].evcnt = 0;
+            group[i][j].group_id = i;
+            pthread_create(&group[i][j].thrd, NULL, test_socket_queue_thrd, &group[i][j]);
+            CPU_ZERO(&cpuset);
+            CPU_SET(i, &cpuset);
+            if (pthread_setaffinity_np(group[i][j].thrd, sizeof(cpuset_t), &cpuset) < 0) {
+                err(1, "thread_affinity");
+            }
+#ifdef TEST_DEBUG
+    printf("READ_M: created and affinitized thread %d to core group %d\n", group[i][j].tid, i);
+#endif
+        }
+    }
+
+#ifdef TEST_DEBUG
+    printf("READ_M: waiting for threads to wait on KQ...\n");
+#endif
+    
+    sleep(3);
+
+    int affinity_group = -1;
+    for(int k = 1; k <= PACKET_QUEUE_CNT; k++) {
+#ifdef TEST_DEBUG
+        printf("READ_M: processing packet %d\n", k);
+#endif        
+        socket_push(g_sockfd[1], '.');
+        /* wait for thread events */
+        sem_wait(&g_sem_driver);
+
+        /* basically only one group should get events, do this for now, ideally we can have a table that remembers each knote's affinity*/
+        for(int i = 0; i < ncpu; i++) {
+            int sum = 0;
+            for (int j = 0; j < THREAD_QUEUE_CNT; j++) {
+                sum += group[i][j].evcnt;
+            }
+            if (sum != 0 && affinity_group == -1) {
+                affinity_group = i;
+            }
+
+#ifdef TEST_DEBUG
+        printf("READ_M: group %d sum %d, affinity group: %d\n", i, sum, affinity_group);
+#endif    
+
+            if (i == affinity_group) {   
+                if (sum != k) {
+                    err(1, "affinity group sum != 1");
+                }
+            } else {
+                if (sum != 0) {
+                    err(1, "non-affinity group sum != 0");
+                }
+            }
+        }   
+    }
+
+
+#ifdef TEST_DEBUG
+    printf("READ_M: finished testing, system shutting down...\n");
+#endif
+    for(int i = 0; i < THREAD_QUEUE_CNT * ncpu; i++) {
+        socket_push(g_sockfd[1], 'e');
+
+        sem_wait(&g_sem_driver);
+    }
+
+    for (int i = 0; i < ncpu; i++) {
+        for (int j = 0; j < THREAD_QUEUE_CNT; j++) {
+            pthread_join(group[i][j].thrd, NULL);
+        }
+        free(group[i]);
+    }
+    free(group);
+
+#ifdef TEST_DEBUG
+    printf("READ_M: clearing kevent...\n");
+#endif
+    EV_SET(&kev, g_sockfd[0], EVFILT_READ, EV_DELETE, 0, 0, &g_sockfd[0]);
+
+    error = kevent(g_kqfd, &kev, 1, NULL, 0, NULL);
+
+    if (error == -1) {
+#ifdef TEST_DEBUG
+        printf("READ_M: kevent delete failed with %d\n", errno);
+#endif   
+        err(1, "kevent_delete");     
+    }
+#ifdef TEST_DEBUG
+    printf("READ_M: closing sockets...\n");
+#endif
     close(g_sockfd[0]);
     close(g_sockfd[1]);
 
@@ -210,17 +433,16 @@ test_socket_read(void)
 }
 
 
-/*
+/***************************
  * Brutal test
- */
-
+ ***************************/
 #define THREAD_BRUTE_CNT (32)
 #define SOCK_BRUTE_CNT (64)
 #define PACKET_BRUTE_CNT (10000)
 #define THREAD_EXIT_PROB (50)
 
 #define RAND_SLEEP (29)
-#define RAND_SEND_SLEEP (13)
+#define RAND_SEND_SLEEP (7)
 
 
 int brute_sockfd[SOCK_BRUTE_CNT][2];
@@ -365,16 +587,28 @@ test_socket_brutal()
     success();
 }
 
+
 void
 test_evfilt_read_m()
 {
+    int flags = 0;
     g_kqfd = kqueue();
-    int error = ioctl(g_kqfd, FKQMULTI);
+    int error = ioctl(g_kqfd, FKQMULTI, &flags);
     if (error == -1) {
         err(1, "ioctl");
     }
 
     test_socket_read();
+    test_socket_brutal();
+
+    close(g_kqfd);
+
+    /* test scheduler */
+    flags = KQ_SCHED_QUEUE;
+    g_kqfd = kqueue();
+    error = ioctl(g_kqfd, FKQMULTI, &flags);
+
+    test_socket_queue();
     test_socket_brutal();
 
     close(g_kqfd);
