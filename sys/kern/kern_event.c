@@ -1738,8 +1738,8 @@ findkn:
 				filedesc_unlock = 0;
 			}
 			kn->kn_fluxwait = 1;
-			KN_FLUX_UNLOCK(kn);
-			msleep(kn, &kq->kq_lock, PSOCK | PDROP, "kqflxwt", 0);
+			KQ_UNLOCK(kq);
+			msleep(kn, &kn->kn_fluxlock, PSOCK | PDROP, "kqflxwt", 0);
 	
 			if (fp != NULL) {
 				fdrop(fp, td);
@@ -2558,10 +2558,12 @@ retry:
 				knote_flux_wakeup(kn);
 			}
 			kn->kn_fluxwait = 1;
-			KN_FLUX_UNLOCK(kn);
+			KEVQ_UNLOCK(kevq);
 			CTR3(KTR_KQ, "kqueue_scan: td %d fluxwait on kn %p marker %p", td->td_tid, kn, marker);
-			error = msleep(kn, &kevq->lock, PSOCK,
+			error = msleep(kn, &kn->kn_fluxlock, PSOCK | PDROP,
 			    "kevqflxwt3", 0);
+
+			KEVQ_LOCK(kevq);
 
 			CTR3(KTR_KQ, "kqueue_scan: td %d fluxwait WAKEUP kn %p marker %p", td->td_tid, kn, marker);
 			continue;
@@ -2886,8 +2888,11 @@ kevq_drain(struct kevq *kevq)
 		if (kn_in_flux(kn)) {
 			kn->kn_fluxwait = 1;
 			CTR2(KTR_KQ, "kevq_drain %p fluxwait knote %p", kevq, kn);
-			KN_FLUX_UNLOCK(kn);
-			msleep(kn, &kevq->lock, PSOCK, "kevqclose2", 0);
+
+			KEVQ_UNLOCK(kevq);
+			msleep(kn, &kn->kn_fluxlock, PSOCK | PDROP, "kevqclose2", 0);
+			KEVQ_LOCK(kevq);
+
 			continue;
 		}
 
@@ -2991,11 +2996,15 @@ kqueue_drain(struct kqueue *kq, struct kevq *kevq, struct thread *td)
 	// destroy knotes first
 	for (i = 0; i < kq->kq_knlistsize; i++) {
 		while ((kn = SLIST_FIRST(&kq->kq_knlist[i])) != NULL) {
+			KQ_OWNED(kq);
 			KN_FLUX_LOCK(kn);
 			if (kn_in_flux(kn)) {
 				kn->kn_fluxwait = 1;
-				KN_FLUX_UNLOCK(kn);
-				msleep(kn, &kq->kq_lock, PSOCK, "kqclo1", 0);
+
+				KQ_UNLOCK(kq);
+				msleep(kn, &kn->kn_fluxlock, PSOCK | PDROP, "kqclo1", 0);
+				KQ_LOCK(kq);
+
 				continue;
 			}
 			knote_enter_flux(kn);
@@ -3008,11 +3017,15 @@ kqueue_drain(struct kqueue *kq, struct kevq *kevq, struct thread *td)
 	if (kq->kq_knhashmask != 0) {
 		for (i = 0; i <= kq->kq_knhashmask; i++) {
 			while ((kn = SLIST_FIRST(&kq->kq_knhash[i])) != NULL) {
+				KQ_OWNED(kq);
 				KN_FLUX_LOCK(kn);
 				if (kn_in_flux(kn)) {
 					kn->kn_fluxwait = 1;
-					KN_FLUX_UNLOCK(kn);
-					msleep(kn, &kq->kq_lock, PSOCK, "kqclo2", 0);
+
+					KQ_UNLOCK(kq);
+					msleep(kn, &kn->kn_fluxlock, PSOCK | PDROP, "kqclo2", 0);
+					KQ_LOCK(kq);
+
 					continue;
 				}
 				knote_enter_flux(kn);
@@ -3535,8 +3548,9 @@ again:		/* need to reacquire lock since we have dropped it */
 		KASSERT(kn_in_flux(kn), ("knote removed w/o list lock"));
 		knl->kl_unlock(knl->kl_lockarg);
 		kn->kn_fluxwait = 1;
-		KN_FLUX_UNLOCK(kn);
-		msleep(kn, &kq->kq_lock, PSOCK | PDROP, "kqkclr", 0);
+		KQ_UNLOCK(kq);
+		msleep(kn, &kn->kn_fluxlock, PSOCK | PDROP, "kqkclr", 0);
+
 		kq = NULL;
 		goto again;
 	}
@@ -3582,8 +3596,11 @@ again:
 				if (influx)
 					knote_flux_wakeup(kn);
 				kn->kn_fluxwait = 1;
-				KN_FLUX_UNLOCK(kn);
-				msleep(kn, &kq->kq_lock, PSOCK, "kqflxwt4", 0);
+
+				KQ_UNLOCK(kq);
+				msleep(kn, &kn->kn_fluxlock, PSOCK | PDROP, "kqflxwt4", 0);
+				KQ_LOCK(kq);
+				
 				goto again;
 			}
 			knote_enter_flux(kn);
