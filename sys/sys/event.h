@@ -283,7 +283,11 @@ struct filterops {
 /*
  * KQ scheduler flags
  */
-#define KQ_SCHED_QUEUE 	0x1 /* make kq affinitize the knote depending on the cpu it's scheduled */
+#define KQ_SCHED_QUEUE 	0x01 /* make kq affinitize the knote depending on the first cpu it's scheduled to */
+#define KQ_SCHED_QUEUE_CPU 0x02 /* make kq affinitize the knote depending on the runtime cpu it's scheduled to */
+#define KQ_SCHED_WORK_STEALING 0x04
+#define KQ_SCHED_BEST_OF_N 0x08
+#define KQ_SCHED_GREEDY 0x16
 
 /*
  * An in-flux knote cannot be dropped from its kq while the kq is
@@ -299,6 +303,7 @@ struct knote {
 	SLIST_ENTRY(knote)	kn_selnext;	/* for struct selinfo */
 	struct			knlist *kn_knlist;	/* f_attach populated */
 	TAILQ_ENTRY(knote)	kn_tqe;
+	TAILQ_ENTRY(knote) 	kn_wse; /* for work stealing queue */
 	struct			kqueue *kn_kq;	/* which kqueue we are on */
 	struct			kevq *kn_kevq; /* the kevq the knote is on */
 	/* used by the scheduler */
@@ -316,6 +321,7 @@ struct knote {
 #define KN_MARKER	0x20			/* ignore this knote */
 #define KN_KQUEUE	0x40			/* this knote belongs to a kq */
 #define	KN_SCAN		0x100			/* flux set in kqueue_scan() */
+#define KN_REQUEUE 	0x200			/* knote has triggered and is requeued to the current queue */
 	int			kn_fluxwait;
 	int			kn_influx;
 	struct 		mtx kn_fluxlock;

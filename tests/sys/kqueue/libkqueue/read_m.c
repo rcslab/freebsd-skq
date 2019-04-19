@@ -33,13 +33,18 @@
 /*
  * KQ scheduler flags
  */
-#define KQ_SCHED_QUEUE 	0x1 /* make kq affinitize the knote depending on the cpu it's scheduled */
+#define KQ_SCHED_QUEUE 	0x01 /* make kq affinitize the knote depending on the first cpu it's scheduled to */
+#define KQ_SCHED_QUEUE_CPU 0x02 /* make kq affinitize the knote depending on the runtime cpu it's scheduled to */
+#define KQ_SCHED_WORK_STEALING 0x04
+#define KQ_SCHED_BEST_OF_N 0x08
+#define KQ_SCHED_GREEDY 0x16
 
 //#define TEST_DEBUG
 
 struct thread_info {
     pthread_t thrd;
     int can_crash;
+    int ws_master;
     pthread_mutex_t lock;
     int group_id;
     int evcnt;
@@ -89,7 +94,7 @@ socket_pop(int sockfd)
 
     /* Drain the read buffer, then make sure there are no more events. */
 #ifdef TEST_DEBUG
-    printf("READ_M: popping the read buffer\n");
+    printf("READ_M: popping the read buffer of sock %d\n", sockfd);
 #endif
     if (read(sockfd, &buf, 1) < 1)
         err(1, "read(2)");
@@ -432,6 +437,139 @@ test_socket_queue(void)
     success();
 }
 
+/***************************
+ * WS test
+ ***************************/
+#define SOCK_WS_CNT (1000)
+
+volatile int ws_good = 0;
+
+static void*
+test_socket_ws_worker(void* args)
+{
+    struct thread_info *info = (struct thread_info *) args;
+    char dat;
+    int ws_num = 0;
+    struct kevent *ret;
+
+    while (1) {
+#ifdef TEST_DEBUG
+        printf("READ_M: thread %d waiting for events\n", info->tid); 
+#endif
+        ret = kevent_get(g_kqfd);
+#ifdef TEST_DEBUG
+        printf("READ_M: thread %d woke up\n", info->tid); 
+#endif
+
+        dat = socket_pop(ret->ident);
+        free(ret);
+
+        if (info->ws_master == 0) {
+            /*if we are the master, wait for slave to signal us*/
+            while(!ws_good) {
+                usleep(500);
+            }
+            break;
+        } else {
+            ws_num++;
+            if (ws_num == SOCK_WS_CNT - 1) {
+                ws_good = 1;
+                break;
+            }
+        }
+    }
+    
+#ifdef TEST_DEBUG
+        printf("READ_M: thread %d exiting\n", info->tid); 
+#endif
+    pthread_exit(0);
+}
+
+int ws_sockfd[SOCK_WS_CNT][2];
+
+static void
+test_socket_ws()
+{
+    struct kevent kev;
+    struct thread_info thrd_info[2];
+    const char *test_id = "[Multi][WS]kevent(evfilt)";
+    cpuset_t cpuset;
+    test_begin(test_id);
+
+    for (int i = 0; i < SOCK_WS_CNT; i++) {
+
+        /* Create a connected pair of full-duplex sockets for testing socket events */
+        if (socketpair(AF_UNIX, SOCK_STREAM, 0, &ws_sockfd[i][0]) < 0) {
+            err(1, "kevent_socket"); 
+        }
+        
+        EV_SET(&kev, ws_sockfd[i][0], EVFILT_READ, EV_ADD, 0, 0, &ws_sockfd[i][0]);
+
+        if (kevent(g_kqfd, &kev, 1, NULL, 0, NULL) == -1) {
+            err(1, "kevent_ws_add");     
+        }
+    }
+
+    srand(time(NULL));
+
+#ifdef TEST_DEBUG
+    printf("READ_M: creating master thread...\n");
+#endif
+    for (int i = 0; i < 1; i++) {
+        thrd_info[i].tid = i;
+        thrd_info[i].ws_master = i;
+        pthread_create(&thrd_info[i].thrd, NULL, test_socket_ws_worker, &thrd_info[i]);
+        CPU_ZERO(&cpuset);
+        CPU_SET(0, &cpuset);
+        if (pthread_setaffinity_np(thrd_info[i].thrd, sizeof(cpuset_t), &cpuset) < 0) {
+                err(1, "thread_affinity");
+        }
+    }
+
+    sleep(3);
+
+    for(int i = 0; i < SOCK_WS_CNT; i++) {
+#ifdef TEST_DEBUG
+    printf("READ_M: pusing 1 packet to sock %d\n", i);
+#endif
+        socket_push(ws_sockfd[i][1], '.');
+    }
+
+    sleep(1);
+
+    for(int i = 1; i < 2; i++) {
+#ifdef TEST_DEBUG
+    printf("READ_M: creating slave thread...\n");
+#endif
+        thrd_info[i].tid = i;
+        thrd_info[i].ws_master = i;
+        pthread_create(&thrd_info[i].thrd, NULL, test_socket_ws_worker, &thrd_info[i]);
+        CPU_ZERO(&cpuset);
+        CPU_SET(0, &cpuset);
+        if (pthread_setaffinity_np(thrd_info[i].thrd, sizeof(cpuset_t), &cpuset) < 0) {
+                err(1, "thread_affinity");
+        }
+    }
+
+    /* shutdown the systems */
+#ifdef TEST_DEBUG
+    printf("READ_M: waiting for threads to exit...\n");
+#endif
+    for (int i = 0; i < 2; i++) {
+        pthread_join(thrd_info[i].thrd, NULL);
+    }
+
+    for (int i = 0; i < SOCK_WS_CNT; i++) {
+        EV_SET(&kev, ws_sockfd[i][0], EVFILT_READ, EV_DELETE, 0, 0, &ws_sockfd[i][0]);
+
+        if (kevent(g_kqfd, &kev, 1, NULL, 0, NULL) == -1) {
+            err(1, "kevent_ws_delete");     
+        }
+    }
+
+    success();
+}
+
 
 /***************************
  * Brutal test
@@ -465,6 +603,9 @@ test_socket_brutal_worker(void* args)
 #endif
 
         if ((rand() % 100) < THREAD_EXIT_PROB) {
+#ifdef TEST_DEBUG
+        printf("READ_M: thread %d checking fake crash\n", info->tid); 
+#endif
             pthread_mutex_lock(&info->lock);
 #ifdef TEST_DEBUG
             printf("READ_M: thread %d trying to fake crash. Can crash: %d\n", info->tid, info->can_crash); 
@@ -477,6 +618,10 @@ test_socket_brutal_worker(void* args)
             }
             pthread_mutex_unlock(&info->lock);
         }
+
+#ifdef TEST_DEBUG
+        printf("READ_M: thread %d ident: %ld\n", info->tid, ret->ident); 
+#endif
 
         dat = socket_pop(ret->ident);
         free(ret);
@@ -529,6 +674,7 @@ test_socket_brutal()
         brute_threadinfo[i].tid = i;
         brute_threadinfo[i].evcnt = 0;
         brute_threadinfo[i].can_crash = ((i % 10) != 0);
+        pthread_mutex_init(&brute_threadinfo[i].lock, NULL);
         pthread_create(&brute_threadinfo[i].thrd, NULL, test_socket_brutal_worker, &brute_threadinfo[i]);
     }
 
@@ -574,6 +720,7 @@ test_socket_brutal()
 
     for (int i = 0; i < THREAD_BRUTE_CNT; i++) {
         pthread_join(brute_threadinfo[i].thrd, NULL);
+        pthread_mutex_destroy(&brute_threadinfo[i].lock);
     }
 
     for (int i = 0; i < SOCK_BRUTE_CNT; i++) {
@@ -609,6 +756,23 @@ test_evfilt_read_m()
     error = ioctl(g_kqfd, FKQMULTI, &flags);
 
     test_socket_queue();
+    test_socket_brutal();
+
+    close(g_kqfd);
+
+    flags = KQ_SCHED_BEST_OF_N;
+    g_kqfd = kqueue();
+    error = ioctl(g_kqfd, FKQMULTI, &flags);
+
+    test_socket_brutal();
+
+    close(g_kqfd);
+
+    flags = KQ_SCHED_WORK_STEALING;
+    g_kqfd = kqueue();
+    error = ioctl(g_kqfd, FKQMULTI, &flags);
+    
+    test_socket_ws();
     test_socket_brutal();
 
     close(g_kqfd);

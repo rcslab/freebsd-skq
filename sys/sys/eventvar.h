@@ -40,9 +40,10 @@
 #define KQ_NEVENTS	8		/* minimize copy{in,out} calls */
 #define KQEXTENT	256		/* linear growth by this amount */
 
+#define KQDOM_EXTENT_FACTOR 8 /* linear growth by this amount */
+
 struct kevq {
 	LIST_ENTRY(kevq)	kevq_th_e; /* entry into kevq_thred's hashtable */
-	LIST_ENTRY(kevq)	kqd_e; /* entry into kqdomain */
 	LIST_ENTRY(kevq)	kq_e; /* entry into kq */
 	LIST_ENTRY(kevq)	kevq_th_tqe; /* entry into kevq_thred's kevq_list */
 	struct		kqueue	*kq;     /* the kq that the kevq belongs to */
@@ -58,42 +59,50 @@ struct kevq {
 	int		kevq_refcnt;
 
 	/* Used by the scheduler */
-	struct timespec kevq_avg_lat;
+	unsigned long kevq_avg_lat;
 	struct timespec kevq_last_kev;
 	int kevq_last_nkev;
 };
 
 /* TODO: assumed that threads don't get rescheduled across cores */
 struct kqdom {
+	/* static */
 	struct mtx	kqd_lock;
-	TAILQ_ENTRY(kqdom) child_e;
 	struct kqdom *parent;
 	int id;
-	struct timespec kqd_avg_lat;
 	cpuset_t cpu_mask;
 	int num_children;
-	int num_kevq;
-	TAILQ_HEAD(, kqdom) children;
-	struct kevqlist kqd_kevqlist; /* list of kevqs on the kdomain, only set for leaf domains*/
-	struct kevq *kqd_ckevq;
+	struct kqdom **children;
+
+	/* statistics */
+	unsigned long avg_lat;
+	int num_active; /* total number of active children below this node */
+
+	/* dynamic members*/
+	struct kevq **kqd_kevqlist; /* array list of kevqs on the kdomain, only set for leaf domains */
+	int kqd_kevqcap;
+	int kqd_kevqcnt;
+
+	int kqd_ckevq;
 };
 
 struct kqueue {
 	struct		mtx kq_lock;
-	int		kq_refcnt;
+	int			kq_refcnt;
 	struct		selinfo kq_sel;
-	int		kq_state;
+	int			kq_state;
 #define KQ_SEL		0x01
 #define KQ_ASYNC	0x02
 #define	KQ_TASKSCHED	0x04			/* task scheduled */
 #define	KQ_TASKDRAIN	0x08			/* waiting for task to drain */
 #define KQ_CLOSING	0x10
-#define KQ_FLAG_INIT 0x20		/* kqueue has been initialized. this flag is set after the first kevent structure is processed */
-#define KQ_FLAG_MULTI 0x40		/* Multi-threaded mode */
+	int			kq_flags;
+#define KQ_FLAG_INIT 0x01		/* kqueue has been initialized. this flag is set after the first kevent structure is processed */
+#define KQ_FLAG_MULTI 0x02		/* Multi-threaded mode */
 	TAILQ_ENTRY(kqueue)	kq_list;
 	struct		sigio *kq_sigio;
 	struct		filedesc *kq_fdp;
-	int		kq_knlistsize;		/* size of knlist */
+	int			kq_knlistsize;		/* size of knlist */
 	struct		klist *kq_knlist;	/* list of knotes */
 	u_long		kq_knhashmask;		/* size of knhash */
 	struct		klist *kq_knhash;	/* hash table for knotes */
@@ -105,7 +114,7 @@ struct kqueue {
 	struct 		kevqlist  kq_kevqlist; /* list of kevqs for fall-back round robbin */
 	struct		kqdom 	*kq_kqd; /* root domain */
 	struct		kevq	*kq_ckevq; /* current kevq for multithreaded kqueue, used for round robbin */
-	int		kq_sched_flags; /* Scheduler flag for the KQ */
+	int			kq_sched_flags; /* Scheduler flag for the KQ */
 };
 
 #endif /* !_SYS_EVENTVAR_H_ */
