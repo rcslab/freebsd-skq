@@ -88,7 +88,6 @@ struct kqdom {
 
 struct kqueue {
 	struct		mtx kq_lock;
-	int			kq_refcnt;
 	struct		selinfo kq_sel;
 	int			kq_state;
 #define KQ_SEL		0x01

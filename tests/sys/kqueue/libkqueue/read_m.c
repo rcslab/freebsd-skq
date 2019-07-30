@@ -394,7 +394,7 @@ test_socket_queue(void)
                     err(1, "non-affinity group sum != 0");
                 }
             }
-        }   
+        }
     }
 
 
@@ -754,6 +754,9 @@ test_evfilt_read_m()
     flags = KQ_SCHED_QUEUE;
     g_kqfd = kqueue();
     error = ioctl(g_kqfd, FKQMULTI, &flags);
+    if (error == -1) {
+        err(1, "ioctl");
+    }
 
     test_socket_queue();
     test_socket_brutal();
@@ -763,6 +766,9 @@ test_evfilt_read_m()
     flags = KQ_SCHED_BEST_OF_N;
     g_kqfd = kqueue();
     error = ioctl(g_kqfd, FKQMULTI, &flags);
+    if (error == -1) {
+        err(1, "ioctl");
+    }
 
     test_socket_brutal();
 
@@ -771,7 +777,10 @@ test_evfilt_read_m()
     flags = KQ_SCHED_WORK_STEALING;
     g_kqfd = kqueue();
     error = ioctl(g_kqfd, FKQMULTI, &flags);
-    
+    if (error == -1) {
+        err(1, "ioctl");
+    }
+
     test_socket_ws();
     test_socket_brutal();
 
