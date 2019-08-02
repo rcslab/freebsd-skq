@@ -276,20 +276,6 @@ struct filterops {
 };
 
 /*
- * The ioctl to set multithreaded mode
- */
-#define	FKQMULTI	_IOW('f', 89, int)
-
-/*
- * KQ scheduler flags
- */
-#define KQ_SCHED_QUEUE 	0x01 /* make kq affinitize the knote depending on the first cpu it's scheduled to */
-#define KQ_SCHED_QUEUE_CPU 0x02 /* make kq affinitize the knote depending on the runtime cpu it's scheduled to */
-#define KQ_SCHED_WORK_STEALING 0x04
-#define KQ_SCHED_BEST_OF_N 0x08
-#define KQ_SCHED_GREEDY 0x16
-
-/*
  * An in-flux knote cannot be dropped from its kq while the kq is
  * unlocked.  If the KN_SCAN flag is not set, a thread can only set
  * kn_influx when it is exclusive owner of the knote state, and can
@@ -403,5 +389,21 @@ int     kevent(int kq, const struct kevent *changelist, int nchanges,
 __END_DECLS
 
 #endif /* !_KERNEL */
+
+
+/*
+ * The ioctl to set multithreaded mode
+ */
+#define	FKQMULTI	_IOW('f', 89, int)
+
+/*
+ * KQ scheduler flags
+ */
+#define KQ_SCHED_WORK_STEALING 0x01
+
+#define KQ_SCHED_QUEUE 	0x02 /* make kq affinitize the knote depending on the first cpu it's scheduled to */
+/* QUEUE_CPU = 0x04 | QUEUE */
+#define KQ_SCHED_QUEUE_CPU 0x06 /* make kq affinitize the knote depending on the runtime cpu it's scheduled to */
+#define KQ_SCHED_BEST_OF_N 0x08
 
 #endif /* !_SYS_EVENT_H_ */

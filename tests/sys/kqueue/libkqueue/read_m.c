@@ -25,20 +25,6 @@
 #include <sys/sysctl.h>
 #include <pthread_np.h>
 
-/*
- * The ioctl to set multithreaded mode
- */
-#define	FKQMULTI	_IOW('f', 89, int)
-
-/*
- * KQ scheduler flags
- */
-#define KQ_SCHED_QUEUE 	0x01 /* make kq affinitize the knote depending on the first cpu it's scheduled to */
-#define KQ_SCHED_QUEUE_CPU 0x02 /* make kq affinitize the knote depending on the runtime cpu it's scheduled to */
-#define KQ_SCHED_WORK_STEALING 0x04
-#define KQ_SCHED_BEST_OF_N 0x08
-#define KQ_SCHED_GREEDY 0x16
-
 //#define TEST_DEBUG
 
 struct thread_info {
