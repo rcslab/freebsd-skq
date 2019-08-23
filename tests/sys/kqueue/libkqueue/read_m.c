@@ -35,14 +35,15 @@ struct thread_info {
     int group_id;
     int evcnt;
     int tid;
+    int delay;
 };
 
 /*
  * Read test
  */
 
-#define THREAD_CNT (16)
-#define PACKET_CNT (1600)
+#define THREAD_CNT (32)
+#define PACKET_CNT (3200)
 
 int g_kqfd;
 int g_sockfd[2];
@@ -51,9 +52,9 @@ struct thread_info g_thrd_info[THREAD_CNT];
 sem_t g_sem_driver;
 
 static void
-check_sched(struct thread_info *info, int size)
+check_sched(struct thread_info *info, int size, unsigned int max_diff)
 {
-    int max = 0, min = 999999;
+    int max = 0, min = INT_MAX;
 
     for(int i = 0; i < size; i++) {
         int cur = info[i].evcnt;
@@ -65,11 +66,8 @@ check_sched(struct thread_info *info, int size)
         }
     }
 
-    if ((max - min) > 1) {
-#ifdef TEST_DEBUG
-        printf("READ_M: check_sched: max difference is %d\n", max - min);
-#endif
-        abort();
+    if ((max - min) > max_diff) {
+        err(1, "READ_M: check_sched: max difference is %d\n", max - min);
     }
 }
 
@@ -124,6 +122,9 @@ test_socket_read_thrd(void* args)
         dat = socket_pop(ret->ident);
         free(ret);
 
+        if(info->delay)
+            usleep(info->tid * 10);
+
         if (dat == 'e')
             break;
 
@@ -142,10 +143,10 @@ test_socket_read_thrd(void* args)
 }
 
 static void
-test_socket_read(void)
+test_socket_read(int delay)
 {
     int error = 0;
-    const char *test_id = "[Multi]kevent(EVFILT_READ)";
+    const char *test_id = delay ? "[Multi][BON]kevent" : "[Multi]kevent(EVFILT_READ)";
     test_begin(test_id);    
 
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, &g_sockfd[0]) < 0) 
@@ -171,6 +172,7 @@ test_socket_read(void)
     for (int i = 0; i < THREAD_CNT; i++) {
         g_thrd_info[i].tid = i;
         g_thrd_info[i].evcnt = 0;
+        g_thrd_info[i].delay = delay;
         pthread_create(&g_thrd_info[i].thrd, NULL, test_socket_read_thrd, &g_thrd_info[i]);
     }
 
@@ -188,7 +190,8 @@ test_socket_read(void)
         /* wait for thread events */
         sem_wait(&g_sem_driver);
 
-        check_sched(g_thrd_info, THREAD_CNT);
+        if (!delay)
+            check_sched(g_thrd_info, THREAD_CNT, 1);
     }
 
 
@@ -426,41 +429,25 @@ test_socket_queue(void)
 /***************************
  * WS test
  ***************************/
-#define SOCK_WS_CNT (1000)
+#define SOCK_WS_CNT (100)
+#define WS_TIMEOUT (10)
 
-volatile int ws_good = 0;
+static volatile int ws_num = 0;
 
 static void*
 test_socket_ws_worker(void* args)
 {
     struct thread_info *info = (struct thread_info *) args;
     char dat;
-    int ws_num = 0;
     struct kevent *ret;
 
-    while (1) {
-#ifdef TEST_DEBUG
-        printf("READ_M: thread %d waiting for events\n", info->tid); 
-#endif
-        ret = kevent_get(g_kqfd);
-#ifdef TEST_DEBUG
-        printf("READ_M: thread %d woke up\n", info->tid); 
-#endif
-
-        dat = socket_pop(ret->ident);
-        free(ret);
-
+    while (ws_num < SOCK_WS_CNT) {
         if (info->ws_master == 0) {
-            /*if we are the master, wait for slave to signal us*/
-            while(!ws_good) {
-                usleep(500);
-            }
-            break;
-        } else {
-            ws_num++;
-            if (ws_num == SOCK_WS_CNT - 1) {
-                ws_good = 1;
-                break;
+            ret = kevent_get_timeout_u(g_kqfd, WS_TIMEOUT);
+            if (ret != NULL) {
+                dat = socket_pop(ret->ident);
+                free(ret);
+                ws_num++;
             }
         }
     }
@@ -731,7 +718,7 @@ test_evfilt_read_m()
         err(1, "ioctl");
     }
 
-    test_socket_read();
+    test_socket_read(0);
     test_socket_brutal();
 
     close(g_kqfd);
@@ -744,18 +731,7 @@ test_evfilt_read_m()
         err(1, "ioctl");
     }
 
-    test_socket_queue();
-    test_socket_brutal();
-
-    close(g_kqfd);
-
-    flags = KQ_SCHED_BEST_OF_N;
-    g_kqfd = kqueue();
-    error = ioctl(g_kqfd, FKQMULTI, &flags);
-    if (error == -1) {
-        err(1, "ioctl");
-    }
-
+    //test_socket_queue();
     test_socket_brutal();
 
     close(g_kqfd);
@@ -769,6 +745,18 @@ test_evfilt_read_m()
 
     test_socket_ws();
     test_socket_brutal();
+    close(g_kqfd);
+
+    flags = KQ_SCHED_BEST_OF_N;
+    g_kqfd = kqueue();
+    error = ioctl(g_kqfd, FKQMULTI, &flags);
+    if (error == -1) {
+        err(1, "ioctl");
+    }
+
+    test_socket_brutal();
+    test_socket_read(1);
+
 
     close(g_kqfd);
 }

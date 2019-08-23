@@ -36,11 +36,15 @@
 #endif
 
 #include <sys/_task.h>
+#include <sys/veclist.h>
+#include <sys/stdint.h>
 
 #define KQ_NEVENTS	8		/* minimize copy{in,out} calls */
 #define KQEXTENT	256		/* linear growth by this amount */
 
-#define KQDOM_EXTENT_FACTOR 8 /* linear growth by this amount */
+#define KQDOM_EXTENT 8 /* linear growth by this amount */
+#define KQDIR_ACTIVE (0)
+#define KQDIR_INACTIVE (1)
 
 struct kevq {
 	LIST_ENTRY(kevq)	kevq_th_e; /* entry into kevq_thred's hashtable */
@@ -61,29 +65,25 @@ struct kevq {
 	/* Used by the scheduler */
 	unsigned long kevq_avg_lat;
 	struct timespec kevq_last_kev;
-	int kevq_last_nkev;
+	uint64_t kevq_last_nkev;
 };
 
 /* TODO: assumed that threads don't get rescheduled across cores */
 struct kqdom {
 	/* static */
+	int id;
 	struct mtx	kqd_lock;
 	struct kqdom *parent;
-	int id;
 	cpuset_t cpu_mask;
-	int num_children;
-	struct kqdom **children;
+	struct veclist children; /* child kqdoms */
 
-	/* statistics */
+	/* statistics. Atomically updated, doesn't require the lock*/
 	unsigned long avg_lat;
-	int num_active; /* total number of active children below this node */
 
 	/* dynamic members*/
-	struct kevq **kqd_kevqlist; /* array list of kevqs on the kdomain, only set for leaf domains */
-	int kqd_kevqcap;
-	int kqd_kevqcnt;
-
-	int kqd_ckevq;
+	struct veclist kqd_activelist; /* active child kqdoms */
+	struct veclist kqd_kevqs; /* kevqs for this kqdom */
+	int kqd_ckevq; /* current kevq for round robbin. XXX: Remove round robbin it has literally no benefit but maintainance nightmares */
 };
 
 struct kqueue {

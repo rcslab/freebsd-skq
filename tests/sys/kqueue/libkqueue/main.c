@@ -117,6 +117,28 @@ kevent_get_timeout(int kqfd, int seconds)
     return (kev);
 }
 
+/* Retrieve a single kevent, specifying a maximum time to wait for it. */
+struct kevent *
+kevent_get_timeout_u(int kqfd, int useconds)
+{
+    int nfds;
+    struct kevent *kev;
+    struct timespec timeout = {0, useconds * 1000};
+
+    if ((kev = calloc(1, sizeof(*kev))) == NULL)
+        err(1, "out of memory");
+    
+    nfds = kevent(kqfd, NULL, 0, kev, 1, &timeout);
+    if (nfds < 0) {
+        err(1, "kevent(2)");
+    } else if (nfds == 0) {
+        free(kev);
+        kev = NULL;
+    }
+
+    return (kev);
+}
+
 char *
 kevent_fflags_dump(struct kevent *kev)
 {

@@ -46,6 +46,7 @@ int vnode_fd;
 extern char * kevent_to_str(struct kevent *);
 struct kevent * kevent_get(int);
 struct kevent * kevent_get_timeout(int, int);
+struct kevent * kevent_get_timeout_u(int kqfd, int useconds);
 
 
 void kevent_cmp(struct kevent *, struct kevent *);
