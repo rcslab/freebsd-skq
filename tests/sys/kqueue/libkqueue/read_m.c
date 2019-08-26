@@ -615,13 +615,17 @@ test_socket_brutal_worker(void* args)
 }
 
 static void
-test_socket_brutal()
+test_socket_brutal(char* name)
 {
+    char id[256];
     struct kevent kev;
 
-    const char *test_id = "[Multi]kevent(brutal)";
+    const char *test_id = "[Multi]kevent(brutal) - ";
 
-    test_begin(test_id);
+    strcpy(id, test_id);
+    strcat(id, name);
+
+    test_begin(id);
 
     for (int i = 0; i < SOCK_BRUTE_CNT; i++) {
 
@@ -719,7 +723,7 @@ test_evfilt_read_m()
     }
 
     test_socket_read(0);
-    test_socket_brutal();
+    test_socket_brutal("round robbin");
 
     close(g_kqfd);
 
@@ -732,11 +736,24 @@ test_evfilt_read_m()
     }
 
     //test_socket_queue();
-    test_socket_brutal();
+    test_socket_brutal("queue");
 
     close(g_kqfd);
 
-    flags = KQ_SCHED_WORK_STEALING;
+
+    flags = KQ_SCHED_CPU;
+    g_kqfd = kqueue();
+    error = ioctl(g_kqfd, FKQMULTI, &flags);
+    if (error == -1) {
+        err(1, "ioctl");
+    }
+
+    test_socket_brutal("cpu");
+
+    close(g_kqfd);
+
+
+    flags = KQ_SCHED_WS;
     g_kqfd = kqueue();
     error = ioctl(g_kqfd, FKQMULTI, &flags);
     if (error == -1) {
@@ -744,17 +761,17 @@ test_evfilt_read_m()
     }
 
     test_socket_ws();
-    test_socket_brutal();
+    test_socket_brutal("work stealing");
     close(g_kqfd);
 
-    flags = KQ_SCHED_BEST_OF_N;
+    flags = KQ_SCHED_BOT;
     g_kqfd = kqueue();
     error = ioctl(g_kqfd, FKQMULTI, &flags);
     if (error == -1) {
         err(1, "ioctl");
     }
 
-    test_socket_brutal();
+    test_socket_brutal("best of two");
     test_socket_read(1);
 
 

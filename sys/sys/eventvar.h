@@ -38,6 +38,9 @@
 #include <sys/_task.h>
 #include <sys/veclist.h>
 #include <sys/stdint.h>
+#include <sys/param.h>
+#include <sys/lock.h>
+#include <sys/rwlock.h>
 
 #define KQ_NEVENTS	8		/* minimize copy{in,out} calls */
 #define KQEXTENT	256		/* linear growth by this amount */
@@ -108,12 +111,17 @@ struct kqueue {
 	struct		kevq *kq_kevq; /* the kevq for kq, always created, act as buffer queue in multithreaded mode */
 	struct		task kq_task;
 	struct		ucred *kq_cred;
+	struct 		kevqlist  kq_kevqlist; /* list of kevqs */
 
 	/* scheduling stuff */
-	struct 		kevqlist  kq_kevqlist; /* list of kevqs for fall-back round robbin */
-	struct		kqdom 	*kq_kqd; /* root domain */
-	struct		kevq	*kq_ckevq; /* current kevq for multithreaded kqueue, used for round robbin */
 	int			kq_sched_flags; /* Scheduler flag for the KQ */
+	/* Round robbin (only as a fall back) */
+	struct		kevq	*kq_ckevq; /* current kevq for multithreaded kqueue, used for round robbin */
+	/* Best of two */
+	struct		rwlock  sched_bot_lk;
+	struct		veclist sched_bot_lst;
+	/* CPU queue */
+	struct		kqdom 	*kq_kqd; /* root domain */
 };
 
 #endif /* !_SYS_EVENTVAR_H_ */

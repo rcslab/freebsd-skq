@@ -76,6 +76,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/veclist.h>
 #include <sys/stdint.h>
 #include <sys/libkern.h>
+#include <sys/rwlock.h>
 #ifdef KTRACE
 #include <sys/ktrace.h>
 #endif
@@ -85,6 +86,8 @@ __FBSDID("$FreeBSD$");
 
 static MALLOC_DEFINE(M_KQUEUE, "kqueue", "memory for kqueue system");
 
+#define KQDOM_FLAGS ((KQ_SCHED_CPU) | (KQ_SCHED_WS) | (KQ_SCHED_QUEUE))
+#define KQLST_FLAGS (KQ_SCHED_BOT)
 /*
  * This lock is used if multiple kq locks are required.  This possibly
  * should be made into a per proc lock.
@@ -138,12 +141,6 @@ extern struct cpu_group *cpu_top;
 	} \
 } while(0)
 
-static inline int 
-need_track_latency(struct kqueue *kq)
-{
-	return (kq->kq_flags & KQ_FLAG_MULTI) != 0 && (kq->kq_sched_flags & KQ_SCHED_BEST_OF_N) != 0;
-}
-
 static inline uint64_t
 timespec_to_ns(struct timespec *spec)
 {
@@ -162,6 +159,7 @@ static void kevq_worksteal(struct kevq *kevq);
 void kevq_drain(struct kevq *kevq, struct thread *td);
 static int kqueue_acquire_kevq(struct file *fp, struct thread *td, struct kqueue **kqp, struct kevq **kevq);
 
+static void kqueue_ensure_kqdom(struct kqueue *kq);
 static int	kevent_copyout(void *arg, struct kevent *kevp, int count);
 static int	kevent_copyin(void *arg, struct kevent *kevp, int count);
 static int  kqueue_register(struct kqueue *kq, struct kevq *kevq, 
@@ -255,10 +253,9 @@ static int	filt_user(struct knote *kn, long hint);
 static void	filt_usertouch(struct knote *kn, struct kevent *kev,
 		    u_long type);
 
-static int kq_sched_bon_count = 2;
-SYSCTL_INT(_kern, OID_AUTO, kq_sched_bon_count, CTLFLAG_RWTUN, &kq_sched_bon_count, 0, "the number of kevqs to select the best one from");
+static int kq_sched_bot_count = 2;
+SYSCTL_INT(_kern, OID_AUTO, kq_sched_bot_count, CTLFLAG_RWTUN, &kq_sched_bot_count, 0, "the number of kevqs to select the best one from");
 
-/* TODO: make this a percentage? */
 static int kq_sched_ws_count = 1;
 SYSCTL_INT(_kern, OID_AUTO, kq_sched_ws_count, CTLFLAG_RWTUN, &kq_sched_ws_count, 0, "the number of kevqs to steal each time");
 
@@ -426,7 +423,6 @@ knote_enter_flux(struct knote *kn)
 	kn->kn_influx++;
 }
 
-/* TODO: change *_ul functions to macros? */
 static bool
 knote_leave_flux_ul(struct knote *kn)
 {
@@ -1145,13 +1141,16 @@ filt_usertouch(struct knote *kn, struct kevent *kev, u_long type)
 int
 sys_kqueue(struct thread *td, struct kqueue_args *uap)
 {
-
 	return (kern_kqueue(td, 0, NULL));
 }
 
 static void
 kqueue_init(struct kqueue *kq)
 {
+	/* XXX: move these guys to init later, just like kqdom */
+	veclist_init(&kq->sched_bot_lst, 0, M_KQUEUE);
+	rw_init(&kq->sched_bot_lk, "kqueue_sched_bot_lk");
+
 	mtx_init(&kq->kq_lock, "kqueue", NULL, MTX_DEF | MTX_DUPOK);
 	knlist_init_mtx(&kq->kq_sel.si_note, &kq->kq_lock);
 	TASK_INIT(&kq->kq_task, 0, kqueue_task, kq);
@@ -1434,9 +1433,9 @@ kqueue_kevent(struct kqueue *kq, struct kevq *kevq, struct thread *td, int nchan
 		KEVQ_UNLOCK(kevq);
 	}
 
-	if (need_track_latency(kq))
+	if (kq->kq_sched_flags & KQ_SCHED_BOT)
 	{
-		/* only need to do track the average latency for BON */
+		/* only need to do track the average latency for BOT */
 		KEVQ_LOCK(kevq);
 
 		/* prob don't need the lock here as these are only accessible by one thread */
@@ -1460,7 +1459,7 @@ kqueue_kevent(struct kqueue *kq, struct kevq *kevq, struct thread *td, int nchan
 			timespecclear(&kevq->kevq_last_kev);
 			kevq->kevq_last_nkev = 0;
 
-			kqdom_update_lat(kevq->kevq_kqd, avg);
+			//kqdom_update_lat(kevq->kevq_kqd, avg);
 		}
 		KEVQ_UNLOCK(kevq);
 	}
@@ -1989,11 +1988,12 @@ kevq_acquire(struct kevq *kevq, int locked)
 static int
 kqueue_obtain_kevq(struct kqueue *kq, struct thread *td, struct kevq **kevqp)
 {
-	void* to_free;
+ 	void *to_free;
 	struct kevq_thred *kevq_th;
 	struct kevq *kevq, *alloc_kevq;
 	struct kevqlist *kevq_list;
 	struct kqdom	*kqd;
+	int err;
 
 	kevq = NULL;
 	to_free = NULL;
@@ -2006,23 +2006,26 @@ kqueue_obtain_kevq(struct kqueue *kq, struct thread *td, struct kevq **kevqp)
 	}
 
 	if ((kq->kq_flags & KQ_FLAG_MULTI) == KQ_FLAG_MULTI) {
-		// allocate KEVQ_TH
 		if (td->td_kevq_thred == NULL) {
+
+			/* allocate kevq_thred for each thread */
 			kevq_th = malloc(sizeof(struct kevq_thred), M_KQUEUE, M_WAITOK | M_ZERO);
+
 			kevq_thred_init(kevq_th);
-			kevq_th->kevq_hash = hashinit_flags(KEVQ_HASHSIZE, M_KQUEUE, &kevq_th->kevq_hashmask , HASH_WAITOK);
+			kevq_th->kevq_hash = hashinit_flags(KEVQ_HASHSIZE, M_KQUEUE, &kevq_th->kevq_hashmask, HASH_WAITOK);
 
 			thread_lock(td);
 			if (td->td_kevq_thred == NULL) {
 				td->td_kevq_thred = kevq_th;
-			CTR2(KTR_KQ, "kqueue_ensure_kevq(M): allocated kevq_th %p for thread %d", kevq_th, td->td_tid);
+				CTR2(KTR_KQ, "kqueue_ensure_kevq(M): allocated kevq_th %p for thread %d", kevq_th, td->td_tid);
 			} else {
 				to_free = kevq_th;
 				kevq_th = td->td_kevq_thred;
 			}
 			thread_unlock(td);
+
 			if (to_free != NULL) {
-				free(((struct kevq_thred*)to_free)->kevq_hash, M_KQUEUE);
+				free(((struct kevq_thred *)to_free)->kevq_hash, M_KQUEUE);
 				free(to_free, M_KQUEUE);
 			}
 		} else {
@@ -2036,50 +2039,75 @@ kqueue_obtain_kevq(struct kqueue *kq, struct thread *td, struct kevq **kevqp)
 		kevq = kevqlist_find(kevq_list, kq);
 		KEVQ_TH_UNLOCK(kevq_th);
 
-		// allocate kevq
+		/* make sure sched structs are allocated */
+		kqueue_ensure_kqdom(kq);
+
 		if (kevq == NULL) {
+			/* allocate kevq */
 			to_free = NULL;
 			alloc_kevq = malloc(sizeof(struct kevq), M_KQUEUE, M_WAITOK | M_ZERO);
 			kevq_init(alloc_kevq);
 			alloc_kevq->kq = kq;
 			alloc_kevq->kevq_th = kevq_th;
 
-			// assign the proper kqdomain
-			KASSERT(kq->kq_kqd != NULL, ("kqdom doesn't exist after referecing kq"));
-			kqd = kqdom_find(kq->kq_kqd, td->td_oncpu);
-			alloc_kevq->kevq_kqd = kqd;
-
-			CTR4(KTR_KQ, "kqueue_ensure_kevq(M): allocated kevq %p for thread %d (oncpu = %d), kqdom %d", alloc_kevq, td->td_tid, td->td_oncpu, kqd->id);
+			CTR3(KTR_KQ, "kqueue_ensure_kevq(M): allocated kevq %p for thread %d (oncpu = %d)", alloc_kevq, td->td_tid, td->td_oncpu);
 			
 			KQ_LOCK(kq);
 			KEVQ_TH_LOCK(kevq_th);
-			KQD_LOCK(kqd);
 			kevq = kevqlist_find(kevq_list, kq);
 
-			/* TODO: probably don't need to re-check */
+			/* kevq should only be allocated by the current thread. 
+			 * This might only happen inside interrupt handler
+			 * which I'm not actually sure about
+			 * KASSERT(kevq != NULL, ("kevq double allocated")); 
+			 */
+
 			if (kevq == NULL) {
 				kevq = alloc_kevq;
-				// insert kevq to the kevq_th hash table
+				/* insert kevq to the kevq_th hash table */
 				LIST_INSERT_HEAD(kevq_list, kevq, kevq_th_e);
-				// insert kevq to the kevq_th list, the list is used to drain kevq
+
+				/* insert kevq to the kevq_th list */ 
 				LIST_INSERT_HEAD(&kevq_th->kevq_list, kevq, kevq_th_tqe);
 
+				/* insert into kqueue */
 				LIST_INSERT_HEAD(&kq->kq_kevqlist, kevq, kq_e);
+				
+				/* insert into sched structures */
+				if (kq->kq_sched_flags & KQLST_FLAGS) {
+					rw_wlock(&kq->sched_bot_lk);
 
+					err = veclist_insert_tail(&kq->sched_bot_lst, kevq);
+
+					/* XXX: this is a hack, handle ENOMEM */
+					if (err) {
+						panic("sched_bot_lst insert tail failed");
+					}
+
+					rw_wunlock(&kq->sched_bot_lk);
+				}
+			
+				if (kq->kq_sched_flags & KQDOM_FLAGS) {
+					/* assign to the proper kqdom */
+					KASSERT(kq->kq_kqd != NULL, ("kqdom doesn't exist after referecing kq"));
+					
+					kqd = kqdom_find(kq->kq_kqd, td->td_oncpu);
+					alloc_kevq->kevq_kqd = kqd;
+
+					KQD_LOCK(kqd);
+					kqdom_insert(kqd, kevq);
+					KQD_UNLOCK(kqd);
+				}
 
 				KEVQ_TH_UNLOCK(kevq_th);
 				KQ_UNLOCK(kq);
 
-				kqdom_insert(kqd, kevq);
-				KQD_UNLOCK(kqd);
 			} else {
 				to_free = alloc_kevq;
 
-				KQD_UNLOCK(kqd);
 				KEVQ_TH_UNLOCK(kevq_th);
 				KQ_UNLOCK(kq);
 			}
-
 
 			if (to_free != NULL) {
 				free(to_free, M_KQUEUE);
@@ -2114,22 +2142,23 @@ kqueue_obtain_kevq(struct kqueue *kq, struct thread *td, struct kevq **kevqp)
 	return 0;
 }
 
-static void
-kqueue_check_kqdom(struct kqueue *kq)
+static void 
+kqueue_ensure_kqdom(struct kqueue *kq)
 {
 	struct kqdom* kqd;
-	if (((kq->kq_flags & KQ_FLAG_MULTI) != 0) && (kq->kq_kqd == NULL)) {
-		kqd = kqdom_build();
-		KQ_LOCK(kq);
-		if (kq->kq_kqd == NULL) {
-			kq->kq_kqd = kqd;
-			kqd = NULL;
-		}
-		KQ_UNLOCK(kq);
+	KQ_NOTOWNED(kq);
 
-		if (kqd != NULL) {
-			kqdom_destroy(kqd);
-		}
+	kqd = kqdom_build();
+
+	KQ_LOCK(kq);
+	if (kq->kq_kqd == NULL) {
+		kq->kq_kqd = kqd;
+		kqd = NULL;
+	}
+	KQ_UNLOCK(kq);
+
+	if (kqd != NULL) {
+		kqdom_destroy(kqd);
 	}
 }
 
@@ -2156,9 +2185,6 @@ kqueue_acquire_kevq(struct file *fp, struct thread *td, struct kqueue **kqp, str
 		kq->kq_flags |= KQ_FLAG_INIT;
 		KQ_UNLOCK(kq);
 	}
-
-	/* allocate kqdoms if not present */
-	kqueue_check_kqdom(kq);
 
 	error = kqueue_obtain_kevq(kq, td, &kevq);
 
@@ -2240,9 +2266,9 @@ kqdom_next_leaf(struct kqdom *kqd)
 static void
 kqdom_init(struct kqdom *kqd)
 {
-	veclist_init(&kqd->children, NULL, 0);
-	veclist_init(&kqd->kqd_activelist, NULL, 0);
-	veclist_init(&kqd->kqd_kevqs, NULL, 0);
+	veclist_init(&kqd->children, 0, M_KQUEUE);
+	veclist_init(&kqd->kqd_activelist, 0, M_KQUEUE);
+	veclist_init(&kqd->kqd_kevqs, 0, M_KQUEUE);
 	mtx_init(&kqd->kqd_lock, "kqdom_lock", NULL, MTX_DEF | MTX_DUPOK);
 }
 
@@ -2256,41 +2282,16 @@ kqdom_is_leaf(struct kqdom *kqd)
 static void
 kqdom_insert(struct kqdom *kqd, struct kevq *kevq)
 {
-	int oldcap, newcap;
-	void **expand;
-
+	int err;
 	KQD_OWNED(kqd);
 	KASSERT(kqdom_is_leaf(kqd), ("inserting into a non-leaf kqdom"));
 	CTR2(KTR_KQ, "kqdom_insert: kevq: %p kqdom %d", kevq, kqd->id);
 
-	/* expand the kqdom if needed */
-retry:
-	if (veclist_need_exp(&kqd->kqd_kevqs)) {
-		CTR2(KTR_KQ, "kqdom_insert: expanding... kqd %d for kevq %p\n", kqd->id, kevq);
-		oldcap = veclist_cap(&kqd->kqd_kevqs);
-		KQD_UNLOCK(kqd);
-
-		newcap = oldcap + KQDOM_EXTENT;
-		expand = malloc(sizeof(struct kqdom *) * newcap, M_KQUEUE, M_WAITOK | M_ZERO);
-
-		KQD_LOCK(kqd);
-		/* recheck if we need expansion, make sure old capacity didn't change */
-		if (veclist_cap(&kqd->kqd_kevqs) == oldcap) {
-			expand = veclist_expand(&kqd->kqd_kevqs, expand, newcap);
-			if (expand != NULL) {
-				free(expand, M_KQUEUE);
-			}
-		} else {
-			/* some threads made changes while we were allocating memory, retry */
-			free(expand, M_KQUEUE);
-			goto retry;
-		}
+	err = veclist_insert_tail(&kqd->kqd_kevqs, kevq);
+	/* XXX: this is a hack, need to handle ENOMEM */
+	if (err) {
+		panic("kqdom veclist failed to insert tail");
 	}
-
-	KQD_OWNED(kqd);
-	
-	KASSERT(!veclist_need_exp(&kqd->kqd_kevqs), ("failed to expand kqdom"));
-	veclist_insert_tail(&kqd->kqd_kevqs, kevq);
 
 	if (veclist_size(&kqd->kqd_kevqs) == 1) {
 		kqdom_update_parents(kqd, KQDIR_ACTIVE);
@@ -2308,39 +2309,28 @@ kqdom_remove(struct kqdom *kqd, struct kevq *kevq)
 	veclist_remove(&kqd->kqd_kevqs, kevq);
 
 	if (veclist_size(&kqd->kqd_kevqs) == 0) {
-		kqdom_update_parents(kqd, KQDIR_INACTIVE);
+	 	kqdom_update_parents(kqd, KQDIR_INACTIVE);
 	}
 }
 
 static void
 kqdom_destroy(struct kqdom *root)
 {
-	void **buf;
 	for(int i = 0; i < veclist_size(&root->children); i++) {
 		kqdom_destroy(veclist_at(&root->children, i));
 	}
 
 	CTR2(KTR_KQ, "kqdom_destroy: destroyed kqdom %d with %d child kqdoms", root->id, veclist_size(&root->children));
 
-	buf = veclist_buf(&root->kqd_kevqs);
-	if (buf != NULL) {
-		free(buf, M_KQUEUE);
-	}
-		
-	buf = veclist_buf(&root->kqd_activelist);
-	if (buf != NULL) {
-		free(buf, M_KQUEUE);
-	}
-
-	buf = veclist_buf(&root->children);
-	if (buf != NULL) {
-		free(buf, M_KQUEUE);
-	}
+	veclist_destroy(&root->kqd_kevqs);
+	veclist_destroy(&root->kqd_activelist);
+	veclist_destroy(&root->children);
 
 	mtx_destroy(&root->kqd_lock);
 
 	free(root, M_KQUEUE);
 }
+
 
 /* Expensive if called *frequently* 
  * 
@@ -2349,6 +2339,7 @@ kqdom_destroy(struct kqdom *root)
 static void
 kqdom_update_parents(struct kqdom *kqd, int direction)
 {
+	int err;
 	int cont;
 	struct kqdom *child;
 	
@@ -2380,9 +2371,12 @@ kqdom_update_parents(struct kqdom *kqd, int direction)
 			/* kqd->kqd_activelist are preallocated with maximum children for non-leaf nodes
 			 * Should NEVER fail
 			 */
-		
-			KASSERT(!veclist_need_exp(&kqd->kqd_activelist), ("kqdom requires expansion"));
-			veclist_insert_tail(&kqd->kqd_activelist, child);
+			err = veclist_insert_tail(&kqd->kqd_activelist, child);
+			/* NOT a hack! */
+			if (err) {
+				panic("kqdom activelist requires expansion");
+			}
+			/* KASSERT(!err, ("kqdom activelist requires expansion")); */
 
 			/* didn't change from 0 to 1, stop */
 			if (veclist_size(&kqd->kqd_activelist) != 1) {
@@ -2396,6 +2390,9 @@ kqdom_update_parents(struct kqdom *kqd, int direction)
 static void
 kqdom_update_lat(struct kqdom *leaf, unsigned long avg)
 {
+	/* We don't need this function for now */
+	KASSERT(0, ("kqdom_update_lat called"));
+
 	while(leaf != NULL) {
 		if (leaf->avg_lat != 0) {
 			// bit rot race here?
@@ -2410,11 +2407,12 @@ kqdom_update_lat(struct kqdom *leaf, unsigned long avg)
 	}
 }
 
+
 /* Mirror the cpu_group structure */
 static void
 kqdom_build_internal(struct kqdom *kqd_cur, struct cpu_group *cg_cur, int *kqd_id)
 {
-	void **expand;
+	int err;
 	struct kqdom *child;
 	int cg_numchild = cg_cur->cg_children;
 	CTR4(KTR_KQ, "kqdom_build_internal: processing cpu_group with %d child groups, %d CPUs, shared cache level %d, kqd_id %d", cg_numchild, cg_cur->cg_count, cg_cur->cg_level, *kqd_id);
@@ -2426,11 +2424,16 @@ kqdom_build_internal(struct kqdom *kqd_cur, struct cpu_group *cg_cur, int *kqd_i
 
 	/* allocate children and active lists */
 	if (cg_numchild > 0) {
-		expand = malloc(sizeof(struct kqdom *) * cg_numchild, M_KQUEUE, M_WAITOK | M_ZERO);
-		veclist_expand(&kqd_cur->children, expand, cg_numchild);
-		
-		expand = malloc(sizeof(struct kqdom *) * cg_numchild, M_KQUEUE, M_WAITOK | M_ZERO);
-		veclist_expand(&kqd_cur->kqd_activelist, expand, cg_numchild);
+		err = veclist_expand(&kqd_cur->children, cg_numchild);
+		/* XXX: These are hacks */
+		if (err) {
+			panic("kqdom build veclist expand");
+		}
+
+		err = veclist_expand(&kqd_cur->kqd_activelist, cg_numchild);
+		if (err) {
+			panic("kqdom build veclist expand");
+		}
 	}
 
 	for (int i = 0; i < cg_numchild; i++) {
@@ -2438,8 +2441,14 @@ kqdom_build_internal(struct kqdom *kqd_cur, struct cpu_group *cg_cur, int *kqd_i
 		kqdom_init(child);
 
 		child->parent = kqd_cur;
+		err = veclist_insert_tail(&kqd_cur->children, child);
 
-		veclist_insert_tail(&kqd_cur->children, child);
+		/* Not a hack! */
+		if (err) {
+			panic("kqdom build insert tail failed");
+		}
+		/* KASSERT(!err, ("kqdom build insert tail failed")); */
+
 		kqdom_build_internal(child, &cg_cur->cg_child[i], kqd_id);
 	}
 }
@@ -2713,7 +2722,7 @@ retry:
 	kevp = keva;
 	CTR3(KTR_KQ, "kqueue_scan: td %d on kevq %p has %d events", td->td_tid, kevq, kevq->kn_count);
 
-	if ((kq->kq_flags & KQ_FLAG_MULTI) != 0 && (kq->kq_sched_flags & KQ_SCHED_WORK_STEALING) != 0 && kevq->kn_count == 0) {
+	if ((kq->kq_sched_flags & KQ_SCHED_WS) && kevq->kn_count == 0) {
 		/* try work stealing */
 		kevq_worksteal(kevq);
 	}
@@ -2905,7 +2914,7 @@ done:
 	}
 
 
-	if (nkev != 0 && need_track_latency(kq)) {
+	if (nkev != 0 && (kq->kq_sched_flags & KQ_SCHED_BOT)) {
 		/* book keep the statistics */
 		getnanouptime(&kevq->kevq_last_kev);
 		kevq->kevq_last_nkev = nkev;
@@ -3148,25 +3157,35 @@ kevq_drain(struct kevq *kevq, struct thread *td)
 	if ((kq->kq_flags & KQ_FLAG_MULTI) == KQ_FLAG_MULTI) {
 		KQ_LOCK(kq);
 		KEVQ_TH_LOCK(kevq->kevq_th);
-		KQD_LOCK(kqd);
 
-		// detach from kevq_th
+		/*  detach from kevq_th */
 		LIST_REMOVE(kevq, kevq_th_tqe);
 		kevq_list = &kevq->kevq_th->kevq_hash[KEVQ_HASH((unsigned long long)kq, kevq->kevq_th->kevq_hashmask)];
 		LIST_REMOVE(kevq, kevq_th_e);
 
-		// detach from kqdom
-		kqdom_remove(kqd, kevq);
-
-	 	// detach from kqueue
+	 	/*  detach from kqueue */
 		if (kq->kq_ckevq == kevq) {
 			kq->kq_ckevq = LIST_NEXT(kevq, kq_e);
 		}
 		LIST_REMOVE(kevq, kq_e);
 
-		KQD_UNLOCK(kqd);
+
+		/* detach from sched structs */
+		if (kq->kq_sched_flags & KQDOM_FLAGS) {
+			KQD_LOCK(kqd);
+			kqdom_remove(kqd, kevq);
+			KQD_UNLOCK(kqd);
+		}
+
+		if (kq->kq_sched_flags & KQLST_FLAGS) {
+			rw_wlock(&kq->sched_bot_lk);
+			veclist_remove(&kq->sched_bot_lst, kevq);
+			rw_wunlock(&kq->sched_bot_lk);
+		}
+
 		KEVQ_TH_UNLOCK(kevq->kevq_th);
 		KQ_UNLOCK(kq);
+
 	} else {
 		KQ_LOCK(kq);
 		kq->kq_kevq = NULL;
@@ -3242,7 +3261,6 @@ kqueue_drain(struct kqueue *kq, struct kevq *kevq, struct thread *td)
 		}
 	}
 
-	// destroy kqdoms and kevqs
 	if ((kq->kq_flags & KQ_FLAG_MULTI) == KQ_FLAG_MULTI) {
 		while((kevq = LIST_FIRST(&kq->kq_kevqlist)) != NULL) {
 			KQ_UNLOCK(kq);
@@ -3252,7 +3270,11 @@ kqueue_drain(struct kqueue *kq, struct kevq *kevq, struct thread *td)
 		}
 
 		KQ_OWNED(kq);
-		kqdom_destroy(kq->kq_kqd);
+		
+		/* destroy sched structs */
+		if (kq->kq_sched_flags & KQDOM_FLAGS) {
+			kqdom_destroy(kq->kq_kqd); 
+		}
 	} else {
 		KQ_UNLOCK(kq);
 		// we already have a reference for single threaded mode
@@ -3285,6 +3307,10 @@ kqueue_destroy(struct kqueue *kq)
 	seldrain(&kq->kq_sel);
 	knlist_destroy(&kq->kq_sel.si_note);
 	mtx_destroy(&kq->kq_lock);
+
+	/* XXX: move these guys to be destroyed earlier, like kqdom */
+	rw_destroy(&kq->sched_bot_lk);
+	veclist_destroy(&kq->sched_bot_lst);
 
 	if (kq->kq_knhash != NULL)
 		free(kq->kq_knhash, M_KQUEUE);
@@ -3892,7 +3918,26 @@ knote_drop_detached(struct knote *kn, struct thread *td)
 	knote_free(kn);
 }
 
-/* A refcnt to kevq will be held upon return */
+static struct kevq *
+kqbot_random_kevq_locked(struct kqueue *kq)
+{
+	int sz;
+	struct kevq *kevq = NULL;
+	u_long rand = random();
+	rw_rlock(&kq->sched_bot_lk);
+	sz = veclist_size(&kq->sched_bot_lst);
+	if (sz > 0) {
+		kevq = veclist_at(&kq->sched_bot_lst, rand % veclist_size(&kq->sched_bot_lst));
+	}
+	KEVQ_LOCK(kevq);
+	if (!KEVQ_AVAIL(kevq)) {
+		KEVQ_UNLOCK(kevq);
+		kevq = NULL;
+	}
+	rw_runlock(&kq->sched_bot_lk);
+	return kevq;
+}
+
 static struct kevq *
 kqdom_random_kevq_locked(struct kqdom *kqd)
 {
@@ -3985,11 +4030,9 @@ knote_next_kevq(struct knote *kn)
 		return next_kevq;
 	}
 
-	if ((kq->kq_sched_flags & KQ_SCHED_BEST_OF_N) != 0) {
-		kqd = kq->kq_kqd;
-
-		for(int i = 0; i < kq_sched_bon_count; i++) {
-			struct kevq *sel_kevq = kqdom_random_kevq_locked(kqd);
+	if (kq->kq_sched_flags & KQ_SCHED_BOT) {
+		for(int i = 0; i < kq_sched_bot_count; i++) {
+			struct kevq *sel_kevq = kqbot_random_kevq_locked(kq);
 			if (sel_kevq != NULL) {
 				int ret;
 
@@ -4017,7 +4060,7 @@ knote_next_kevq(struct knote *kn)
 					}
 				}
 
-				CTR3(KTR_KQ, "knote_next_kevq: [BON] current best kevq %p, avg time: %d, wait time: %d", next_kevq, next_kevq->kevq_avg_lat, next_kevq->kevq_avg_lat * next_kevq->kn_count);
+				CTR3(KTR_KQ, "knote_next_kevq: [BOT] current best kevq %p, avg time: %d, wait time: %d", next_kevq, next_kevq->kevq_avg_lat, next_kevq->kevq_avg_lat * next_kevq->kn_count);
 			}
 		}
 
@@ -4029,11 +4072,11 @@ knote_next_kevq(struct knote *kn)
 			 */
 		}
 
-		CTR2(KTR_KQ, "knote_next_kevq: [BON] next kevq %p for kn %p", next_kevq, kn);
+		CTR2(KTR_KQ, "knote_next_kevq: [BOT] next kevq %p for kn %p", next_kevq, kn);
 	}
 
-	if ((next_kevq == NULL) && (kq->kq_sched_flags & KQ_SCHED_QUEUE) != 0) {
-		if((kq->kq_sched_flags & KQ_SCHED_QUEUE_CPU) != 0) {
+	if (next_kevq == NULL && (kq->kq_sched_flags & (KQ_SCHED_QUEUE | KQ_SCHED_CPU)) != 0 ) {
+		if((kq->kq_sched_flags & KQ_SCHED_CPU) != 0) {
 			kqd = kqdom_find(kq->kq_kqd, PCPU_GET(cpuid));
 		} else {
 			if (kn->kn_kqd == NULL) {
@@ -4051,7 +4094,7 @@ knote_next_kevq(struct knote *kn)
 		CTR2(KTR_KQ, "knote_next_kevq: [QUEUE] next kevq %p for kn %p", next_kevq, kn);
 	}
 
-	// fall-back round-robbin
+	/* fall-back round-robbin */
 	if (next_kevq == NULL) {
 		KQ_LOCK(kq);
 

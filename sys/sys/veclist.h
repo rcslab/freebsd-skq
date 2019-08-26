@@ -39,19 +39,45 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/types.h>
+#include <sys/malloc.h>
+#include <sys/errno.h>
 
 struct veclist {
     size_t cap;
     size_t size;
+    struct malloc_type *mtype;
     void **buf;
 };
 
-static inline void
-veclist_init(struct veclist *lst, void **buf, int cap)
+#define VECLIST_EXPAND_FACTOR (2)
+#define VECLIST_INIT_SZ (8)
+
+/* returns old buffer */
+static inline int
+veclist_expand(struct veclist *lst, size_t new_cap)
 {
+    void **new_buf;
+    KASSERT(new_cap > lst->cap, ("veclist expand"));
+    new_buf = (void **)malloc(new_cap * sizeof(void*), lst->mtype, M_NOWAIT);
+    if (new_buf == NULL) {
+        return ENOMEM;
+    }
+    memcpy(new_buf, lst->buf, lst->size * sizeof(void*));
+    free(lst->buf, lst->mtype);
+    lst->buf = new_buf;
+    lst->cap = new_cap;
+    return 0;
+}
+
+static inline int
+veclist_init(struct veclist *lst, size_t init_cap, struct malloc_type *mtype)
+{
+    lst->cap = 0;
+    lst->buf = NULL;
     lst->size = 0;
-    lst->buf = buf;
-    lst->cap = cap;
+    lst->mtype = mtype;
+
+    return init_cap ? veclist_expand(lst, init_cap) : 0;
 }
 
 static inline void * 
@@ -63,6 +89,12 @@ veclist_remove_at(struct veclist *lst, size_t idx)
     memmove(&lst->buf[idx], &lst->buf[idx+1], (lst->size - (idx + 1)) * sizeof(void*));
     lst->size--;
     return ret;
+}
+
+static inline void
+veclist_destroy(struct veclist *lst)
+{
+    free(lst->buf, lst->mtype);
 }
 
 static inline void *
@@ -80,22 +112,31 @@ veclist_remove(struct veclist *lst, void *ele)
 }
 
 /* inserts an element so that the index of the element after insertion is idx */
-static inline void
+static inline int
 veclist_insert_at(struct veclist *lst, void *ele, size_t idx)
 {
-    KASSERT((lst->cap > lst->size) && (lst->size >= idx), ("veclist overflow"));
+    int err;
+    KASSERT(idx <= lst->size, ("veclist idx overflow"));
+    if (lst->size == lst->cap) {
+        /* needs expansion */
+        err = veclist_expand(lst, lst->cap == 0 ? VECLIST_INIT_SZ : lst->cap * VECLIST_EXPAND_FACTOR);
+        if (err) {
+            return err;
+        }
+    }
     memmove(&lst->buf[idx+1], &lst->buf[idx], (lst->size - idx) * sizeof(void*));
     lst->size++;
     lst->buf[idx] = ele;
+    return 0;
 }
 
-static inline void
+static inline int
 veclist_insert_tail(struct veclist *lst, void *ele)
 {
     return veclist_insert_at(lst, ele, lst->size);
 }
 
-static inline void
+static inline int
 veclist_insert_head(struct veclist *lst, void *ele)
 {
     return veclist_insert_at(lst, ele, 0);
@@ -113,41 +154,10 @@ veclist_remove_tail(struct veclist *lst)
     return veclist_remove_at(lst, lst->size - 1);
 }
 
-/* returns old buffer */
-static inline void**
-veclist_expand(struct veclist *lst, void **new_buf, size_t new_cap)
-{
-    void **ret;
-    KASSERT(new_cap > lst->cap, ("veclist expand"));
-    memcpy(new_buf, lst->buf, lst->size * sizeof(void*));
-    ret = lst->buf;
-    lst->buf = new_buf;
-    lst->cap = new_cap;
-    return ret;
-}
-
-static inline int
-veclist_need_exp(struct veclist *lst)
-{
-    return (lst->size == lst->cap);
-}
-
-static inline int 
-veclist_cap(struct veclist *lst)
-{
-    return lst->cap;
-}
-
 static inline int 
 veclist_size(struct veclist *lst)
 {
     return lst->size;
-}
-
-static inline void *
-veclist_buf(struct veclist *lst)
-{
-    return lst->buf;
 }
 
 static inline void *
