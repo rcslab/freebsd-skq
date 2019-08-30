@@ -45,7 +45,6 @@
 #define KQ_NEVENTS	8		/* minimize copy{in,out} calls */
 #define KQEXTENT	256		/* linear growth by this amount */
 
-#define KQDOM_EXTENT 8 /* linear growth by this amount */
 #define KQDIR_ACTIVE (0)
 #define KQDIR_INACTIVE (1)
 
@@ -55,19 +54,20 @@ struct kevq {
 	LIST_ENTRY(kevq)	kevq_th_tqe; /* entry into kevq_thred's kevq_list */
 	struct		kqueue	*kq;     /* the kq that the kevq belongs to */
 	struct		kqdom	*kevq_kqd; /* the kq domain the kevq is on */
+	/* XXX: Make kevq contain a struct thread ptr instead of this dude */
 	struct		kevq_thred *kevq_th; /* the thread that the kevq belongs to */
 	struct		mtx lock;		/* the lock for the kevq */
 	TAILQ_HEAD(, knote) kn_head;	/* list of pending knotes */
 	int		kn_count;				/* number of pending knotes */
 #define KEVQ_SLEEP	0x01
 #define KEVQ_CLOSING  0x02
-#define KEVQ_RDY	0x04
+#define KEVQ_ACTIVE	0x04
 	int		kevq_state;
 	int		kevq_refcnt;
 
 	/* Used by the scheduler */
-	unsigned long kevq_avg_lat;
-	struct timespec kevq_last_kev;
+	uint64_t kevq_avg_lat;
+	uint64_t kevq_last_kev;
 	uint64_t kevq_last_nkev;
 };
 
@@ -75,18 +75,17 @@ struct kevq {
 struct kqdom {
 	/* static */
 	int id;
-	struct mtx	kqd_lock;
+	struct rwlock kqd_lock;
 	struct kqdom *parent;
 	cpuset_t cpu_mask;
 	struct veclist children; /* child kqdoms */
 
 	/* statistics. Atomically updated, doesn't require the lock*/
-	unsigned long avg_lat;
+	uint64_t avg_lat;
 
 	/* dynamic members*/
 	struct veclist kqd_activelist; /* active child kqdoms */
 	struct veclist kqd_kevqs; /* kevqs for this kqdom */
-	int kqd_ckevq; /* current kevq for round robbin. XXX: Remove round robbin it has literally no benefit but maintainance nightmares */
 };
 
 struct kqueue {
@@ -113,13 +112,16 @@ struct kqueue {
 	struct		ucred *kq_cred;
 	struct 		kevqlist  kq_kevqlist; /* list of kevqs */
 
-	/* scheduling stuff */
-	int			kq_sched_flags; /* Scheduler flag for the KQ */
-	/* Round robbin (only as a fall back) */
-	struct		kevq	*kq_ckevq; /* current kevq for multithreaded kqueue, used for round robbin */
-	/* Best of two */
-	struct		rwlock  sched_bot_lk;
-	struct		veclist sched_bot_lst;
+	/* scheduler flags for the KQ, set by IOCTL */
+	int			kq_sflags;
+	int			kq_ssargs;
+	int 		kq_ssched;
+	int			kq_sfargs;
+
+	/* Default */
+	struct		rwlock  kevq_vlist_lk;
+	struct		veclist kevq_vlist;
+
 	/* CPU queue */
 	struct		kqdom 	*kq_kqd; /* root domain */
 };

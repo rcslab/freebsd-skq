@@ -395,13 +395,25 @@ __END_DECLS
  * The ioctl to set multithreaded mode
  */
 #define	FKQMULTI	_IOW('f', 89, int)
+#define	FKQMPRNT	_IO('f', 90)
 
 /*
- * KQ scheduler flags
+ * KQ sched
  */
-#define KQ_SCHED_WS 0x01
-#define KQ_SCHED_QUEUE 	0x02 /* make kq affinitize the knote depending on the first cpu it's scheduled to */
-#define KQ_SCHED_CPU 0x04 /* make kq affinitize the knote depending on the runtime cpu it's scheduled to */
-#define KQ_SCHED_BOT 0x08
+#define KQ_SCHED_QUEUE 0x01 /* affnitizes knotes to the current cpu, sarg = extra queues to check */
+#define KQ_SCHED_CPU 0x02 /* affinitize knotes to the first cpu, sarg = extra queues to check */
+#define KQ_SCHED_BEST 0x04 /* Best of N, sarg = N */
 
+/*
+ * KQ sched flags
+ */
+#define KQ_SCHED_FLAG_WS 0x01 /* work stealing, farg = # of knotes to steal */
+
+/*
+ * 0 - 7: sched
+ * 8 - 15: sargs
+ * 16 - 23: flags
+ * 24 - 31: fargs
+ */
+#define KQSCHED_MAKE(sched, sargs, flags, fargs) (((sched) & 0xFF) | (((sargs) & 0xFF) << 8) | (((flags) & 0xFF) << 16) | (((fargs) & 0xFF) << 24))
 #endif /* !_SYS_EVENT_H_ */

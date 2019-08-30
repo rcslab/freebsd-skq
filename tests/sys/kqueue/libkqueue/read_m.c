@@ -51,26 +51,6 @@ struct thread_info g_thrd_info[THREAD_CNT];
 /* Test threads signals this upon receiving events */
 sem_t g_sem_driver;
 
-static void
-check_sched(struct thread_info *info, int size, unsigned int max_diff)
-{
-    int max = 0, min = INT_MAX;
-
-    for(int i = 0; i < size; i++) {
-        int cur = info[i].evcnt;
-        if (cur > max) {
-            max = cur;
-        }
-        if (cur < min) {
-            min = cur;
-        }
-    }
-
-    if ((max - min) > max_diff) {
-        err(1, "READ_M: check_sched: max difference is %d\n", max - min);
-    }
-}
-
 static char
 socket_pop(int sockfd)
 {
@@ -189,11 +169,7 @@ test_socket_read(int delay)
         socket_push(g_sockfd[1], '.');
         /* wait for thread events */
         sem_wait(&g_sem_driver);
-
-        if (!delay)
-            check_sched(g_thrd_info, THREAD_CNT, 1);
     }
-
 
 #ifdef TEST_DEBUG
     printf("READ_M: finished testing, system shutting down...\n");
@@ -386,6 +362,11 @@ test_socket_queue(void)
         }
     }
 
+    /* dump KQ */
+    error = ioctl(g_kqfd, FKQMPRNT);
+    if (error == -1) {
+        err(1, "dump ioctl failed");
+    }
 
 #ifdef TEST_DEBUG
     printf("READ_M: finished testing, system shutting down...\n");
@@ -717,63 +698,76 @@ test_evfilt_read_m()
 {
     int flags = 0;
     g_kqfd = kqueue();
+
+    /* Default rand */
     int error = ioctl(g_kqfd, FKQMULTI, &flags);
     if (error == -1) {
         err(1, "ioctl");
     }
-
     test_socket_read(0);
-    test_socket_brutal("round robbin");
-
+    test_socket_brutal("rand");
     close(g_kqfd);
 
-    /* test scheduler */
-    flags = KQ_SCHED_QUEUE;
+    /* Queue + bo0 */
+    flags = KQSCHED_MAKE(KQ_SCHED_QUEUE,0,0,0);
     g_kqfd = kqueue();
     error = ioctl(g_kqfd, FKQMULTI, &flags);
     if (error == -1) {
         err(1, "ioctl");
     }
-
-    //test_socket_queue();
-    test_socket_brutal("queue");
-
+    test_socket_queue();
+    test_socket_brutal("queue0");
     close(g_kqfd);
 
-
-    flags = KQ_SCHED_CPU;
+    /* CPU + Bo0 */
+    flags = KQSCHED_MAKE(KQ_SCHED_CPU,0,0,0);;
     g_kqfd = kqueue();
     error = ioctl(g_kqfd, FKQMULTI, &flags);
     if (error == -1) {
         err(1, "ioctl");
     }
-
-    test_socket_brutal("cpu");
-
+    test_socket_brutal("cpu0");
     close(g_kqfd);
 
-
-    flags = KQ_SCHED_WS;
+    /* CPU + Bo1 */
+    flags = KQSCHED_MAKE(KQ_SCHED_CPU,1,0,0);;
     g_kqfd = kqueue();
     error = ioctl(g_kqfd, FKQMULTI, &flags);
     if (error == -1) {
         err(1, "ioctl");
     }
-
-    test_socket_ws();
-    test_socket_brutal("work stealing");
+    test_socket_brutal("cpu1");
     close(g_kqfd);
 
-    flags = KQ_SCHED_BOT;
+    /* CPU + Bo2 */
+    flags = KQSCHED_MAKE(KQ_SCHED_CPU,2,0,0);
     g_kqfd = kqueue();
     error = ioctl(g_kqfd, FKQMULTI, &flags);
     if (error == -1) {
         err(1, "ioctl");
     }
+    test_socket_brutal("cpu2");
+    close(g_kqfd);
 
-    test_socket_brutal("best of two");
+    /* BO2 */
+    flags = KQSCHED_MAKE(KQ_SCHED_BEST,2,0,0);
+    g_kqfd = kqueue();
+    error = ioctl(g_kqfd, FKQMULTI, &flags);
+    if (error == -1) {
+        err(1, "ioctl");
+    }
+    test_socket_brutal("best2");
     test_socket_read(1);
+    close(g_kqfd);
 
-
+    /* WS */
+    flags = KQSCHED_MAKE(0,0,KQ_SCHED_FLAG_WS,1);;
+    g_kqfd = kqueue();
+    error = ioctl(g_kqfd, FKQMULTI, &flags);
+    if (error == -1) {
+        err(1, "ioctl");
+    }
+    test_socket_ws();
+    test_socket_brutal("ws1");
     close(g_kqfd);
 }
