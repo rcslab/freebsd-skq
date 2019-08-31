@@ -89,8 +89,8 @@ __FBSDID("$FreeBSD$");
 static MALLOC_DEFINE(M_KQUEUE, "kqueue", "memory for kqueue system");
 
 #define KQDOM_FLAGS (KQ_SCHED_CPU | KQ_SCHED_QUEUE)
-#define KEVQ_LAT_FLAGS (KQ_SCHED_CPU | KQ_SCHED_QUEUE | KQ_SCHED_BEST)
-
+#define KEVQ_LAT_FLAGS ((uint64_t)-1) //(KQ_SCHED_CPU | KQ_SCHED_QUEUE | KQ_SCHED_BEST)
+#define DUMP_INDENT (4)
 /*
  * This lock is used if multiple kq locks are required.  This possibly
  * should be made into a per proc lock.
@@ -112,11 +112,13 @@ TASKQUEUE_DEFINE_THREAD(kqueue_ctx);
 
 // TODO: only use it in SMP
 extern struct cpu_group *cpu_top;
-#define AVG_WEIGHT_FACTOR_OLD (4)
-#define AVG_WEIGHT_FACTOR_NEW (1)
 
-/* no need to handle overflow as long as the existing org/cur doesn't overflow */
-#define CALC_OVERTIME_AVG(prev, cur) (((prev) * AVG_WEIGHT_FACTOR_OLD + (cur) * AVG_WEIGHT_FACTOR_NEW) / (AVG_WEIGHT_FACTOR_OLD + AVG_WEIGHT_FACTOR_NEW))
+static inline uint64_t
+calc_overtime_avg(uint64_t prev, uint64_t cur, uint32_t prev_pct)
+{
+	KASSERT(prev_pct < 100, ("overtime average prev_pct >= 100"));
+	return (prev * prev_pct + cur * (100 - prev_pct)) / 100;
+}
 
 static struct kevq * kevqlist_find(struct kevqlist *kevq_list, struct kqueue *kq); 
 static void kevq_thred_init(struct kevq_thred *kevq_th);
@@ -127,7 +129,7 @@ static void kevq_release(struct kevq* kevq, int locked);
 static void kevq_destroy(struct kevq *kevq);
 static int 	kevq_acquire(struct kevq *kevq, int locked);
 static void kevq_worksteal(struct kevq *kevq);
-void kevq_drain(struct kevq *kevq, struct thread *td);
+static void kevq_drain(struct kevq *kevq, struct thread *td);
 static void kevq_activate(struct kevq *kevq, struct thread *td);
 
 
@@ -1474,13 +1476,14 @@ kqueue_kevent(struct kqueue *kq, struct kevq *kevq, struct thread *td, int nchan
 
 			CTR3(KTR_KQ, "kevent: td %d nkev %d kevent (delta) %ld ns", td->td_tid, kevq->kevq_last_nkev, cur_ts);
 			
-			/* divide by the number of events processed */
-			avg = cur_ts / kevq->kevq_last_nkev;
+			/* update total time */
+			kevq->kevq_tot_time += cur_ts;
 
+			/* update average latency */
+			avg = cur_ts / kevq->kevq_last_nkev;
 			CTR3(KTR_KQ, "kevent: td %d nkev %d kevent (avg) %ld ns", td->td_tid, kevq->kevq_last_nkev, avg);
-			
 			if (kevq->kevq_avg_lat != 0) {
-				kevq->kevq_avg_lat = CALC_OVERTIME_AVG(kevq->kevq_avg_lat, avg);
+				kevq->kevq_avg_lat = calc_overtime_avg(kevq->kevq_avg_lat, avg, 80);
 			} else {
 				kevq->kevq_avg_lat = avg;
 			}
@@ -2339,7 +2342,26 @@ kqdom_destroy(struct kqdom *root)
 static void 
 kevq_dump(struct kevq *kevq, int level, struct sbuf *buf)
 {
-	sbuf_printf(buf, "%*c<kevq: %p #knotes: %d avg_lat: %ld/>\n", level * 2, ' ', kevq, kevq->kn_count, kevq->kevq_avg_lat);
+	int error;
+
+	error = sbuf_printf(buf, "%*c<kevq: %p knotes: %d "
+						"total_time: %ld "
+						"total_syscall: %ld "
+						"total_events: %ld "
+						"avg_latency: %ld "
+						"avg_events: %ld "
+						"total_fallbacks: %ld "
+						"total_mismatches: %ld/>\n",
+						level * DUMP_INDENT, ' ', kevq, kevq->kn_count, 
+						kevq->kevq_tot_time,
+						kevq->kevq_tot_syscall,
+						kevq->kevq_tot_ev,
+						kevq->kevq_avg_lat,
+						kevq->kevq_avg_ev,
+						kevq->kevq_tot_fallback,
+						kevq->kevq_tot_kqd_mismatch);
+
+	KASSERT(error == 0, ("error writing sbuf"));
 }
 
 static void
@@ -2347,10 +2369,8 @@ kqdom_dump(struct kqdom *kqd, int level, struct sbuf *buf)
 {	
 	/* XXX: No potential race between this and kqdom_build() for now. 
 	 * If we move kqdom_build() out of kqueue() syscall then there is a potential race */
-
-	
-	/* XXX2: check return code */
-	sbuf_printf(buf, "%*c<kqdom id: %d level: %d cpu_mask:0x%lx #children: %d #active: %d leaf: %d #kevq: %d>\n", level * 2, ' ',
+	int error;
+	error = sbuf_printf(buf, "%*c<kqdom id: %d level: %d cpu_mask:0x%lx #children: %d #active: %d leaf: %d #kevq: %d>\n", level * DUMP_INDENT, ' ',
 																													kqd->id, 
 																													level,
 																													kqd->cpu_mask.__bits[0], 
@@ -2358,11 +2378,12 @@ kqdom_dump(struct kqdom *kqd, int level, struct sbuf *buf)
 																													veclist_size(&kqd->kqd_activelist), 
 																													kqdom_is_leaf(kqd), 
 																													veclist_size(&kqd->kqd_kevqs));
+	KASSERT(error == 0, ("error writing sbuf"));
+
 	if (kqdom_is_leaf(kqd)) {
 		KQD_RLOCK(kqd);
 		/* print all kevqs */
 		for (int i = 0; i < veclist_size(&kqd->kqd_kevqs); i++) {
-			/* XXX: check return code */
 			kevq_dump(veclist_at(&kqd->kqd_kevqs, i), level + 1, buf);
 		}
 		KQD_RUNLOCK(kqd);
@@ -2371,9 +2392,8 @@ kqdom_dump(struct kqdom *kqd, int level, struct sbuf *buf)
 			kqdom_dump(veclist_at(&kqd->children, i), level + 1, buf);
 		}
 	}
-
-	/* XXX: check return code */
-	sbuf_printf(buf, "%*c</kqdom>\n", level * 2, ' ');
+	error = sbuf_printf(buf, "%*c</kqdom>\n", level * DUMP_INDENT, ' ');
+	KASSERT(error == 0, ("error writing sbuf"));
 }
 
 
@@ -2440,7 +2460,7 @@ kqdom_update_lat(struct kqdom *leaf, uint64_t avg)
 	while(leaf != NULL) {
 		if (leaf->avg_lat != 0) {
 			// bit rot race here?
-			leaf->avg_lat = CALC_OVERTIME_AVG(leaf->avg_lat, avg);
+			leaf->avg_lat = calc_overtime_avg(leaf->avg_lat, avg, 80);
 		} else {
 			leaf->avg_lat = avg;
 		}
@@ -3005,11 +3025,20 @@ done:
 
 	KEVQ_UNLOCK(kevq);
 
-	if (nkev != 0 && (KQSCHED_GET_SCHED(kq) & KEVQ_LAT_FLAGS)) {
+	if (nkev > 0 && (KQSCHED_GET_SCHED(kq) & KEVQ_LAT_FLAGS)) {
 		/* book keep the statistics */
 		kevq->kevq_last_kev = get_cyclecount();
 		kevq->kevq_last_nkev = nkev;
 		CTR3(KTR_KQ, "kevent: td %d nkev %d kevent (exit) %ld ns", td->td_tid, kevq->kevq_last_nkev, kevq->kevq_last_kev);
+
+		/* update total ev */
+		kevq->kevq_tot_ev += nkev;
+		kevq->kevq_tot_syscall++;
+		if (kevq->kevq_avg_ev == 0) {
+			kevq->kevq_avg_ev = nkev;
+		} else {
+			kevq->kevq_avg_ev = calc_overtime_avg(kevq->kevq_avg_ev, nkev, 80);
+		}
 	}
 
 	CTR2(KTR_KQ, "kqueue_scan: knote_free marker %p td %d", marker, td->td_tid);
@@ -3099,11 +3128,11 @@ kqueue_ioctl(struct file *fp, u_long cmd, void *data,
 			if (kq->kq_flags & KQ_FLAG_MULTI) {
 				/* 4MB buffer */
 				dat = malloc(sizeof(char) * 4096 * 1024, M_KQUEUE, M_WAITOK | M_ZERO);
-				sbuf_new(&buf, dat, 4096 * 1024 * sizeof(char), SBUF_AUTOEXTEND | SBUF_INCLUDENUL);
+				sbuf_new(&buf, dat, 4096 * 1024 * sizeof(char), SBUF_INCLUDENUL);
 				/* dump kvlst */
-				/* XXX: check return status of sbuf_printf */
 
-				sbuf_printf(&buf, "KQ 0x%p dump:\n\nActive KEVQ:\n", kq);
+				error = sbuf_printf(&buf, "KQ 0x%p dump:\n\nActive KEVQ:\n", kq);
+				KASSERT(error == 0, ("error writing sbuf"));
 				KVLST_RLOCK(kq);
 				for(int i = 0; i < veclist_size(&kq->kevq_vlist); i++) {
 					kevq_dump(veclist_at(&kq->kevq_vlist, i), 0, &buf);
@@ -3112,11 +3141,13 @@ kqueue_ioctl(struct file *fp, u_long cmd, void *data,
 
 				/* dump kqdom if used */
 				if (KQSCHED_GET_SCHED(kq) & KQDOM_FLAGS) {
-					sbuf_printf(&buf, "\nKQDOM:\n");
+					error = sbuf_printf(&buf, "\nKQDOM:\n");
+					KASSERT(error == 0, ("error writing sbuf"));
 					kqdom_dump(kq->kq_kqd, 0, &buf);
 				}
 
-				sbuf_finish(&buf);
+				error = sbuf_finish(&buf);
+				KASSERT(error == 0, ("error sbuf_finish"));
 				uprintf("%s", sbuf_data(&buf));
 				sbuf_delete(&buf);
 				free(dat, M_KQUEUE);
@@ -4141,7 +4172,9 @@ knote_next_kevq(struct knote *kn)
 	int sargs;
 	int sched;
 	int rand, sz;
+	int kqd_mismatch;
 
+	kqd_mismatch = 0;
 	next_kevq = NULL;
 	kq = kn->kn_kq;
 	sargs = KQSCHED_GET_SARGS(kq);
@@ -4180,10 +4213,14 @@ knote_next_kevq(struct knote *kn)
 				kn->kn_kqd = kqdom_find(kq->kq_kqd, PCPU_GET(cpuid));
 
 				KASSERT(kn->kn_kqd != NULL, ("knote scheduled on an unidentified CPU"));
-				CTR3(KTR_KQ, "knote_next_kevq: [QUEUE%d] knote %p attached to kqdom id %d", sargs, kn, kn->kn_kqd->id);
+				CTR4(KTR_KQ, "knote_next_kevq: [QUEUE%d] knote %p attached to kqdom id %d cpuset 0x%lx", sargs, kn, kn->kn_kqd->id, kn->kn_kqd->cpu_mask.__bits[0]);
 			}
 			kqd = kn->kn_kqd;
-
+			
+			/* Check if the knote interrupt is triggered on a cpu that's different from the memorized one */
+			if (!CPU_ISSET(PCPU_GET(cpuid), &kqd->cpu_mask)) {
+				kqd_mismatch = 1;
+			}
 done_cq:
 			KASSERT(kqdom_is_leaf(kqd), ("found kqdom not leaf"));
 
@@ -4202,6 +4239,10 @@ done_cq:
 
 			next_kevq = kevq_lock_check_avail(next_kevq);
 			KQD_RUNLOCK(kqd);
+
+			if (kqd_mismatch && next_kevq != NULL) {
+				next_kevq->kevq_tot_kqd_mismatch++;
+			}
 
 			CTR3(KTR_KQ, "knote_next_kevq: [QUEUE/CPU%d] next kevq %p for kn %p", sargs, next_kevq, kn);
 			break;
@@ -4232,6 +4273,7 @@ done_cq:
 			next_kevq = kevq_lock_check_avail(next_kevq);
 
 			if (next_kevq != NULL) {
+				next_kevq->kevq_tot_fallback++;
 				break;
 			}
 

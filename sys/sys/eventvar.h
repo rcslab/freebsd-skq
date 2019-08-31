@@ -65,10 +65,18 @@ struct kevq {
 	int		kevq_state;
 	int		kevq_refcnt;
 
-	/* Used by the scheduler */
-	uint64_t kevq_avg_lat;
 	uint64_t kevq_last_kev;
 	uint64_t kevq_last_nkev;
+	/* Sched stats */
+	uint64_t kevq_avg_lat;
+	uint64_t kevq_avg_ev;
+	uint64_t kevq_tot_ev;
+	uint64_t kevq_tot_time;
+	uint64_t kevq_tot_syscall;
+
+	/* TODO: maybe these should be in kqdomain or global */
+	uint64_t kevq_tot_fallback;
+	uint64_t kevq_tot_kqd_mismatch;
 };
 
 /* TODO: assumed that threads don't get rescheduled across cores */

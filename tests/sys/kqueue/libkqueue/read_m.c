@@ -274,7 +274,7 @@ test_socket_queue(void)
 {
     int error = 0;
     const char *test_id = "[Multi][Queue]kevent(EVFILT_READ)";
-
+    
     test_begin(test_id);
 
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, &g_sockfd[0]) < 0) 
