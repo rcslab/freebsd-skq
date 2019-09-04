@@ -304,10 +304,11 @@ struct knote {
 #define KN_QUEUED	0x02			/* event is on queue */
 #define KN_DISABLED	0x04			/* event is disabled */
 #define KN_DETACHED	0x08			/* knote is detached */
-#define KN_MARKER	0x20			/* ignore this knote */
-#define KN_KQUEUE	0x40			/* this knote belongs to a kq */
-#define	KN_SCAN		0x100			/* flux set in kqueue_scan() */
-#define KN_REQUEUE 	0x200			/* knote has triggered and is requeued to the current queue */
+#define KN_MARKER	0x10			/* ignore this knote */
+#define KN_KQUEUE	0x20			/* this knote belongs to a kq */
+#define	KN_SCAN		0x40			/* flux set in kqueue_scan() */
+#define KN_PROCESSING 0x80			/* the knote on the kevq is undergoing userspace processing */
+#define KN_WS 	0x100 				/* the knote is stolen from another kevq */
 	int			kn_fluxwait;
 	int			kn_influx;
 	struct 		mtx kn_fluxlock;
@@ -395,7 +396,7 @@ __END_DECLS
  * The ioctl to set multithreaded mode
  */
 #define	FKQMULTI	_IOW('f', 89, int)
-#define	FKQMPRNT	_IO('f', 90)
+#define	FKQMPRNT	_IOW('f', 90, uintptr_t)
 
 /*
  * KQ sched

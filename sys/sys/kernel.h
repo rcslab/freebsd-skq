@@ -170,6 +170,7 @@ enum sysinit_sub_id {
 	SI_SUB_SMP		= 0xf000000,	/* start the APs*/
 #endif	
 	SI_SUB_RACCTD		= 0xf100000,	/* start racctd*/
+	SI_SUB_KQUEUE		= 0xf200000, /* initialize kqueue */
 	SI_SUB_LAST		= 0xfffffff	/* final initialization */
 };
 

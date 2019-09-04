@@ -62,6 +62,7 @@ struct kevq {
 #define KEVQ_SLEEP	0x01
 #define KEVQ_CLOSING  0x02
 #define KEVQ_ACTIVE	0x04
+#define KEVQ_WS 0x08 /* the kevq is work stealing */
 	int		kevq_state;
 	int		kevq_refcnt;
 
@@ -73,6 +74,7 @@ struct kevq {
 	uint64_t kevq_tot_ev;
 	uint64_t kevq_tot_time;
 	uint64_t kevq_tot_syscall;
+	uint64_t kevq_tot_ws;
 
 	/* TODO: maybe these should be in kqdomain or global */
 	uint64_t kevq_tot_fallback;

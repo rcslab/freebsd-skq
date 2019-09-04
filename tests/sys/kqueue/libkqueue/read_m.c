@@ -42,14 +42,30 @@ struct thread_info {
  * Read test
  */
 
-#define THREAD_CNT (32)
-#define PACKET_CNT (3200)
+#define THREAD_CNT (16)
+#define PACKET_CNT (1600)
 
-int g_kqfd;
-int g_sockfd[2];
-struct thread_info g_thrd_info[THREAD_CNT];
+static int g_kqfd;
+static int g_sockfd[2];
+static struct thread_info g_thrd_info[THREAD_CNT];
 /* Test threads signals this upon receiving events */
-sem_t g_sem_driver;
+static sem_t g_sem_driver;
+
+static char dmpbuf[1024 * 1024 + 1];
+static inline void
+dump_gkq()
+{
+    int error;
+    uintptr_t para = (uintptr_t)&dmpbuf;
+    /* dump KQ */
+    memset(dmpbuf, 0, 1024 * 1024 + 1);
+    error = ioctl(g_kqfd, FKQMPRNT, &para);
+    if (error == -1) {
+        err(1, "dump ioctl failed");
+    } else {
+        printf("%s\n", dmpbuf);
+    }
+}
 
 static char
 socket_pop(int sockfd)
@@ -362,11 +378,7 @@ test_socket_queue(void)
         }
     }
 
-    /* dump KQ */
-    error = ioctl(g_kqfd, FKQMPRNT);
-    if (error == -1) {
-        err(1, "dump ioctl failed");
-    }
+    dump_gkq();
 
 #ifdef TEST_DEBUG
     printf("READ_M: finished testing, system shutting down...\n");
@@ -410,10 +422,11 @@ test_socket_queue(void)
 /***************************
  * WS test
  ***************************/
-#define SOCK_WS_CNT (100)
-#define WS_TIMEOUT (10)
+#define SOCK_WS_CNT (127)
+#define SOCK_WS_TOT (SOCK_WS_CNT * 50)
 
 static volatile int ws_num = 0;
+static volatile int ws_ok = 0;
 
 static void*
 test_socket_ws_worker(void* args)
@@ -422,16 +435,27 @@ test_socket_ws_worker(void* args)
     char dat;
     struct kevent *ret;
 
-    while (ws_num < SOCK_WS_CNT) {
-        if (info->ws_master == 0) {
-            ret = kevent_get_timeout_u(g_kqfd, WS_TIMEOUT);
+    while (ws_num < SOCK_WS_TOT) {
+            ret = kevent_get(g_kqfd);
+            if (info->ws_master == 0) {
+                if (ret != NULL) {
+                    free(ret);
+                }
+                break;
+            }
             if (ret != NULL) {
                 dat = socket_pop(ret->ident);
+#ifdef TEST_DEBUG
+        printf("READ_M: thread %d wokeup for event: ws_num: %d\n", info->tid, ws_num); 
+#endif
                 free(ret);
                 ws_num++;
             }
-        }
     }
+
+    /* the master does nothing */
+    while(!ws_ok) {
+    };
     
 #ifdef TEST_DEBUG
         printf("READ_M: thread %d exiting\n", info->tid); 
@@ -439,7 +463,7 @@ test_socket_ws_worker(void* args)
     pthread_exit(0);
 }
 
-int ws_sockfd[SOCK_WS_CNT][2];
+int ws_sockfd[SOCK_WS_CNT + 1][2];
 
 static void
 test_socket_ws()
@@ -447,10 +471,9 @@ test_socket_ws()
     struct kevent kev;
     struct thread_info thrd_info[2];
     const char *test_id = "[Multi][WS]kevent(evfilt)";
-    cpuset_t cpuset;
     test_begin(test_id);
 
-    for (int i = 0; i < SOCK_WS_CNT; i++) {
+    for (int i = 0; i < SOCK_WS_CNT + 1; i++) {
 
         /* Create a connected pair of full-duplex sockets for testing socket events */
         if (socketpair(AF_UNIX, SOCK_STREAM, 0, &ws_sockfd[i][0]) < 0) {
@@ -473,21 +496,12 @@ test_socket_ws()
         thrd_info[i].tid = i;
         thrd_info[i].ws_master = i;
         pthread_create(&thrd_info[i].thrd, NULL, test_socket_ws_worker, &thrd_info[i]);
-        CPU_ZERO(&cpuset);
-        CPU_SET(0, &cpuset);
-        if (pthread_setaffinity_np(thrd_info[i].thrd, sizeof(cpuset_t), &cpuset) < 0) {
-                err(1, "thread_affinity");
-        }
     }
 
-    sleep(3);
-
-    for(int i = 0; i < SOCK_WS_CNT; i++) {
-#ifdef TEST_DEBUG
-    printf("READ_M: pusing 1 packet to sock %d\n", i);
-#endif
-        socket_push(ws_sockfd[i][1], '.');
-    }
+    sleep(1);
+    
+    /* push 1 packet to the last socket*/
+    socket_push(ws_sockfd[SOCK_WS_CNT][1], '.');
 
     sleep(1);
 
@@ -498,12 +512,20 @@ test_socket_ws()
         thrd_info[i].tid = i;
         thrd_info[i].ws_master = i;
         pthread_create(&thrd_info[i].thrd, NULL, test_socket_ws_worker, &thrd_info[i]);
-        CPU_ZERO(&cpuset);
-        CPU_SET(0, &cpuset);
-        if (pthread_setaffinity_np(thrd_info[i].thrd, sizeof(cpuset_t), &cpuset) < 0) {
-                err(1, "thread_affinity");
-        }
     }
+
+    sleep(1);
+    
+    for(int i = 0; i < SOCK_WS_TOT; i++) {
+        socket_push(ws_sockfd[i % SOCK_WS_CNT][1], '.');
+    }
+
+    while(ws_num < SOCK_WS_TOT) {
+    };
+    
+    dump_gkq();
+    
+    ws_ok = 1;
 
     /* shutdown the systems */
 #ifdef TEST_DEBUG
@@ -513,7 +535,7 @@ test_socket_ws()
         pthread_join(thrd_info[i].thrd, NULL);
     }
 
-    for (int i = 0; i < SOCK_WS_CNT; i++) {
+    for (int i = 0; i < SOCK_WS_CNT + 1; i++) {
         EV_SET(&kev, ws_sockfd[i][0], EVFILT_READ, EV_DELETE, 0, 0, &ws_sockfd[i][0]);
 
         if (kevent(g_kqfd, &kev, 1, NULL, 0, NULL) == -1) {
@@ -524,14 +546,100 @@ test_socket_ws()
     success();
 }
 
+static uint64_t get_utime()
+{
+    struct timespec spec;
+
+    clock_gettime(CLOCK_REALTIME_PRECISE, &spec);
+
+    return spec.tv_nsec / 1000 + spec.tv_sec * 1000 * 1000;
+}
+
+#define TIMEOUT_THRESHOLD (1)
+
+static void
+test_socket_ws_check_timeout(uint64_t utimeout) 
+{
+    struct kevent *kev;
+
+    uint64_t start = get_utime();
+    kev = kevent_get_timeout_u(g_kqfd, utimeout);
+    uint64_t end = get_utime();
+    int pct = (end - start) * 100 / utimeout;
+    if (kev != NULL) {
+        err(1, "ws timeout kev != NULL");
+    }
+    if (pct > TIMEOUT_THRESHOLD) {
+        err(1, "ws timeout error too large: %d", pct);
+    }
+}
+
+static void
+test_socket_ws_timeout()
+{
+    struct kevent kev, *ret;
+    const char *test_id = "[Multi][WS]kevent_timeout(evfilt)";
+    test_begin(test_id);
+
+    int flags = KQSCHED_MAKE(0,0,KQ_SCHED_FLAG_WS,1);
+    int tkqfd = kqueue();
+    int error = ioctl(tkqfd, FKQMULTI, &flags);
+    if (error == -1) {
+        err(1, "ioctl");
+    }
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, &g_sockfd[0]) < 0) 
+        err(1, "kevent_read socket");
+    
+    EV_SET(&kev, g_sockfd[1], EVFILT_READ, EV_ADD, 0, 0, NULL);
+
+    if (kevent(tkqfd, &kev, 1, NULL, 0, NULL) == -1) {
+        err(1, "kevent_ws_timeout_add");     
+    }
+    
+    /* 1s */
+    printf("1s. \n");
+    ret = kevent_get_timeout_u(tkqfd, 1000 * 1000);
+    /* 100 ms */
+    printf("100ms. \n");
+    ret = kevent_get_timeout_u(tkqfd, 1000 * 100);
+    /* 10 ms */
+    printf("10ms. \n");
+    ret = kevent_get_timeout_u(tkqfd, 1000 * 10);
+    /* 1 ms */
+     printf("1ms. \n");
+    ret = kevent_get_timeout_u(tkqfd, 1000);
+    /* 100 us */
+     printf("100u. \n");
+    ret = kevent_get_timeout_u(tkqfd, 100);
+    /* 10 us */
+     printf("10us. \n");
+    ret = kevent_get_timeout_u(tkqfd, 10);
+    /* 1 us */
+     printf("1us. \n");
+    ret = kevent_get_timeout_u(tkqfd, 1);
+
+    EV_SET(&kev, g_sockfd[1], EVFILT_READ, EV_DELETE, 0, 0, NULL);
+
+    if (kevent(tkqfd, &kev, 1, NULL, 0, NULL) == -1) {
+        err(1, "kevent_ws_timeout_delete");     
+    }
+
+    close(g_sockfd[0]);
+    close(g_sockfd[1]);
+    close(tkqfd);
+
+    success();
+}
+
 
 /***************************
  * Brutal test
  ***************************/
-#define THREAD_BRUTE_CNT (32)
-#define SOCK_BRUTE_CNT (64)
-#define PACKET_BRUTE_CNT (10000)
-#define THREAD_EXIT_PROB (50)
+#define THREAD_BRUTE_CNT (16)
+#define SOCK_BRUTE_CNT (128)
+#define PACKET_BRUTE_CNT (50 * (SOCK_BRUTE_CNT))
+#define THREAD_EXIT_PROB (67)
 
 #define RAND_SLEEP (29)
 #define RAND_SEND_SLEEP (7)
@@ -615,7 +723,6 @@ test_socket_brutal(char* name)
             err(1, "kevent_socket"); 
         }
 
-        
         EV_SET(&kev, brute_sockfd[i][0], EVFILT_READ, EV_ADD, 0, 0, &brute_sockfd[i][0]);
 
         if (kevent(g_kqfd, &kev, 1, NULL, 0, NULL) == -1) {
@@ -692,15 +799,16 @@ test_socket_brutal(char* name)
     success();
 }
 
-
 void
 test_evfilt_read_m()
 {
     int flags = 0;
-    g_kqfd = kqueue();
+    int error;
 
     /* Default rand */
-    int error = ioctl(g_kqfd, FKQMULTI, &flags);
+    flags = 0;
+    g_kqfd = kqueue();
+    error = ioctl(g_kqfd, FKQMULTI, &flags);
     if (error == -1) {
         err(1, "ioctl");
     }
@@ -756,18 +864,21 @@ test_evfilt_read_m()
     if (error == -1) {
         err(1, "ioctl");
     }
-    test_socket_brutal("best2");
+    
     test_socket_read(1);
+    test_socket_brutal("best2");
     close(g_kqfd);
 
     /* WS */
-    flags = KQSCHED_MAKE(0,0,KQ_SCHED_FLAG_WS,1);;
+    flags = KQSCHED_MAKE(0,0,KQ_SCHED_FLAG_WS,1);
     g_kqfd = kqueue();
     error = ioctl(g_kqfd, FKQMULTI, &flags);
     if (error == -1) {
         err(1, "ioctl");
     }
+
     test_socket_ws();
+    test_socket_ws_timeout();
     test_socket_brutal("ws1");
     close(g_kqfd);
 }

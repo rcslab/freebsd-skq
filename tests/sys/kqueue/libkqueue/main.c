@@ -119,12 +119,13 @@ kevent_get_timeout(int kqfd, int seconds)
 
 /* Retrieve a single kevent, specifying a maximum time to wait for it. */
 struct kevent *
-kevent_get_timeout_u(int kqfd, int useconds)
+kevent_get_timeout_u(int kqfd, uint64_t useconds)
 {
     int nfds;
     struct kevent *kev;
-    struct timespec timeout = {0, useconds * 1000};
-
+    uint64_t nsec = useconds * 1000;
+    struct timespec timeout = {nsec / 1000000000, nsec % 1000000000};
+    printf("timeout: %ld sec, %ld nsec\n", timeout.tv_sec, timeout.tv_nsec);
     if ((kev = calloc(1, sizeof(*kev))) == NULL)
         err(1, "out of memory");
     
