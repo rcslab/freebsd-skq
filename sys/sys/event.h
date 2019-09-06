@@ -146,6 +146,7 @@ struct kevent32_freebsd11 {
 #define EV_RECEIPT	0x0040		/* force EV_ERROR on success, data=0 */
 #define EV_DISPATCH	0x0080		/* disable event after reporting */
 #define EV_AFFINITY	0x0200		/* in multithreaded mode, this event has hard affinity for the registering thread */
+#define EV_REALTIME  0x0400		/* this knote has REALTIME priority */
 
 #define EV_SYSFLAGS	0xF000		/* reserved by system */
 #define	EV_DROP		0x1000		/* note should be dropped */
@@ -221,6 +222,7 @@ struct kevent32_freebsd11 {
 
 struct knote;
 SLIST_HEAD(klist, knote);
+TAILQ_HEAD(ktailq, knote);
 struct kqueue;
 TAILQ_HEAD(kqlist, kqueue);
 struct kevq;
@@ -291,7 +293,7 @@ struct knote {
 	TAILQ_ENTRY(knote)	kn_tqe;
 	TAILQ_ENTRY(knote) 	kn_wse; /* for work stealing queue */
 	struct			kqueue *kn_kq;	/* which kqueue we are on */
-	struct			kevq *kn_kevq; /* the kevq the knote is on */
+	struct			kevq *kn_kevq; /* the kevq the knote is on, only valid if KN_QUEUED */
 	/* used by the scheduler */
 	struct			kevq *kn_org_kevq; /* the kevq that registered the knote */
 	struct		kqdom	*kn_kqd; /* the kqdomain the knote belongs to */
@@ -396,7 +398,8 @@ __END_DECLS
  * The ioctl to set multithreaded mode
  */
 #define	FKQMULTI	_IOW('f', 89, int)
-#define	FKQMPRNT	_IOW('f', 90, uintptr_t)
+#define FKQTUNE		_IOW('f', 90, int)
+#define	FKQMPRNT	_IOW('f', 91, uintptr_t)
 
 /*
  * KQ sched
@@ -406,15 +409,22 @@ __END_DECLS
 #define KQ_SCHED_BEST 0x04 /* Best of N, sarg = N */
 
 /*
- * KQ sched flags
+ * KQ sched features
  */
-#define KQ_SCHED_FLAG_WS 0x01 /* work stealing, farg = # of knotes to steal */
+#define KQ_SCHED_FEAT_WS 0x01 /* work stealing, farg = # of knotes to steal */
+
+/*
+ * KQ tunables
+ */
+#define KQTUNE_FREQ 0x01 /* the target frequency of each call, default 0 meaning unlimited */
+#define KQTUNE_RTSHARE 0x02 /* the percent share of runtime events vs batch events, default 100 meaning always hand runtime events first */
 
 /*
  * 0 - 7: sched
  * 8 - 15: sargs
- * 16 - 23: flags
+ * 16 - 23: features
  * 24 - 31: fargs
  */
-#define KQSCHED_MAKE(sched, sargs, flags, fargs) (((sched) & 0xFF) | (((sargs) & 0xFF) << 8) | (((flags) & 0xFF) << 16) | (((fargs) & 0xFF) << 24))
+#define KQSCHED_MAKE(sched, sargs, feat, fargs) (((sched) & 0xFF) | (((sargs) & 0xFF) << 8) | (((feat) & 0xFF) << 16) | (((fargs) & 0xFF) << 24))
+#define KQTUNE_MAKE(obj, val) ((obj & 0xFFFF) | (val & 0xFFFF) << 16)
 #endif /* !_SYS_EVENT_H_ */

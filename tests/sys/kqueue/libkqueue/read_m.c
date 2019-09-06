@@ -56,7 +56,7 @@ static inline void
 dump_gkq()
 {
     int error;
-    uintptr_t para = (uintptr_t)&dmpbuf;
+    uintptr_t para = (uintptr_t)dmpbuf;
     /* dump KQ */
     memset(dmpbuf, 0, 1024 * 1024 + 1);
     error = ioctl(g_kqfd, FKQMPRNT, &para);
@@ -581,7 +581,7 @@ test_socket_ws_timeout()
     const char *test_id = "[Multi][WS]kevent_timeout(evfilt)";
     test_begin(test_id);
 
-    int flags = KQSCHED_MAKE(0,0,KQ_SCHED_FLAG_WS,1);
+    int flags = KQSCHED_MAKE(0,0,KQ_SCHED_FEAT_WS,1);
     int tkqfd = kqueue();
     int error = ioctl(tkqfd, FKQMULTI, &flags);
     if (error == -1) {
@@ -640,6 +640,9 @@ test_socket_ws_timeout()
 #define SOCK_BRUTE_CNT (128)
 #define PACKET_BRUTE_CNT (50 * (SOCK_BRUTE_CNT))
 #define THREAD_EXIT_PROB (67)
+#define BRUTE_REALTIME_PROB (50)
+#define BRUTE_MAX_FREQ (10000)
+#define BRUTE_MIN_FREQ (1)
 
 #define RAND_SLEEP (29)
 #define RAND_SEND_SLEEP (7)
@@ -716,6 +719,9 @@ test_socket_brutal(char* name)
 
     test_begin(id);
 
+    srand(time(NULL));
+
+
     for (int i = 0; i < SOCK_BRUTE_CNT; i++) {
 
         /* Create a connected pair of full-duplex sockets for testing socket events */
@@ -723,7 +729,9 @@ test_socket_brutal(char* name)
             err(1, "kevent_socket"); 
         }
 
-        EV_SET(&kev, brute_sockfd[i][0], EVFILT_READ, EV_ADD, 0, 0, &brute_sockfd[i][0]);
+        int evflag = (rand() % 100 < BRUTE_REALTIME_PROB) ? EV_REALTIME : 0;
+
+        EV_SET(&kev, brute_sockfd[i][0], EVFILT_READ, EV_ADD | evflag, 0, 0, &brute_sockfd[i][0]);
 
         if (kevent(g_kqfd, &kev, 1, NULL, 0, NULL) == -1) {
             err(1, "kevent_brutal_add");     
@@ -742,9 +750,7 @@ test_socket_brutal(char* name)
         pthread_mutex_init(&brute_threadinfo[i].lock, NULL);
         pthread_create(&brute_threadinfo[i].thrd, NULL, test_socket_brutal_worker, &brute_threadinfo[i]);
     }
-
-    sleep(3);
-
+    
     for(int i = 0; i < PACKET_BRUTE_CNT; i++) {
 #ifdef TEST_DEBUG
     printf("READ_M: processing packet %d\n", i);
@@ -766,7 +772,23 @@ test_socket_brutal(char* name)
 #ifdef TEST_DEBUG
     printf("READ_M: waiting for all packets to finish processing. Cur: %d Tgt: %d\n", sum, PACKET_BRUTE_CNT);
 #endif
-        sleep(1);
+        /* randomize the freq and share */
+        int error;
+        int val;
+
+        val = KQTUNE_MAKE(KQTUNE_RTSHARE, rand() % 100);
+        error = ioctl(g_kqfd, FKQTUNE, &val);
+        if (error == -1) {
+            err(1, "ioctl TUNE");
+        }
+
+        val = KQTUNE_MAKE(KQTUNE_FREQ, rand() % (BRUTE_MAX_FREQ - BRUTE_MIN_FREQ) + BRUTE_MIN_FREQ);
+        error = ioctl(g_kqfd, FKQTUNE, &val);
+        if (error == -1) {
+            err(1, "ioctl TUNE");
+        }
+
+        usleep(1000);
     }
 
     /* shutdown the systems */
@@ -799,6 +821,93 @@ test_socket_brutal(char* name)
     success();
 }
 
+/* realtime test */
+static void
+test_socket_check_rt(int kqfd, int kev_sz, int rtcnt)
+{
+    struct kevent *kev = malloc(sizeof(struct kevent) * kev_sz);
+    
+    int nev = kevent_get_n(kqfd, kev, kev_sz);
+
+    if (nev != kev_sz) {
+        err(1, "too few events");
+    }
+
+    for (int i = 0; i < rtcnt; i++) {
+        if (!(kev[i].flags & EV_REALTIME)) {
+            err(1, "expected realtime");
+        }
+    }
+
+    for (int i = rtcnt; i < kev_sz; i++) {
+        if (kev[i].flags & EV_REALTIME) {
+            err(1, "expected !realtime");
+        }
+    }
+
+    free(kev);
+}
+
+static void 
+test_socket_rt_share(int kqfd, int kev_sz, int share) 
+{
+    if (share < 0 || share > 100) {
+        err(1, "INVAL");
+    }
+
+    int flag = KQTUNE_MAKE(KQTUNE_RTSHARE, share);
+    int error = ioctl(kqfd, FKQTUNE, &flag);
+
+    if (error == -1) {
+        err(1, "ioctl KQTUNE");
+    }
+
+    test_socket_check_rt(kqfd, kev_sz, (kev_sz * share + 99) / 100);
+}
+
+static void
+test_socket_realtime()
+{
+    /* create 8 sockets, 4 realtime 4 normal
+     * we are gonna test how kq hands requests back to us for different shares
+     */
+    test_begin("kevent(realtime)");
+
+    int kqfd = kqueue();
+    struct kevent kev;
+    int socks[8][2];
+
+    for (int i = 0; i < 8; i++) {
+        if (socketpair(AF_UNIX, SOCK_STREAM, 0, &socks[i][0]) < 0) {
+            err(1, "kevent_socket"); 
+        }
+
+        EV_SET(&kev, socks[i][0], EVFILT_READ, EV_ADD | (i >= 4 ? EV_REALTIME : 0), 0, 0, NULL);
+
+        if (kevent(kqfd, &kev, 1, NULL, 0, NULL) == -1) {
+            err(1, "kevent_brutal_add");     
+        }
+    }
+
+    /* push packets to the socket */
+    for (int i = 0; i < 8; i++) {
+        socket_push(socks[i][1], '.');
+    }
+
+    for (int i = 0; i <= 100; i++) {
+        test_socket_rt_share(kqfd, 4, i);
+    }
+
+    for (int i = 0; i < 8; i++) {
+        close(socks[i][0]);
+        close(socks[i][1]);
+    }
+
+    close(kqfd);
+
+    success();
+}
+
 void
 test_evfilt_read_m()
 {
@@ -813,6 +922,7 @@ test_evfilt_read_m()
         err(1, "ioctl");
     }
     test_socket_read(0);
+    test_socket_realtime();
     test_socket_brutal("rand");
     close(g_kqfd);
 
@@ -870,7 +980,7 @@ test_evfilt_read_m()
     close(g_kqfd);
 
     /* WS */
-    flags = KQSCHED_MAKE(0,0,KQ_SCHED_FLAG_WS,1);
+    flags = KQSCHED_MAKE(0,0,KQ_SCHED_FEAT_WS,1);
     g_kqfd = kqueue();
     error = ioctl(g_kqfd, FKQMULTI, &flags);
     if (error == -1) {

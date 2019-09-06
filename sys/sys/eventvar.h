@@ -57,8 +57,13 @@ struct kevq {
 	/* XXX: Make kevq contain a struct thread ptr instead of this dude */
 	struct		kevq_thred *kevq_th; /* the thread that the kevq belongs to */
 	struct		mtx lock;		/* the lock for the kevq */
-	TAILQ_HEAD(, knote) kn_head;	/* list of pending knotes */
+	struct 		ktailq kn_head;	/* list of pending knotes */
+	struct 		knote kn_marker;	
+	struct		ktailq kn_rt_head; /* list of pending knotes with runtime priority */
+	struct		knote kn_marker_rt;	
 	int		kn_count;				/* number of pending knotes */
+	int		kn_rt_count;			/* number of runtime knotes */
+
 #define KEVQ_SLEEP	0x01
 #define KEVQ_CLOSING  0x02
 #define KEVQ_ACTIVE	0x04
@@ -123,10 +128,14 @@ struct kqueue {
 	struct 		kevqlist  kq_kevqlist; /* list of kevqs */
 
 	/* scheduler flags for the KQ, set by IOCTL */
-	int			kq_sflags;
+	int			kq_sfeat;
 	int			kq_ssargs;
 	int 		kq_ssched;
 	int			kq_sfargs;
+	
+	/* tuneables for the KQ, set by IOCTL */
+	int		    kq_tfreq;
+	int			kq_rtshare;
 
 	/* Default */
 	struct		rwlock  kevq_vlist_lk;

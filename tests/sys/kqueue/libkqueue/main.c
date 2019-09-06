@@ -78,6 +78,19 @@ test_no_kevents_quietly(void)
     }
 }
 
+/* Retrieve n kevents */
+int
+kevent_get_n(int kqfd, struct kevent *kev, int n)
+{
+    int nfds;
+    
+    nfds = kevent(kqfd, NULL, 0, kev, n, NULL);
+    if (nfds < 1)
+        err(1, "kevent(2)");
+
+    return nfds;
+}
+
 /* Retrieve a single kevent */
 struct kevent *
 kevent_get(int kqfd)

@@ -47,6 +47,7 @@ extern char * kevent_to_str(struct kevent *);
 struct kevent * kevent_get(int);
 struct kevent * kevent_get_timeout(int, int);
 struct kevent * kevent_get_timeout_u(int kqfd, uint64_t useconds);
+int kevent_get_n(int kqfd, struct kevent *kev, int n);
 
 
 void kevent_cmp(struct kevent *, struct kevent *);
