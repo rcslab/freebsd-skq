@@ -89,7 +89,7 @@ __FBSDID("$FreeBSD$");
 static MALLOC_DEFINE(M_KQUEUE, "kqueue", "memory for kqueue system");
 
 /* sysctl for best of 2 latency penalty */
-static uint32_t cache_pen = 10000;
+static uint32_t cache_pen = 1000;
 SYSCTL_U32(_kern, OID_AUTO, kq_cache_pen, CTLFLAG_RW, &cache_pen, 0, "KQueue cache miss's penalty in cycles.");
 
 /* sysctl for ws_int_sbt */
@@ -97,7 +97,7 @@ static sbintime_t ws_int_sbt = 0;
 SYSCTL_U64(_kern, OID_AUTO, kq_ws_int_sbt, CTLFLAG_RD, &ws_int_sbt, 0, "KQueue work stealing interval in sbintime.");
 
 /* sysctl for ws_int */
-static uint32_t ws_int = 1000;
+static uint32_t ws_int = 100;
 
 static inline void
 update_ws_int_sbt()
@@ -176,6 +176,8 @@ static inline void kevq_delete_knote(struct kevq *kevq, struct knote *kn);
 static void kevq_insert_knote(struct kevq *kevq, struct knote *kn);
 static int kevq_total_knote(struct kevq *kevq);
 static struct knote * kevq_dequeue(struct kevq *kevq, int rt);
+static void kevq_insert_head_knote(struct kevq *kevq, struct knote *kn);
+static void knote_enqueue_head(struct knote *kn, struct kevq *kevq);
 
 static int kqueue_acquire_kevq(struct file *fp, struct thread *td, struct kqueue **kqp, struct kevq **kevq);
 static void kqueue_ensure_kqdom(struct kqueue *kq);
@@ -419,7 +421,7 @@ SYSCTL_UINT(_kern, OID_AUTO, kq_calloutmax, CTLFLAG_RW,
 static inline long
 kevq_exp_lat(struct kevq *kevq)
 {
-	return kevq->kevq_avg_lat * kevq_total_knote(kevq) + kevq->kevq_last_kev - get_cyclecount();
+	return kevq->kevq_avg_lat * (kevq_total_knote(kevq) + 1) + kevq->kevq_last_kev - get_cyclecount();
 }
 
 static inline long
@@ -2816,7 +2818,7 @@ end_loop:
 	kevq->kevq_state &= ~KEVQ_WS;
 	kevq->kevq_tot_ws += ws_count;
 	for (int i = 0; i < ws_count; i++) {
-		knote_enqueue(ws_lst[i], kevq);
+		knote_enqueue_head(ws_lst[i], kevq);
 		KN_LEAVE_FLUX_WAKEUP(ws_lst[i]);
 		//CTR4(KTR_KQ, "kevq_worksteal: kevq %p stole kn %p, ident: %d from kevq %p", kevq, ws_lst[i], ws_lst[i]->kn_id, other_kevq);
 	}
@@ -4659,7 +4661,47 @@ kevq_insert_knote(struct kevq *kevq, struct knote *kn)
 	}
 }
 
+static void 
+kevq_insert_head_knote(struct kevq *kevq, struct knote *kn)
+{
+	KEVQ_OWNED(kevq);
+
+	if (kn->kn_flags & EV_REALTIME) {
+		TAILQ_INSERT_HEAD(&kevq->kn_rt_head, kn, kn_tqe);
+		kevq->kn_rt_count++;
+	} else {
+		TAILQ_INSERT_HEAD(&kevq->kn_head, kn, kn_tqe);
+		kevq->kn_count++;
+	}
+}
+
 /* END Priority Queue */
+
+static void
+knote_enqueue_head(struct knote *kn, struct kevq *kevq)
+{
+	struct kqueue *kq;
+	kq = kn->kn_kq;
+
+	CTR2(KTR_KQ, "knote_enqueue: kn %p to kevq %p", kn, kevq);
+
+	KEVQ_OWNED(kevq);
+
+	KASSERT(kn_in_flux(kn), ("enqueuing a knote that's not in flux"));
+	KASSERT((kn->kn_status & KN_QUEUED) == 0, ("knote already queued"));
+
+	/* Queuing to a closing kevq is fine.
+     * The refcnt wait in kevq drain is before knote requeuing 
+	 * so no knote will be forgotten
+	 * KASSERT((kevq->kevq_state & KEVQ_CLOSING) == 0 && (kevq->kevq_state & KEVQ_ACTIVE) != 0, ("kevq already closing or not ready")); */
+
+	kn->kn_kevq = kevq;
+	kn->kn_status |= KN_QUEUED;
+	
+	kevq_insert_head_knote(kevq, kn);
+	
+	kevq_wakeup(kevq);
+}
 
 static void
 knote_enqueue(struct knote *kn, struct kevq *kevq)
