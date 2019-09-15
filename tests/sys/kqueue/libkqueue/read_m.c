@@ -325,12 +325,14 @@ test_socket_queue(void)
             tid++;
             group[i][j].evcnt = 0;
             group[i][j].group_id = i;
-            pthread_create(&group[i][j].thrd, NULL, test_socket_queue_thrd, &group[i][j]);
+            pthread_attr_t attr;
+            pthread_attr_init(&attr);
             CPU_ZERO(&cpuset);
             CPU_SET(i, &cpuset);
-            if (pthread_setaffinity_np(group[i][j].thrd, sizeof(cpuset_t), &cpuset) < 0) {
+            if (pthread_attr_setaffinity_np(&attr, sizeof(cpuset_t), &cpuset) < 0) {
                 err(1, "thread_affinity");
             }
+            pthread_create(&group[i][j].thrd, &attr, test_socket_queue_thrd, &group[i][j]);
 #ifdef TEST_DEBUG
     printf("READ_M: created and affinitized thread %d to core group %d\n", group[i][j].tid, i);
 #endif
@@ -636,10 +638,10 @@ test_socket_ws_timeout()
 /***************************
  * Brutal test
  ***************************/
-#define THREAD_BRUTE_CNT (16)
-#define SOCK_BRUTE_CNT (128)
-#define PACKET_BRUTE_CNT (50 * (SOCK_BRUTE_CNT))
-#define THREAD_EXIT_PROB (67)
+#define THREAD_BRUTE_CNT (8)
+#define SOCK_BRUTE_CNT (512)
+#define PACKET_BRUTE_CNT (100 * (SOCK_BRUTE_CNT))
+#define THREAD_EXIT_PROB (50)
 #define BRUTE_REALTIME_PROB (50)
 #define BRUTE_MAX_FREQ (10000)
 #define BRUTE_MIN_FREQ (1)
@@ -776,7 +778,7 @@ test_socket_brutal(char* name)
         int error;
         int val;
 
-        val = KQTUNE_MAKE(KQTUNE_RTSHARE, rand() % 100);
+        val = KQTUNE_MAKE(KQTUNE_RTSHARE, (rand() % 100) + 1);
         error = ioctl(g_kqfd, FKQTUNE, &val);
         if (error == -1) {
             err(1, "ioctl TUNE");
@@ -894,7 +896,7 @@ test_socket_realtime()
         socket_push(socks[i][1], '.');
     }
 
-    for (int i = 0; i <= 100; i++) {
+    for (int i = 1; i <= 100; i++) {
         test_socket_rt_share(kqfd, 4, i);
     }
 
@@ -933,8 +935,30 @@ test_evfilt_read_m()
     if (error == -1) {
         err(1, "ioctl");
     }
-    test_socket_queue();
+    //test_socket_queue();
     test_socket_brutal("queue0");
+    close(g_kqfd);
+
+    /* Queue + bo2*/
+    flags = KQSCHED_MAKE(KQ_SCHED_QUEUE,2, 0, 0);
+    g_kqfd = kqueue();
+    error = ioctl(g_kqfd, FKQMULTI, &flags);
+    if (error == -1) {
+        err(1, "ioctl");
+    }
+    //test_socket_queue();
+    test_socket_brutal("queue2");
+    close(g_kqfd);
+
+    /* Queue + bo2 + ws */
+    flags = KQSCHED_MAKE(KQ_SCHED_QUEUE,2, KQ_SCHED_FEAT_WS, 1);
+    g_kqfd = kqueue();
+    error = ioctl(g_kqfd, FKQMULTI, &flags);
+    if (error == -1) {
+        err(1, "ioctl");
+    }
+    //test_socket_queue();
+    test_socket_brutal("queue2_ws");
     close(g_kqfd);
 
     /* CPU + Bo0 */
@@ -945,16 +969,6 @@ test_evfilt_read_m()
         err(1, "ioctl");
     }
     test_socket_brutal("cpu0");
-    close(g_kqfd);
-
-    /* CPU + Bo1 */
-    flags = KQSCHED_MAKE(KQ_SCHED_CPU,1,0,0);;
-    g_kqfd = kqueue();
-    error = ioctl(g_kqfd, FKQMULTI, &flags);
-    if (error == -1) {
-        err(1, "ioctl");
-    }
-    test_socket_brutal("cpu1");
     close(g_kqfd);
 
     /* CPU + Bo2 */

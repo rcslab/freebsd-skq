@@ -451,6 +451,7 @@ kevq_avail(struct kevq *kevq)
 static inline struct kevq * 
 kevq_lock_check_avail(struct kevq *next_kevq)
 {
+	CTR1(KTR_KQ, "kevq_lock_check_avail: kevq %p", next_kevq);
 	if (next_kevq != NULL) {
 		KEVQ_NOTOWNED(next_kevq);
 		KEVQ_LOCK(next_kevq);
@@ -2420,7 +2421,9 @@ kevq_dump(struct sbuf *buf, struct kevq *kevq, int level)
 						"avg_events=\"%ld\" "
 						"total_fallbacks=\"%ld\" "
 						"total_mismatches=\"%ld\" "
-						"total_worksteal=\"%ld\" />\n",
+						"total_worksteal=\"%ld\" "
+						"total_realtime=\"%ld\" "
+						"total_sched=\"%ld\" />\n",
 						level * DUMP_INDENT, ' ',  kevq, kevq->kn_count, kevq->kn_rt_count, 
 						kevq->kevq_tot_time,
 						kevq->kevq_tot_syscall,
@@ -2429,7 +2432,9 @@ kevq_dump(struct sbuf *buf, struct kevq *kevq, int level)
 						kevq->kevq_avg_ev,
 						kevq->kevq_tot_fallback,
 						kevq->kevq_tot_kqd_mismatch,
-						kevq->kevq_tot_ws);
+						kevq->kevq_tot_ws,
+						kevq->kevq_tot_realtime,
+						kevq->kevq_tot_sched);
 }
 
 static void
@@ -2739,7 +2744,7 @@ kevq_worksteal(struct kevq *kevq)
 	tgt_count = KQSCHED_GET_FARGS(kq);
 
 	/* XXX: hack */
-	KASSERT(tgt_count < 8, ("too many kevq ws knotes"));
+	KASSERT(tgt_count <= 8, ("too many kevq ws knotes"));
 
 	KVLST_RLOCK(kq);
 	other_kevq = kevq_vec_select_kevq(&kq->kevq_vlist, 1);
@@ -2765,7 +2770,6 @@ kevq_worksteal(struct kevq *kevq)
 		/* steal from the first because it arrived late */
 		ws_kn = kevq_peek_knote(other_kevq);
 
-		/* TODO: maybe limit the number of knotes to go through */
 		while((ws_count < tgt_count) && (ws_kn != NULL)) {
 
 			/* fast fail */
@@ -2918,8 +2922,16 @@ kqueue_scan(struct kevq *kevq, int maxevents, struct kevent_copyops *k_ops,
 	/* adjust rtlimit according to the target share 
 	 * = ceil(maxevents * kq->kq_rtshare%)
 	 */
+
+	/* XXX: actually rtlimit can be 0 but we don't allow it yet/forever?
+	 * the current implementation has an issue when only runtime events are present and rtlimit = 0
+	 * since kevq_total_knotes returns > 0, but rtlimit = 0 so we don't dequeue any runtime event
+	 * the function will be trapped infinitely in (wakeup because tot_ev > 0 -> dequeue normal marker -> count = 0 -> retry -> wakeup because tot ev > 0)
+	 * We simply don't allow users to set rlimit to 0 so we at least hand back one rt event, otherwise the solution might be very complicated
+	 * because it involves sleep waiting on different queues as rtshare changes, AND in RUNTIME too? Not worth it really.
+	 */
 	rtlimit = (maxevents * kq->kq_rtshare + 99) / 100;
-	KASSERT(rtlimit >= 0, ("the math above is fundamentally broken"));
+	KASSERT(rtlimit > 0, ("the math above is fundamentally broken"));
 
 	rsbt = 0;
 	if (tsp != NULL) {
@@ -2976,7 +2988,7 @@ retry:
 	KEVQ_OWNED(kevq);
 	
 	kevp = keva;
-	CTR3(KTR_KQ, "kqueue_scan: td %d on kevq %p has %d events", td->td_tid, kevq, kevq_total_knote(kevq));
+	CTR4(KTR_KQ, "kqueue_scan: td %d on kevq %p has %d events, max_ev %d", td->td_tid, kevq, kevq_total_knote(kevq), maxevents);
 
 	if (kevq_total_knote(kevq) == 0) {
 		if (fsbt == -1) {
@@ -3048,7 +3060,9 @@ retry:
 	}
 
 	KEVQ_OWNED(kevq);
-
+	// if (kevq_total_knote(kevq) > 0) {
+	// 	KASSERT(!(TAILQ_FIRST(&kevq->kn_rt_head) == NULL && TAILQ_FIRST(&kevq->kn_head) == NULL), ("NULL > 0?"));
+	// }
 	/* quick check */
 	if (curr < rtlimit) {
 		rdrained = 0;
@@ -3105,7 +3119,7 @@ retry:
 		/* Now we have exclusive access to kn */
 		TAILQ_REMOVE(kntq, kn, kn_tqe);
 
-		CTR3(KTR_KQ, "kqueue_scan: td %d on kevq %p dequeued knote %p", td->td_tid, kevq, kn);
+		CTR4(KTR_KQ, "kqueue_scan: td %d on kevq %p dequeued knote %p, curr %d", td->td_tid, kevq, kn, curr);
 		if ((kn->kn_status & KN_DISABLED) == KN_DISABLED) {
 			kn->kn_status &= ~(KN_QUEUED | KN_PROCESSING | KN_WS);
 			*kncnt -= 1;
@@ -3117,7 +3131,7 @@ retry:
 			/* We are dequeuing our marker, wakeup threads waiting on it */
 			knote_flux_wakeup(kn);
 			KN_FLUX_UNLOCK(kn);
-			CTR2(KTR_KQ, "kqueue_scan: td %d MARKER WAKEUP %p", td->td_tid, kn);
+			CTR3(KTR_KQ, "kqueue_scan: td %d MARKER WAKEUP %p PRI %d", td->td_tid, kn, pri);
 
 			if (kn == rtmarker) {
 				rdrained = 1;
@@ -3247,6 +3261,7 @@ retry:
 
 		if (pri) {
 			curr++;
+			kevq->kevq_tot_realtime++;
 		}
 
 		if (nkev == KQ_NEVENTS) {
@@ -3395,7 +3410,7 @@ kqueue_ioctl(struct file *fp, u_long cmd, void *data,
 			switch KQTUNE_PARSE_OBJ(tune) {
 				case KQTUNE_RTSHARE:
 					tune = KQTUNE_PARSE_ARGS(tune);
-					if (tune >= 0 && tune <= 100)
+					if (tune > 0 && tune <= 100)
 						kq->kq_rtshare = tune;
 					else
 						error = (EINVAL);
@@ -4530,14 +4545,18 @@ done_cq:
 			if (sargs > 0) {
 				KVLST_RLOCK(kq);
 				other_kevq = kevq_vec_select_kevq(&kq->kevq_vlist, sargs);
-				KVLST_RUNLOCK(kq);
 
 				if (next_kevq == NULL || (other_kevq != NULL && kevq_lat_wcmp(next_kevq, other_kevq, 90) > 0)) {
 					next_kevq = other_kevq;
 				}
 			}
 
-			next_kevq = kevq_lock_check_avail(next_kevq);
+ 			next_kevq = kevq_lock_check_avail(next_kevq);
+
+			/* need to unlock after kevq lock acquire because other_kevq might be drained too */
+			if (sargs > 0) {
+				KVLST_RUNLOCK(kq);
+			}
 			KQD_RUNLOCK(kqd);
 
 			if (kqd_mismatch && next_kevq != NULL) {
@@ -4583,8 +4602,10 @@ done_cq:
 		CTR2(KTR_KQ, "knote_next_kevq: [RAND] next kevq %p for kn %p", next_kevq, kn);
 	}
 
-	if (next_kevq != NULL)
+	if (next_kevq != NULL) {
 		KEVQ_OWNED(next_kevq);
+		next_kevq->kevq_tot_sched++;
+	}
 
 	return next_kevq;
 }
