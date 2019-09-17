@@ -51,11 +51,11 @@
 struct kevq {
 	/* 1st cacheline */
 	/* Sched stats */
+	u_long kevq_rand_seed;
 	uint64_t kevq_avg_lat;
 	uint64_t kevq_avg_ev;
 	uint64_t kevq_tot_ev;
 	uint64_t kevq_tot_time;
-	uint64_t kevq_tot_syscall;
 	uint64_t kevq_last_kev;
 	uint32_t kevq_last_nkev;
 #define KEVQ_SLEEP	0x01
@@ -65,14 +65,7 @@ struct kevq {
 	int		kevq_state;
 	int		kn_count;				/* number of pending knotes */
 	int		kn_rt_count;			/* number of runtime knotes */
-
-	/* 2nd cacheline */
-	uint64_t kevq_tot_ws;
-	/* TODO: maybe these should be in kqdomain or global */
-	uint64_t kevq_tot_fallback;
-	uint64_t kevq_tot_kqd_mismatch;
-	uint64_t kevq_tot_sched;
-	uint64_t kevq_tot_realtime;
+	/* end 1st cache line */
 
 	LIST_ENTRY(kevq)	kevq_th_e; /* entry into kevq_thred's hashtable */
 	LIST_ENTRY(kevq)	kq_e; /* entry into kq */
@@ -83,10 +76,19 @@ struct kevq {
 	struct		kevq_thred *kevq_th; /* the thread that the kevq belongs to */
 	struct		mtx lock;		/* the lock for the kevq */
 	struct 		ktailq kn_head;	/* list of pending knotes */
-	struct 		knote kn_marker;	
+	struct 		knote *kn_marker;	
 	struct		ktailq kn_rt_head; /* list of pending knotes with runtime priority */
-	struct		knote kn_marker_rt;	
+	struct		knote *kn_marker_rt;	
 	int		kevq_refcnt;
+
+	/* TODO: maybe these should be in kqdomain or global */
+	uint64_t kevq_tot_fallback;
+	uint64_t kevq_tot_kqd_mismatch;
+	uint64_t kevq_tot_sched;
+	uint64_t kevq_tot_realtime;
+	uint64_t kevq_tot_syscall;
+	uint64_t kevq_tot_ws;
+	uint64_t kevq_avg_rlimit;
 };
 
 /* TODO: assumed that threads don't get rescheduled across cores */

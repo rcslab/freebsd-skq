@@ -170,7 +170,7 @@ static int 	kevq_acquire(struct kevq *kevq, int locked);
 static void kevq_worksteal(struct kevq *kevq);
 static void kevq_drain(struct kevq *kevq, struct thread *td);
 static void kevq_activate(struct kevq *kevq, struct thread *td);
-static struct kevq * kevq_vec_select_kevq(struct veclist *lst, int num_rand);
+static struct kevq * kevq_vec_select_kevq(struct veclist *lst, int num_rand, u_long rand);
 static struct knote * kevq_peek_knote(struct kevq *kevq);
 static inline void kevq_delete_knote(struct kevq *kevq, struct knote *kn);
 static void kevq_insert_knote(struct kevq *kevq, struct knote *kn);
@@ -250,7 +250,7 @@ static void kqdom_update_parents(struct kqdom *leaf, int direction);
 static void kqdom_insert(struct kqdom *kqd, struct kevq *kevq);
 static void kqdom_remove(struct kqdom *kqd, struct kevq *kevq);
 static void kqdom_destroy(struct kqdom *root);
-static struct kevq * kqdom_random_kevq_locked(struct kqdom *kqd);
+//static struct kevq * kqdom_random_kevq_locked(struct kqdom *kqd);
 static void kqdom_build_internal(struct kqdom *kqd_cur, struct cpu_group *cg_cur, int *kqd_id);
 static struct kqdom * kqdom_build(void);
 static struct kqdom * kqdom_find(struct kqdom *root, int cpuid);
@@ -418,10 +418,52 @@ SYSCTL_UINT(_kern, OID_AUTO, kq_calloutmax, CTLFLAG_RW,
 #define KQTUNE_PARSE_ARGS(sf) (((sf) >> 16) & 0xFFFF)
 #define KQTUNE_PARSE_OBJ(sf) ((sf) & 0xFFFF)
 
+#define NSHUFF 50 
+
+
+/*
+ * Pseudo-random number generator for perturbing the profiling clock,
+ * and whatever else we might use it for.  The result is uniform on
+ * [0, 2^31 - 1].
+ */
+static u_long
+kqueue_random(u_long* seed)
+{
+	long x, hi, lo, t;
+
+	/*
+	 * Compute x[n + 1] = (7^5 * x[n]) mod (2^31 - 1).
+	 * From "Random number generators: good ones are hard to find",
+	 * Park and Miller, Communications of the ACM, vol. 31, no. 10,
+	 * October 1988, p. 1195.
+	 */
+	/* Can't be initialized with 0, so use another value. */
+	if ((x = *seed) == 0)
+		x = 123459876;
+	hi = x / 127773;
+	lo = x % 127773;
+	t = 16807 * lo - 2836 * hi;
+	if (t < 0)
+		t += 0x7fffffff;
+	*seed = t;
+	//CTR1(KTR_KQ, "kqueue_random: generated %ld", t);
+	return (t);
+}
+
+static void
+kqueue_srandom(u_long *field, u_long seed)
+{
+	int i;
+
+	*field = seed;
+	for (i = 0; i < NSHUFF; i++)
+		kqueue_random(field);
+}
+
 static inline long
 kevq_exp_lat(struct kevq *kevq)
 {
-	return kevq->kevq_avg_lat * (kevq_total_knote(kevq) + 1) + kevq->kevq_last_kev - get_cyclecount();
+	return kevq->kevq_avg_lat * (kevq_total_knote(kevq) + 1) + kevq->kevq_last_kev;
 }
 
 static inline long
@@ -2040,13 +2082,16 @@ kevq_init(struct kevq *kevq) {
 	TAILQ_INIT(&kevq->kn_head);
 	TAILQ_INIT(&kevq->kn_rt_head);
 
-	kevq->kn_marker.kn_status = KN_MARKER;
-	kevq->kn_marker_rt.kn_status = KN_MARKER;
-	kevq->kn_marker_rt.kn_flags = EV_REALTIME;
-	kevq->kn_marker.kn_kevq = kevq;
-	kevq->kn_marker_rt.kn_kevq = kevq;
-	mtx_init(&kevq->kn_marker.kn_fluxlock, "kn_fluxlock", NULL, MTX_DEF | MTX_DUPOK);
-	mtx_init(&kevq->kn_marker_rt.kn_fluxlock, "kn_fluxlock", NULL, MTX_DEF | MTX_DUPOK);
+	kevq->kn_marker = knote_alloc(M_WAITOK);
+	kevq->kn_marker_rt = knote_alloc(M_WAITOK);
+	kevq->kn_marker->kn_status = KN_MARKER;
+	kevq->kn_marker->kn_status = KN_MARKER;
+	kevq->kn_marker_rt->kn_status = KN_MARKER;
+	kevq->kn_marker_rt->kn_flags = EV_REALTIME;
+	kevq->kn_marker->kn_kevq = kevq;
+	kevq->kn_marker_rt->kn_kevq = kevq;
+
+	kqueue_srandom(&kevq->kevq_rand_seed, (u_long)kevq);
 }
 
 static void
@@ -2414,6 +2459,7 @@ kevq_dump(struct sbuf *buf, struct kevq *kevq, int level)
 	sbuf_printf(buf, "%*c<kevq ptr=\"%p\" " 
 						"knotes=\"%d\" "
 						"rt_knotes=\"%d\" "
+						"avg_rtlimit=\"%ld\" "
 						"total_time=\"%ld\" "
 						"total_syscall=\"%ld\" "
 						"total_events=\"%ld\" "
@@ -2425,6 +2471,7 @@ kevq_dump(struct sbuf *buf, struct kevq *kevq, int level)
 						"total_realtime=\"%ld\" "
 						"total_sched=\"%ld\" />\n",
 						level * DUMP_INDENT, ' ',  kevq, kevq->kn_count, kevq->kn_rt_count, 
+						kevq->kevq_avg_rlimit,
 						kevq->kevq_tot_time,
 						kevq->kevq_tot_syscall,
 						kevq->kevq_tot_ev,
@@ -2747,7 +2794,7 @@ kevq_worksteal(struct kevq *kevq)
 	KASSERT(tgt_count <= 8, ("too many kevq ws knotes"));
 
 	KVLST_RLOCK(kq);
-	other_kevq = kevq_vec_select_kevq(&kq->kevq_vlist, 1);
+	other_kevq = kevq_vec_select_kevq(&kq->kevq_vlist, 1, kqueue_random(&kevq->kevq_rand_seed));
 	/* fast fail */
 	if (other_kevq != kevq && kevq_stealable(other_kevq)) {
 		if (KEVQ_TRYLOCK(other_kevq)) {
@@ -2908,7 +2955,7 @@ kqueue_scan(struct kevq *kevq, int maxevents, struct kevent_copyops *k_ops,
 		 * = (1 / kq->kq_tfreq) / (kevq->kevq_avg_lat / hz) 
 		 * = (hz / (kevq->kevq_avg_lat * kq->kq_tfreq)) 
 		 */
-		evlimit = hz / (kevq->kevq_avg_lat * kq->kq_tfreq);
+		evlimit = (2100 * 1000 * 1000) / (kevq->kevq_avg_lat * kq->kq_tfreq);
 		
 		if (evlimit == 0) {
 			evlimit = 1;
@@ -2932,7 +2979,11 @@ kqueue_scan(struct kevq *kevq, int maxevents, struct kevent_copyops *k_ops,
 	 */
 	rtlimit = (maxevents * kq->kq_rtshare + 99) / 100;
 	KASSERT(rtlimit > 0, ("the math above is fundamentally broken"));
-
+	if (kevq->kevq_avg_rlimit == 0) {
+		kevq->kevq_avg_rlimit = rtlimit;
+	} else {
+		kevq->kevq_avg_rlimit = calc_overtime_avg(kevq->kevq_avg_rlimit, rtlimit, 80);
+	}
 	rsbt = 0;
 	if (tsp != NULL) {
 		if (tsp->tv_sec < 0 || tsp->tv_nsec < 0 ||
@@ -2966,8 +3017,8 @@ kqueue_scan(struct kevq *kevq, int maxevents, struct kevent_copyops *k_ops,
 	}
 
 	if (kq->kq_flags & KQ_FLAG_MULTI) {
-		marker = &kevq->kn_marker;
-		rtmarker = &kevq->kn_marker_rt;
+		marker = kevq->kn_marker;
+		rtmarker = kevq->kn_marker_rt;
 	} else {
 		marker = knote_alloc(M_WAITOK);
 		rtmarker = knote_alloc(M_WAITOK);
@@ -3188,7 +3239,7 @@ retry:
 			knl = kn_list_lock(kn);
 			fevent = kn->kn_fop->f_event(kn, 0);
 
-			/* return stolen knotes */
+			/* return ALL knotes */
 			if (kn->kn_status & KN_WS) {
 				KQ_GLOBAL_UNLOCK(&kq_global, haskqglobal);
 				kn->kn_status &= ~(KN_QUEUED | KN_ACTIVE | KN_SCAN | KN_PROCESSING | KN_WS);
@@ -3533,6 +3584,8 @@ kevq_destroy(struct kevq *kevq)
 {
 	CTR1(KTR_KQ, "kevq_destroy for %p", kevq);
 	mtx_destroy(&kevq->lock);
+	knote_free(kevq->kn_marker);
+	knote_free(kevq->kn_marker_rt);
 	free(kevq, M_KQUEUE);
 }
 
@@ -4395,22 +4448,19 @@ knote_drop_detached(struct knote *kn, struct thread *td)
 }
 
 static struct kevq *
-kevq_vec_select_kevq(struct veclist *lst, int num_rand)
+kevq_vec_select_kevq(struct veclist *lst, int num_rand, u_long rand)
 {
 	int sz;
 	struct kevq *cur_kevq = NULL, *next_kevq;
-	u_long rand;
 
 	/* XXX: hack */
-	KASSERT(num_rand < 8, ("too much num_rand"));
+	KASSERT(num_rand <= 2, ("too large num_rand"));
 
 	//CTR1(KTR_KQ, "kevq_vec_select_kevq: num - %d", num_rand);
 	
 	sz = veclist_size(lst);
 
 	if (sz > 0) {
-		rand = random();
-
 		for (int i = 0; i < num_rand; i++) {
 			next_kevq = veclist_at(lst, rand % sz);
 
@@ -4420,7 +4470,7 @@ kevq_vec_select_kevq(struct veclist *lst, int num_rand)
 				cur_kevq = next_kevq;
 			}
 
-			/* XXX: hack */
+			/* XXX: hack, 256 queues max */
 			rand = rand >> 8;
 		}
 	}
@@ -4430,51 +4480,51 @@ kevq_vec_select_kevq(struct veclist *lst, int num_rand)
 	return cur_kevq;
 }
 
-static struct kevq *
-kqdom_random_kevq_locked(struct kqdom *kqd)
-{
-	struct kevq *kevq;
-	struct kqdom *tkqd;
-	int num_active;
-	u_long rand;
+// static struct kevq *
+// kqdom_random_kevq_locked(struct kqdom *kqd)
+// {
+// 	struct kevq *kevq;
+// 	struct kqdom *tkqd;
+// 	int num_active;
+// 	u_long rand;
 
-	rand = random();
-	kevq = NULL;
+// 	rand = random();
+// 	kevq = NULL;
 
-	while (!kqdom_is_leaf(kqd)) {
-		KQD_RLOCK(kqd);
-		/* we only select active stuff inside this, need to be EXTREMELY fast */
-		num_active = veclist_size(&kqd->kqd_activelist);
-		CTR1(KTR_KQ, "kqdom_random_kevq_locked: randomly selected leaf kqdom %d", kqd->id);
-		if (num_active > 0) {
-			tkqd = veclist_at(&kqd->kqd_activelist, rand % num_active);
-		} else {
-			tkqd = NULL;
-		}
-		KQD_RUNLOCK(kqd);
-		kqd = tkqd;
-		/* XXX: hack */
-		rand = rand >> 8;
-	}
+// 	while (!kqdom_is_leaf(kqd)) {
+// 		KQD_RLOCK(kqd);
+// 		/* we only select active stuff inside this, need to be EXTREMELY fast */
+// 		num_active = veclist_size(&kqd->kqd_activelist);
+// 		CTR1(KTR_KQ, "kqdom_random_kevq_locked: randomly selected leaf kqdom %d", kqd->id);
+// 		if (num_active > 0) {
+// 			tkqd = veclist_at(&kqd->kqd_activelist, rand % num_active);
+// 		} else {
+// 			tkqd = NULL;
+// 		}
+// 		KQD_RUNLOCK(kqd);
+// 		kqd = tkqd;
+// 		/* XXX: hack */
+// 		rand = rand >> 8;
+// 	}
 
-	if (kqd != NULL) {
-		CTR1(KTR_KQ, "kqdom_random_kevq_locked: randomly selected leaf kqdom %d", kqd->id);
-		KQD_RLOCK(kqd);
+// 	if (kqd != NULL) {
+// 		CTR1(KTR_KQ, "kqdom_random_kevq_locked: randomly selected leaf kqdom %d", kqd->id);
+// 		KQD_RLOCK(kqd);
 
-		kevq = kevq_vec_select_kevq(&kqd->kqd_kevqs, 1);
-		kevq = kevq_lock_check_avail(kevq);
+// 		kevq = kevq_vec_select_kevq(&kqd->kqd_kevqs, 1);
+// 		kevq = kevq_lock_check_avail(kevq);
 
-		KQD_RUNLOCK(kqd);
-	}
+// 		KQD_RUNLOCK(kqd);
+// 	}
 
-	if (kevq != NULL) {
-		KEVQ_OWNED(kevq);
-	}
+// 	if (kevq != NULL) {
+// 		KEVQ_OWNED(kevq);
+// 	}
 
-	CTR1(KTR_KQ, "kqdom_random_kevq_locked: randomly selected kevq %p", kevq);
+// 	CTR1(KTR_KQ, "kqdom_random_kevq_locked: randomly selected kevq %p", kevq);
 
-	return kevq;
-}
+// 	return kevq;
+// }
 
 
 /* select the next kevq based on knote and scheduler flags and locks the returned kevq */
@@ -4540,11 +4590,11 @@ done_cq:
 			KASSERT(kqdom_is_leaf(kqd), ("found kqdom not leaf"));
 
 			KQD_RLOCK(kqd);
-			next_kevq = kevq_vec_select_kevq(&kqd->kqd_kevqs, 1);
+			next_kevq = kevq_vec_select_kevq(&kqd->kqd_kevqs, 1, kqueue_random(&kn->kn_rand_seed));
 
 			if (sargs > 0) {
 				KVLST_RLOCK(kq);
-				other_kevq = kevq_vec_select_kevq(&kq->kevq_vlist, sargs);
+				other_kevq = kevq_vec_select_kevq(&kq->kevq_vlist, sargs, kqueue_random(&kn->kn_rand_seed));
 
 				if (next_kevq == NULL || (other_kevq != NULL && kevq_lat_wcmp(next_kevq, other_kevq, 90) > 0)) {
 					next_kevq = other_kevq;
@@ -4569,7 +4619,7 @@ done_cq:
 		case KQ_SCHED_BEST:
 			KVLST_RLOCK(kq);
 			
-			next_kevq = kevq_vec_select_kevq(&kq->kevq_vlist, sargs);
+			next_kevq = kevq_vec_select_kevq(&kq->kevq_vlist, sargs, kqueue_random(&kn->kn_rand_seed));
 			next_kevq = kevq_lock_check_avail(next_kevq);
 
 			KVLST_RUNLOCK(kq);
@@ -4582,7 +4632,7 @@ done_cq:
 
 	/* fall-back rand robbin*/
 	if (next_kevq == NULL) {
-		rand = random();
+		rand = kqueue_random(&kn->kn_rand_seed);
 
 		KVLST_RLOCK(kq);
 		sz = veclist_size(&kq->kevq_vlist);
@@ -4782,6 +4832,7 @@ knote_alloc(int mflag)
 	struct knote *ret = uma_zalloc(knote_zone, mflag | M_ZERO);
 	/* CTR1(KTR_KQ, "knote_alloc: allocating knote %p", ret); */
 	mtx_init(&ret->kn_fluxlock, "kn_fluxlock", NULL, MTX_DEF | MTX_DUPOK);
+	kqueue_srandom(&ret->kn_rand_seed, (u_long)ret);
 	return ret;
 }
 

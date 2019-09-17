@@ -928,6 +928,18 @@ test_evfilt_read_m()
     test_socket_brutal("rand");
     close(g_kqfd);
 
+    /* BO2 */
+    flags = KQSCHED_MAKE(KQ_SCHED_BEST,2,0,0);
+    g_kqfd = kqueue();
+    error = ioctl(g_kqfd, FKQMULTI, &flags);
+    if (error == -1) {
+        err(1, "ioctl");
+    }
+    
+    test_socket_read(1);
+    test_socket_brutal("best2");
+    close(g_kqfd);
+
     /* Queue + bo0 */
     flags = KQSCHED_MAKE(KQ_SCHED_QUEUE,0,0,0);
     g_kqfd = kqueue();
@@ -979,18 +991,6 @@ test_evfilt_read_m()
         err(1, "ioctl");
     }
     test_socket_brutal("cpu2");
-    close(g_kqfd);
-
-    /* BO2 */
-    flags = KQSCHED_MAKE(KQ_SCHED_BEST,2,0,0);
-    g_kqfd = kqueue();
-    error = ioctl(g_kqfd, FKQMULTI, &flags);
-    if (error == -1) {
-        err(1, "ioctl");
-    }
-    
-    test_socket_read(1);
-    test_socket_brutal("best2");
     close(g_kqfd);
 
     /* WS */

@@ -313,6 +313,7 @@ struct knote {
 #define KN_WS 	0x100 				/* the knote is stolen from another kevq */
 	int			kn_fluxwait;
 	int			kn_influx;
+	u_long    kn_rand_seed;
 	struct 		mtx kn_fluxlock;
 	int			kn_sfflags;	/* saved filter flags */
 	int64_t			kn_sdata;	/* saved data field */
