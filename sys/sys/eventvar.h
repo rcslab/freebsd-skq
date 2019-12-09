@@ -56,6 +56,10 @@ struct kevq {
 	uint64_t kevq_avg_ev;
 	uint64_t kevq_tot_ev;
 	uint64_t kevq_tot_time;
+	/* the following two are only set when the thread is procssing in userspace
+	 * in kernel they are set to special value KEVQ_LAST_KERN
+	 */
+#define KEVQ_LAST_KERN (0)
 	uint64_t kevq_last_kev;
 	uint32_t kevq_last_nkev;
 #define KEVQ_SLEEP	0x01

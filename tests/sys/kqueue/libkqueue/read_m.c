@@ -17,13 +17,17 @@
  */
 
 #include "common.h"
+#include "common_m.h"
 
+#include <sys/event.h>
 #include <sys/ioctl.h>
 #include <semaphore.h>
 #include <pthread.h>
 #include <sys/types.h>
 #include <sys/sysctl.h>
 #include <pthread_np.h>
+#include <unistd.h>
+#include <stdlib.h>
 
 //#define TEST_DEBUG
 
@@ -42,7 +46,7 @@ struct thread_info {
  * Read test
  */
 
-#define THREAD_CNT (16)
+#define THREAD_CNT (8)
 #define PACKET_CNT (1600)
 
 static int g_kqfd;
@@ -64,35 +68,6 @@ dump_gkq()
         err(1, "dump ioctl failed");
     } else {
         printf("%s\n", dmpbuf);
-    }
-}
-
-static char
-socket_pop(int sockfd)
-{
-    char buf;
-
-    /* Drain the read buffer, then make sure there are no more events. */
-#ifdef TEST_DEBUG
-    printf("READ_M: popping the read buffer of sock %d\n", sockfd);
-#endif
-    if (read(sockfd, &buf, 1) < 1)
-        err(1, "read(2)");
-
-    return buf;
-}
-
-static void
-socket_push(int sockfd, char ch)
-{
-#ifdef TEST_DEBUG
-    printf("READ_M: pushing to socket %d\n", sockfd);
-#endif
-    if (write(sockfd, &ch, 1) < 1) {
-#ifdef TEST_DEBUG
-    printf("READ_M: write failed with %d\n", errno);
-#endif     
-        err(1, "write(2)");
     }
 }
 
@@ -634,24 +609,22 @@ test_socket_ws_timeout()
     success();
 }
 
-
 /***************************
  * Brutal test
  ***************************/
 #define THREAD_BRUTE_CNT (8)
-#define SOCK_BRUTE_CNT (512)
-#define PACKET_BRUTE_CNT (100 * (SOCK_BRUTE_CNT))
+#define SOCK_BRUTE_CNT (256)
+#define PACKET_BRUTE_CNT (256 * (SOCK_BRUTE_CNT))
 #define THREAD_EXIT_PROB (50)
 #define BRUTE_REALTIME_PROB (50)
 #define BRUTE_MAX_FREQ (10000)
 #define BRUTE_MIN_FREQ (1)
 
-#define RAND_SLEEP (29)
+#define RAND_SLEEP (13)
 #define RAND_SEND_SLEEP (7)
 
-
-int brute_sockfd[SOCK_BRUTE_CNT][2];
-struct thread_info brute_threadinfo[THREAD_BRUTE_CNT];
+static int brute_sockfd[SOCK_BRUTE_CNT][2];
+static struct thread_info brute_threadinfo[THREAD_BRUTE_CNT];
 
 static void*
 test_socket_brutal_worker(void* args)
@@ -691,10 +664,11 @@ test_socket_brutal_worker(void* args)
 #endif
 
         dat = socket_pop(ret->ident);
-        free(ret);
 
         if (dat == 'e')
             break;
+
+        free(ret);
 
         info->evcnt++;
 
@@ -723,7 +697,6 @@ test_socket_brutal(char* name)
 
     srand(time(NULL));
 
-
     for (int i = 0; i < SOCK_BRUTE_CNT; i++) {
 
         /* Create a connected pair of full-duplex sockets for testing socket events */
@@ -739,8 +712,6 @@ test_socket_brutal(char* name)
             err(1, "kevent_brutal_add");     
         }
     }
-
-    srand(time(NULL));
 
 #ifdef TEST_DEBUG
     printf("READ_M: creating %d threads...\n", THREAD_BRUTE_CNT);
@@ -910,12 +881,18 @@ test_socket_realtime()
     success();
 }
 
+extern void
+test_socket_close(char* name);
+
 void
 test_evfilt_read_m()
 {
     int flags = 0;
     int error;
 
+    /* close test */
+    //test_socket_close("default");
+    
     /* Default rand */
     flags = 0;
     g_kqfd = kqueue();
