@@ -146,6 +146,9 @@ struct kqueue {
 	int		    kq_tfreq;
 	int			kq_rtshare;
 
+	/* statistics */
+	u_long		kq_total_sched_time;
+
 	/* Default */
 	struct		rwlock  kevq_vlist_lk;
 	struct		veclist kevq_vlist;

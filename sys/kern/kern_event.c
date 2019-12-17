@@ -29,6 +29,7 @@
  */
 
 #include <sys/cdefs.h>
+#include <sys/types.h>
 __FBSDID("$FreeBSD$");
 
 #include "opt_ktrace.h"
@@ -1595,8 +1596,7 @@ kqueue_kevent(struct kqueue *kq, struct kevq *kevq, struct thread *td, int nchan
 	uint64_t avg;
 	uint64_t cur_ts;
 
-	if ((KQSCHED_GET_SCHED(kq) & KEVQ_LAT_FLAGS) && (kevq->kevq_state & KEVQ_ACTIVE))
-	{
+	if (kevq->kevq_state & KEVQ_ACTIVE) {
 		/* kevq_last_nkev might be 0 if the thread is waken up by a signal */
 		if (kevq->kevq_last_nkev != KEVQ_LAST_KERN && kevq->kevq_last_nkev != 0)
 		{
@@ -3449,7 +3449,7 @@ done:
 		knote_free(rtmarker);
 	}
 
-	if (KQSCHED_GET_SCHED(kq) & KEVQ_LAT_FLAGS) {
+	//if (KQSCHED_GET_SCHED(kq) & KEVQ_LAT_FLAGS) {
 		/* book keep the statistics */
 		kevq->kevq_last_kev = get_cyclecount();
 		kevq->kevq_last_nkev = count;
@@ -3463,7 +3463,7 @@ done:
 		} else {
 			kevq->kevq_avg_ev = calc_overtime_avg(kevq->kevq_avg_ev, count, 95);
 		}
-	}
+	//}
 
 done_nl:
 	KEVQ_NOTOWNED(kevq);
@@ -3479,15 +3479,21 @@ done_nl:
 static void
 kqueue_dump(struct kqueue *kq, struct sbuf *buf)
 {
-	sbuf_printf(buf, "<kq_dump ptr=\"0x%p\" sched=\"0x%x\" sargs=\"0x%x\" feat=\"0x%x\" fargs=\"0x%x\" rtshare=\"%d\" tfreq=\"%d\" >\n", kq, 
+	sbuf_printf(buf, "<kq_dump ptr=\"0x%p\" sched=\"0x%x\" sargs=\"0x%x\" feat=\"0x%x\" fargs=\"0x%x\" rtshare=\"%d\" tfreq=\"%d\" total_sched_time=\"%lu\" >\n", kq, 
 																								kq->kq_ssched, kq->kq_ssargs, kq->kq_sfeat, 
-																								kq->kq_sfargs,kq->kq_rtshare, kq->kq_tfreq);
+																								kq->kq_sfargs,kq->kq_rtshare, kq->kq_tfreq, kq->kq_total_sched_time);
 	sbuf_printf(buf, "\n%*c<kevq_dump>\n", 1 * DUMP_INDENT, ' ');
-	KVLST_RLOCK(kq);
-	for(int i = 0; i < veclist_size(&kq->kevq_vlist); i++) {
-		kevq_dump(buf, veclist_at(&kq->kevq_vlist, i), 2);
+	if (KQSCHED_GET_SCHED(kq)) {
+		// SKQ dump
+		KVLST_RLOCK(kq);
+		for(int i = 0; i < veclist_size(&kq->kevq_vlist); i++) {
+			kevq_dump(buf, veclist_at(&kq->kevq_vlist, i), 2);
+		}
+		KVLST_RUNLOCK(kq); 
+	} else {
+		// legacy Kqueue dump
+		kevq_dump(buf, kq->kq_kevq, 2);
 	}
-	KVLST_RUNLOCK(kq);
 	sbuf_printf(buf, "%*c</kevq_dump>\n", 1 * DUMP_INDENT, ' ');
 
 	/* dump kqdom if used */
@@ -3607,12 +3613,7 @@ kqueue_ioctl(struct file *fp, u_long cmd, void *data,
 
 			sbuf_new(&buf, rbuf, 1024 * 1024, SBUF_FIXEDLEN | SBUF_INCLUDENUL);
 			
-			if (kq->kq_flags & KQ_FLAG_MULTI) {
-				kqueue_dump(kq, &buf);
-			} else {
-				error = (EINVAL);
-				break;
-			}
+			kqueue_dump(kq, &buf);
 
 			sbuf_finish(&buf);
 
@@ -4138,7 +4139,9 @@ knote_activate(struct knote *kn)
 	kn->kn_status |= KN_ACTIVE;
 	
 	if (((kn)->kn_status & (KN_QUEUED | KN_DISABLED)) == 0) {
+		u_long cur_cycle = get_cyclecount() ;
 		knote_sched(kn);
+		atomic_fetchadd_long(&kq->kq_total_sched_time, get_cyclecount() - cur_cycle);
 	} else {
 		CTR2(KTR_KQ, "knote_activate: kn %p, flags %d not sched", kn, kn->kn_status);
 	}
