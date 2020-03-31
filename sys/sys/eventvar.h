@@ -31,6 +31,7 @@
 #ifndef _SYS_EVENTVAR_H_
 #define _SYS_EVENTVAR_H_
 
+#include <sys/queue.h>
 #ifndef _KERNEL
 #error "no user-serviceable parts inside"
 #endif
@@ -66,7 +67,9 @@ struct kevq {
 #define KEVQ_CLOSING  0x02
 #define KEVQ_ACTIVE	0x04
 #define KEVQ_WS 0x08 /* the kevq is work stealing */
+#define KEVQ_SCAN 0x10 /* the kevq is being scanned */
 	int		kevq_state;
+	int 	kn_proc_count;          /* number of processing knotes */
 	int		kn_count;				/* number of pending knotes */
 	int		kn_rt_count;			/* number of runtime knotes */
 	/* end 1st cache line */
@@ -82,7 +85,8 @@ struct kevq {
 	struct 		ktailq kn_head;	/* list of pending knotes */
 	struct 		knote *kn_marker;	
 	struct		ktailq kn_rt_head; /* list of pending knotes with runtime priority */
-	struct		knote *kn_marker_rt;	
+	struct		knote *kn_marker_rt;
+	struct		ktailq kn_proc_head; /* list of pending knotes being processed */
 	int		kevq_refcnt;
 
 	/* TODO: maybe these should be in kqdomain or global */

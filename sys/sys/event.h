@@ -290,10 +290,14 @@ struct knote {
 	SLIST_ENTRY(knote)	kn_link;	/* for kq */
 	SLIST_ENTRY(knote)	kn_selnext;	/* for struct selinfo */
 	struct			knlist *kn_knlist;	/* f_attach populated */
+	// struct			task kn_timer_task; /* timer task for kn */
+	// int				kn_timer_task_queued;
+	int kn_drop;
 	TAILQ_ENTRY(knote)	kn_tqe;
-	TAILQ_ENTRY(knote) 	kn_wse; /* for work stealing queue */
+	TAILQ_ENTRY(knote)  kn_pqe; /* knote for the processing queue */
 	struct			kqueue *kn_kq;	/* which kqueue we are on */
 	struct			kevq *kn_kevq; /* the kevq the knote is on, only valid if KN_QUEUED */
+	struct          kevq *kn_proc_kevq; /* the kevq that's processing the knote, only valid if KN_PROCESSING */
 	/* used by the scheduler */
 	struct			kevq *kn_org_kevq; /* the kevq that registered the knote */
 	struct		kqdom	*kn_kqd; /* the kqdomain the knote belongs to */

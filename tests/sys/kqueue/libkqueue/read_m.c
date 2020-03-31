@@ -803,7 +803,7 @@ test_socket_check_rt(int kqfd, int kev_sz, int rtcnt)
     int nev = kevent_get_n(kqfd, kev, kev_sz);
 
     if (nev != kev_sz) {
-        err(1, "too few events");
+        err(1, "too few events: expected %d, recvd %d", kev_sz, nev);
     }
 
     for (int i = 0; i < rtcnt; i++) {
