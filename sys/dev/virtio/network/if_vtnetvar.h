@@ -136,6 +136,7 @@ struct vtnet_softc {
 	struct ifnet		*vtnet_ifp;
 	struct vtnet_rxq	*vtnet_rxqs;
 	struct vtnet_txq	*vtnet_txqs;
+	pfil_head_t		 vtnet_pfil;
 
 	uint32_t		 vtnet_flags;
 #define VTNET_FLAG_SUSPENDED	 0x0001
@@ -268,8 +269,8 @@ struct vtnet_mac_filter {
 CTASSERT(sizeof(struct vtnet_mac_filter) <= PAGE_SIZE);
 
 #define VTNET_TX_TIMEOUT	5
-#define VTNET_CSUM_OFFLOAD	(CSUM_TCP | CSUM_UDP | CSUM_SCTP)
-#define VTNET_CSUM_OFFLOAD_IPV6	(CSUM_TCP_IPV6 | CSUM_UDP_IPV6 | CSUM_SCTP_IPV6)
+#define VTNET_CSUM_OFFLOAD	(CSUM_TCP | CSUM_UDP)
+#define VTNET_CSUM_OFFLOAD_IPV6	(CSUM_TCP_IPV6 | CSUM_UDP_IPV6)
 
 #define VTNET_CSUM_ALL_OFFLOAD	\
     (VTNET_CSUM_OFFLOAD | VTNET_CSUM_OFFLOAD_IPV6 | CSUM_TSO)

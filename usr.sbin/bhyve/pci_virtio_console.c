@@ -60,6 +60,7 @@ __FBSDID("$FreeBSD$");
 #include <sysexits.h>
 
 #include "bhyverun.h"
+#include "debug.h"
 #include "pci_emul.h"
 #include "virtio.h"
 #include "mevent.h"
@@ -85,8 +86,8 @@ __FBSDID("$FreeBSD$");
     (VTCON_F_SIZE | VTCON_F_MULTIPORT | VTCON_F_EMERG_WRITE)
 
 static int pci_vtcon_debug;
-#define DPRINTF(params) if (pci_vtcon_debug) printf params
-#define WPRINTF(params) printf params
+#define DPRINTF(params) if (pci_vtcon_debug) PRINTLN params
+#define WPRINTF(params) PRINTLN params
 
 struct pci_vtcon_softc;
 struct pci_vtcon_port;
@@ -187,7 +188,7 @@ pci_vtcon_reset(void *vsc)
 
 	sc = vsc;
 
-	DPRINTF(("vtcon: device reset requested!\n"));
+	DPRINTF(("vtcon: device reset requested!"));
 	vi_reset_dev(&sc->vsc_vs);
 }
 
@@ -356,8 +357,11 @@ out:
 	if (fd != -1)
 		close(fd);
 
-	if (error != 0 && s != -1)
-		close(s);
+	if (error != 0) {
+		if (s != -1)
+			close(s);
+		free(sock);
+	}
 
 	return (error);
 }
@@ -420,7 +424,7 @@ pci_vtcon_sock_rx(int fd __unused, enum ev_type t __unused, void *arg)
 		len = readv(sock->vss_conn_fd, &iov, n);
 
 		if (len == 0 || (len < 0 && errno == EWOULDBLOCK)) {
-			vq_retchain(vq);
+			vq_retchains(vq, 1);
 			vq_endchains(vq, 0);
 			if (len == 0)
 				goto close;
@@ -495,7 +499,7 @@ pci_vtcon_control_tx(struct pci_vtcon_port *port, void *arg, struct iovec *iov,
 
 	case VTCON_PORT_READY:
 		if (ctrl->id >= sc->vsc_nports) {
-			WPRINTF(("VTCON_PORT_READY event for unknown port %d\n",
+			WPRINTF(("VTCON_PORT_READY event for unknown port %d",
 			    ctrl->id));
 			return;
 		}
@@ -607,7 +611,7 @@ pci_vtcon_notify_rx(void *vsc, struct vqueue_info *vq)
 
 	if (!port->vsp_rx_ready) {
 		port->vsp_rx_ready = 1;
-		vq->vq_used->vu_flags |= VRING_USED_F_NO_NOTIFY;
+		vq_kick_disable(vq);
 	}
 }
 
@@ -660,7 +664,7 @@ pci_vtcon_init(struct vmctx *ctx, struct pci_devinst *pi, char *opts)
 
 		/* create port */
 		if (pci_vtcon_sock_add(sc, portname, portpath) < 0) {
-			fprintf(stderr, "cannot create port %s: %s\n",
+			EPRINTLN("cannot create port %s: %s",
 			    portname, strerror(errno));
 			return (1);
 		}

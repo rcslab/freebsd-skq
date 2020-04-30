@@ -97,6 +97,7 @@ __FBSDID("$FreeBSD$");
 #include <net/if_llatbl.h>
 #include <net/if_types.h>
 #include <net/route.h>
+#include <net/route/nhop.h>
 
 #include <netinet/in.h>
 #include <netinet/in_var.h>
@@ -109,6 +110,7 @@ __FBSDID("$FreeBSD$");
 #include <netinet6/nd6.h>
 #include <netinet/in_pcb.h>
 #include <netinet6/in6_pcb.h>
+#include <netinet6/in6_fib.h>
 #include <netinet6/scope6_var.h>
 
 static struct inpcb *in6_pcblookup_hash_locked(struct inpcbinfo *,
@@ -411,7 +413,7 @@ in6_pcbladdr(struct inpcb *inp, struct sockaddr *nam,
  */
 int
 in6_pcbconnect_mbuf(struct inpcb *inp, struct sockaddr *nam,
-    struct ucred *cred, struct mbuf *m)
+    struct ucred *cred, struct mbuf *m, bool rehash)
 {
 	struct inpcbinfo *pcbinfo = inp->inp_pcbinfo;
 	struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)nam;
@@ -437,6 +439,8 @@ in6_pcbconnect_mbuf(struct inpcb *inp, struct sockaddr *nam,
 	}
 	if (IN6_IS_ADDR_UNSPECIFIED(&inp->in6p_laddr)) {
 		if (inp->inp_lport == 0) {
+			KASSERT(rehash == true,
+			    ("Rehashing required for unbound inps"));
 			error = in6_pcbbind(inp, (struct sockaddr *)0, cred);
 			if (error)
 				return (error);
@@ -451,7 +455,11 @@ in6_pcbconnect_mbuf(struct inpcb *inp, struct sockaddr *nam,
 		inp->inp_flow |=
 		    (htonl(ip6_randomflowlabel()) & IPV6_FLOWLABEL_MASK);
 
-	in_pcbrehash_mbuf(inp, m);
+	if (rehash) {
+		in_pcbrehash_mbuf(inp, m);
+	} else {
+		in_pcbinshash_mbuf(inp, m);
+	}
 
 	return (0);
 }
@@ -460,7 +468,7 @@ int
 in6_pcbconnect(struct inpcb *inp, struct sockaddr *nam, struct ucred *cred)
 {
 
-	return (in6_pcbconnect_mbuf(inp, nam, cred, NULL));
+	return (in6_pcbconnect_mbuf(inp, nam, cred, NULL, true));
 }
 
 void
@@ -714,7 +722,7 @@ in6_pcblookup_local(struct inpcbinfo *pcbinfo, struct in6_addr *laddr,
 	KASSERT((lookupflags & ~(INPLOOKUP_WILDCARD)) == 0,
 	    ("%s: invalid lookup flags %d", __func__, lookupflags));
 
-	INP_HASH_WLOCK_ASSERT(pcbinfo);
+	INP_HASH_LOCK_ASSERT(pcbinfo);
 
 	if ((lookupflags & INPLOOKUP_WILDCARD) == 0) {
 		struct inpcbhead *head;
@@ -801,19 +809,20 @@ in6_pcblookup_local(struct inpcbinfo *pcbinfo, struct in6_addr *laddr,
 void
 in6_pcbpurgeif0(struct inpcbinfo *pcbinfo, struct ifnet *ifp)
 {
-	struct inpcb *in6p;
+	struct inpcb *inp;
+	struct in6_multi *inm;
+	struct in6_mfilter *imf;
 	struct ip6_moptions *im6o;
-	int i, gap;
 
 	INP_INFO_WLOCK(pcbinfo);
-	CK_LIST_FOREACH(in6p, pcbinfo->ipi_listhead, inp_list) {
-		INP_WLOCK(in6p);
-		if (__predict_false(in6p->inp_flags2 & INP_FREED)) {
-			INP_WUNLOCK(in6p);
+	CK_LIST_FOREACH(inp, pcbinfo->ipi_listhead, inp_list) {
+		INP_WLOCK(inp);
+		if (__predict_false(inp->inp_flags2 & INP_FREED)) {
+			INP_WUNLOCK(inp);
 			continue;
 		}
-		im6o = in6p->in6p_moptions;
-		if ((in6p->inp_vflag & INP_IPV6) && im6o != NULL) {
+		im6o = inp->in6p_moptions;
+		if ((inp->inp_vflag & INP_IPV6) && im6o != NULL) {
 			/*
 			 * Unselect the outgoing ifp for multicast if it
 			 * is being detached.
@@ -824,20 +833,20 @@ in6_pcbpurgeif0(struct inpcbinfo *pcbinfo, struct ifnet *ifp)
 			 * Drop multicast group membership if we joined
 			 * through the interface being detached.
 			 */
-			gap = 0;
-			for (i = 0; i < im6o->im6o_num_memberships; i++) {
-				if (im6o->im6o_membership[i]->in6m_ifp ==
-				    ifp) {
-					in6_leavegroup(im6o->im6o_membership[i], NULL);
-					gap++;
-				} else if (gap != 0) {
-					im6o->im6o_membership[i - gap] =
-					    im6o->im6o_membership[i];
-				}
+restart:
+			IP6_MFILTER_FOREACH(imf, &im6o->im6o_head) {
+				if ((inm = imf->im6f_in6m) == NULL)
+					continue;
+				if (inm->in6m_ifp != ifp)
+					continue;
+				ip6_mfilter_remove(&im6o->im6o_head, imf);
+				IN6_MULTI_LOCK_ASSERT();
+				in6_leavegroup_locked(inm, NULL);
+				ip6_mfilter_free(imf);
+				goto restart;
 			}
-			im6o->im6o_num_memberships -= gap;
 		}
-		INP_WUNLOCK(in6p);
+		INP_WUNLOCK(inp);
 	}
 	INP_INFO_WUNLOCK(pcbinfo);
 }
@@ -1244,7 +1253,6 @@ in6_pcblookup_hash(struct inpcbinfo *pcbinfo, struct in6_addr *faddr,
 {
 	struct inpcb *inp;
 
-	INP_HASH_RLOCK(pcbinfo);
 	inp = in6_pcblookup_hash_locked(pcbinfo, faddr, fport, laddr, lport,
 	    (lookupflags & ~(INPLOOKUP_RLOCKPCB | INPLOOKUP_WLOCKPCB)), ifp);
 	if (inp != NULL) {
@@ -1271,7 +1279,6 @@ in6_pcblookup_hash(struct inpcbinfo *pcbinfo, struct in6_addr *faddr,
 		}
 #endif
 	}
-	INP_HASH_RUNLOCK(pcbinfo);
 	return (inp);
 }
 

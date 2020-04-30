@@ -43,6 +43,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/eventhandler.h>
 #include <vm/uma.h>
 #include <geom/geom.h>
+#include <geom/geom_dbg.h>
 #include <sys/proc.h>
 #include <sys/kthread.h>
 #include <sys/sched.h>
@@ -53,7 +54,7 @@ FEATURE(geom_raid3, "GEOM RAID-3 functionality");
 static MALLOC_DEFINE(M_RAID3, "raid3_data", "GEOM_RAID3 Data");
 
 SYSCTL_DECL(_kern_geom);
-static SYSCTL_NODE(_kern_geom, OID_AUTO, raid3, CTLFLAG_RW, 0,
+static SYSCTL_NODE(_kern_geom, OID_AUTO, raid3, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
     "GEOM_RAID3 stuff");
 u_int g_raid3_debug = 0;
 SYSCTL_UINT(_kern_geom_raid3, OID_AUTO, debug, CTLFLAG_RWTUN, &g_raid3_debug, 0,
@@ -84,7 +85,8 @@ static u_int g_raid3_n4k = 1200;
 SYSCTL_UINT(_kern_geom_raid3, OID_AUTO, n4k, CTLFLAG_RDTUN, &g_raid3_n4k, 0,
     "Maximum number of 4kB allocations");
 
-static SYSCTL_NODE(_kern_geom_raid3, OID_AUTO, stat, CTLFLAG_RW, 0,
+static SYSCTL_NODE(_kern_geom_raid3, OID_AUTO, stat,
+    CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
     "GEOM_RAID3 statistics");
 static u_int g_raid3_parity_mismatch = 0;
 SYSCTL_UINT(_kern_geom_raid3_stat, OID_AUTO, parity_mismatch, CTLFLAG_RD,
@@ -1445,6 +1447,7 @@ g_raid3_start(struct bio *bp)
 	case BIO_WRITE:
 	case BIO_DELETE:
 		break;
+	case BIO_SPEEDUP:
 	case BIO_FLUSH:
 		g_raid3_flush(sc, bp);
 		return;
@@ -3424,22 +3427,22 @@ g_raid3_dumpconf(struct sbuf *sb, const char *indent, struct g_geom *gp,
 		sx_xlock(&sc->sc_lock);
 		sbuf_printf(sb, "%s<Type>", indent);
 		if (disk->d_no == sc->sc_ndisks - 1)
-			sbuf_printf(sb, "PARITY");
+			sbuf_cat(sb, "PARITY");
 		else
-			sbuf_printf(sb, "DATA");
-		sbuf_printf(sb, "</Type>\n");
+			sbuf_cat(sb, "DATA");
+		sbuf_cat(sb, "</Type>\n");
 		sbuf_printf(sb, "%s<Number>%u</Number>\n", indent,
 		    (u_int)disk->d_no);
 		if (disk->d_state == G_RAID3_DISK_STATE_SYNCHRONIZING) {
 			sbuf_printf(sb, "%s<Synchronized>", indent);
 			if (disk->d_sync.ds_offset == 0)
-				sbuf_printf(sb, "0%%");
+				sbuf_cat(sb, "0%");
 			else {
 				sbuf_printf(sb, "%u%%",
 				    (u_int)((disk->d_sync.ds_offset * 100) /
 				    (sc->sc_mediasize / (sc->sc_ndisks - 1))));
 			}
-			sbuf_printf(sb, "</Synchronized>\n");
+			sbuf_cat(sb, "</Synchronized>\n");
 			if (disk->d_sync.ds_offset > 0) {
 				sbuf_printf(sb, "%s<BytesSynced>%jd"
 				    "</BytesSynced>\n", indent,
@@ -3451,17 +3454,17 @@ g_raid3_dumpconf(struct sbuf *sb, const char *indent, struct g_geom *gp,
 		sbuf_printf(sb, "%s<GenID>%u</GenID>\n", indent, disk->d_genid);
 		sbuf_printf(sb, "%s<Flags>", indent);
 		if (disk->d_flags == 0)
-			sbuf_printf(sb, "NONE");
+			sbuf_cat(sb, "NONE");
 		else {
 			int first = 1;
 
 #define	ADD_FLAG(flag, name)	do {					\
 	if ((disk->d_flags & (flag)) != 0) {				\
 		if (!first)						\
-			sbuf_printf(sb, ", ");				\
+			sbuf_cat(sb, ", ");				\
 		else							\
 			first = 0;					\
-		sbuf_printf(sb, name);					\
+		sbuf_cat(sb, name);					\
 	}								\
 } while (0)
 			ADD_FLAG(G_RAID3_DISK_FLAG_DIRTY, "DIRTY");
@@ -3472,7 +3475,7 @@ g_raid3_dumpconf(struct sbuf *sb, const char *indent, struct g_geom *gp,
 			ADD_FLAG(G_RAID3_DISK_FLAG_BROKEN, "BROKEN");
 #undef	ADD_FLAG
 		}
-		sbuf_printf(sb, "</Flags>\n");
+		sbuf_cat(sb, "</Flags>\n");
 		sbuf_printf(sb, "%s<State>%s</State>\n", indent,
 		    g_raid3_disk_state2str(disk->d_state));
 		sx_xunlock(&sc->sc_lock);
@@ -3505,17 +3508,17 @@ g_raid3_dumpconf(struct sbuf *sb, const char *indent, struct g_geom *gp,
 		sbuf_printf(sb, "%s<GenID>%u</GenID>\n", indent, sc->sc_genid);
 		sbuf_printf(sb, "%s<Flags>", indent);
 		if (sc->sc_flags == 0)
-			sbuf_printf(sb, "NONE");
+			sbuf_cat(sb, "NONE");
 		else {
 			int first = 1;
 
 #define	ADD_FLAG(flag, name)	do {					\
 	if ((sc->sc_flags & (flag)) != 0) {				\
 		if (!first)						\
-			sbuf_printf(sb, ", ");				\
+			sbuf_cat(sb, ", ");				\
 		else							\
 			first = 0;					\
-		sbuf_printf(sb, name);					\
+		sbuf_cat(sb, name);					\
 	}								\
 } while (0)
 			ADD_FLAG(G_RAID3_DEVICE_FLAG_NOFAILSYNC, "NOFAILSYNC");
@@ -3525,7 +3528,7 @@ g_raid3_dumpconf(struct sbuf *sb, const char *indent, struct g_geom *gp,
 			ADD_FLAG(G_RAID3_DEVICE_FLAG_VERIFY, "VERIFY");
 #undef	ADD_FLAG
 		}
-		sbuf_printf(sb, "</Flags>\n");
+		sbuf_cat(sb, "</Flags>\n");
 		sbuf_printf(sb, "%s<Components>%u</Components>\n", indent,
 		    sc->sc_ndisks);
 		sbuf_printf(sb, "%s<State>%s</State>\n", indent,

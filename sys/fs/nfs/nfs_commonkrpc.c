@@ -208,8 +208,6 @@ newnfs_connect(struct nfsmount *nmp, struct nfssockreq *nrp,
 			nconf = getnetconfigent("udp");
 		else
 			nconf = getnetconfigent("tcp");
-	else if (saddr->sa_family == AF_LOCAL)
-		nconf = getnetconfigent("local");
 	else
 		if (nrp->nr_sotype == SOCK_DGRAM)
 			nconf = getnetconfigent("udp6");
@@ -235,10 +233,8 @@ newnfs_connect(struct nfsmount *nmp, struct nfssockreq *nrp,
 	saddr = NFSSOCKADDR(nrp->nr_nam, struct sockaddr *);
 	error = socreate(saddr->sa_family, &so, nrp->nr_sotype, 
 	    nrp->nr_soproto, td->td_ucred, td);
-	if (error) {
-		td->td_ucred = origcred;
+	if (error != 0)
 		goto out;
-	}
 	do {
 	    if (error != 0 && pktscale > 2) {
 		if (nmp != NULL && nrp->nr_sotype == SOCK_STREAM &&
@@ -274,10 +270,8 @@ newnfs_connect(struct nfsmount *nmp, struct nfssockreq *nrp,
 		    " rsize, wsize\n");
 	} while (error != 0 && pktscale > 2);
 	soclose(so);
-	if (error) {
-		td->td_ucred = origcred;
+	if (error != 0)
 		goto out;
-	}
 
 	client = clnt_reconnect_create(nconf, saddr, nrp->nr_prog,
 	    nrp->nr_vers, sndreserve, rcvreserve);
@@ -425,11 +419,10 @@ newnfs_connect(struct nfsmount *nmp, struct nfssockreq *nrp,
 			mtx_unlock(&nrp->nr_mtx);
 	}
 
-
+out:
 	/* Restore current thread's credentials. */
 	td->td_ucred = origcred;
 
-out:
 	NFSEXITCODE(error);
 	return (error);
 }
@@ -900,7 +893,7 @@ tryagain:
 	 */
 	newnfs_realign(&nd->nd_mrep, M_WAITOK);
 	nd->nd_md = nd->nd_mrep;
-	nd->nd_dpos = NFSMTOD(nd->nd_md, caddr_t);
+	nd->nd_dpos = mtod(nd->nd_md, caddr_t);
 	nd->nd_repstat = 0;
 	if (nd->nd_procnum != NFSPROC_NULL &&
 	    nd->nd_procnum != NFSV4PROC_CBNULL) {
@@ -920,7 +913,8 @@ tryagain:
 		 * Get rid of the tag, return count and SEQUENCE result for
 		 * NFSv4.
 		 */
-		if ((nd->nd_flag & ND_NFSV4) != 0) {
+		if ((nd->nd_flag & ND_NFSV4) != 0 && nd->nd_repstat !=
+		    NFSERR_MINORVERMISMATCH) {
 			NFSM_DISSECT(tl, u_int32_t *, NFSX_UNSIGNED);
 			i = fxdr_unsigned(int, *tl);
 			error = nfsm_advance(nd, NFSM_RNDUP(i), -1);
@@ -1194,8 +1188,8 @@ tryagain:
 		newnfs_restore_sigmask(td, &oldset);
 	return (0);
 nfsmout:
-	mbuf_freem(nd->nd_mrep);
-	mbuf_freem(nd->nd_mreq);
+	m_freem(nd->nd_mrep);
+	m_freem(nd->nd_mreq);
 	if (usegssname == 0)
 		AUTH_DESTROY(auth);
 	if (rep != NULL)

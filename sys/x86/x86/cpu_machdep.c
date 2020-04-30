@@ -61,6 +61,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/systm.h>
 #include <sys/bus.h>
 #include <sys/cpu.h>
+#include <sys/domainset.h>
 #include <sys/kdb.h>
 #include <sys/kernel.h>
 #include <sys/ktr.h>
@@ -110,6 +111,87 @@ static u_int	cpu_reset_proxyid;
 static volatile u_int	cpu_reset_proxy_active;
 #endif
 
+struct msr_op_arg {
+	u_int msr;
+	int op;
+	uint64_t arg1;
+};
+
+static void
+x86_msr_op_one(void *argp)
+{
+	struct msr_op_arg *a;
+	uint64_t v;
+
+	a = argp;
+	switch (a->op) {
+	case MSR_OP_ANDNOT:
+		v = rdmsr(a->msr);
+		v &= ~a->arg1;
+		wrmsr(a->msr, v);
+		break;
+	case MSR_OP_OR:
+		v = rdmsr(a->msr);
+		v |= a->arg1;
+		wrmsr(a->msr, v);
+		break;
+	case MSR_OP_WRITE:
+		wrmsr(a->msr, a->arg1);
+		break;
+	}
+}
+
+#define	MSR_OP_EXMODE_MASK	0xf0000000
+#define	MSR_OP_OP_MASK		0x000000ff
+
+void
+x86_msr_op(u_int msr, u_int op, uint64_t arg1)
+{
+	struct thread *td;
+	struct msr_op_arg a;
+	u_int exmode;
+	int bound_cpu, i, is_bound;
+
+	a.op = op & MSR_OP_OP_MASK;
+	MPASS(a.op == MSR_OP_ANDNOT || a.op == MSR_OP_OR ||
+	    a.op == MSR_OP_WRITE);
+	exmode = op & MSR_OP_EXMODE_MASK;
+	MPASS(exmode == MSR_OP_LOCAL || exmode == MSR_OP_SCHED ||
+	    exmode == MSR_OP_RENDEZVOUS);
+	a.msr = msr;
+	a.arg1 = arg1;
+	switch (exmode) {
+	case MSR_OP_LOCAL:
+		x86_msr_op_one(&a);
+		break;
+	case MSR_OP_SCHED:
+		td = curthread;
+		thread_lock(td);
+		is_bound = sched_is_bound(td);
+		bound_cpu = td->td_oncpu;
+		CPU_FOREACH(i) {
+			sched_bind(td, i);
+			x86_msr_op_one(&a);
+		}
+		if (is_bound)
+			sched_bind(td, bound_cpu);
+		else
+			sched_unbind(td);
+		thread_unlock(td);
+		break;
+	case MSR_OP_RENDEZVOUS:
+		smp_rendezvous(NULL, x86_msr_op_one, NULL, &a);
+		break;
+	}
+}
+
+/*
+ * Automatically initialized per CPU errata in cpu_idle_tun below.
+ */
+bool mwait_cpustop_broken = false;
+SYSCTL_BOOL(_machdep, OID_AUTO, mwait_cpustop_broken, CTLFLAG_RDTUN,
+    &mwait_cpustop_broken, 0,
+    "Can not reliably wake MONITOR/MWAIT cpus without interrupts");
 
 /*
  * Machine dependent boot() routine
@@ -164,7 +246,7 @@ acpi_cpu_idle_mwait(uint32_t mwait_hint)
 	 * but all Intel CPUs provide hardware coordination.
 	 */
 
-	state = (int *)PCPU_PTR(monitorbuf);
+	state = &PCPU_PTR(monitorbuf)->idle_state;
 	KASSERT(atomic_load_int(state) == STATE_SLEEPING,
 	    ("cpu_mwait_cx: wrong monitorbuf state"));
 	atomic_store_int(state, STATE_MWAIT);
@@ -358,13 +440,14 @@ void
 cpu_reset(void)
 {
 #ifdef SMP
+	struct monitorbuf *mb;
 	cpuset_t map;
 	u_int cnt;
 
 	if (smp_started) {
 		map = all_cpus;
 		CPU_CLR(PCPU_GET(cpuid), &map);
-		CPU_NAND(&map, &stopped_cpus);
+		CPU_ANDNOT(&map, &stopped_cpus);
 		if (!CPU_EMPTY(&map)) {
 			printf("cpu_reset: Stopping other CPUs\n");
 			stop_cpus(map);
@@ -378,7 +461,9 @@ cpu_reset(void)
 
 			/* Restart CPU #0. */
 			CPU_SETOF(0, &started_cpus);
-			wmb();
+			mb = &pcpu_find(0)->pc_monitorbuf;
+			atomic_store_int(&mb->stop_state,
+			    MONITOR_STOPSTATE_RUNNING);
 
 			cnt = 0;
 			while (cpu_reset_proxy_active == 0 && cnt < 10000000) {
@@ -422,7 +507,7 @@ cpu_idle_acpi(sbintime_t sbt)
 {
 	int *state;
 
-	state = (int *)PCPU_PTR(monitorbuf);
+	state = &PCPU_PTR(monitorbuf)->idle_state;
 	atomic_store_int(state, STATE_SLEEPING);
 
 	/* See comments in cpu_idle_hlt(). */
@@ -441,7 +526,7 @@ cpu_idle_hlt(sbintime_t sbt)
 {
 	int *state;
 
-	state = (int *)PCPU_PTR(monitorbuf);
+	state = &PCPU_PTR(monitorbuf)->idle_state;
 	atomic_store_int(state, STATE_SLEEPING);
 
 	/*
@@ -473,7 +558,7 @@ cpu_idle_mwait(sbintime_t sbt)
 {
 	int *state;
 
-	state = (int *)PCPU_PTR(monitorbuf);
+	state = &PCPU_PTR(monitorbuf)->idle_state;
 	atomic_store_int(state, STATE_MWAIT);
 
 	/* See comments in cpu_idle_hlt(). */
@@ -498,7 +583,7 @@ cpu_idle_spin(sbintime_t sbt)
 	int *state;
 	int i;
 
-	state = (int *)PCPU_PTR(monitorbuf);
+	state = &PCPU_PTR(monitorbuf)->idle_state;
 	atomic_store_int(state, STATE_RUNNING);
 
 	/*
@@ -598,9 +683,11 @@ SYSCTL_INT(_machdep, OID_AUTO, idle_apl31, CTLFLAG_RW,
 int
 cpu_idle_wakeup(int cpu)
 {
+	struct monitorbuf *mb;
 	int *state;
 
-	state = (int *)pcpu_find(cpu)->pc_monitorbuf;
+	mb = &pcpu_find(cpu)->pc_monitorbuf;
+	state = &mb->idle_state;
 	switch (atomic_load_int(state)) {
 	case STATE_SLEEPING:
 		return (0);
@@ -654,8 +741,10 @@ idle_sysctl_available(SYSCTL_HANDLER_ARGS)
 	return (error);
 }
 
-SYSCTL_PROC(_machdep, OID_AUTO, idle_available, CTLTYPE_STRING | CTLFLAG_RD,
-    0, 0, idle_sysctl_available, "A", "list of available idle functions");
+SYSCTL_PROC(_machdep, OID_AUTO, idle_available,
+    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_NEEDGIANT,
+    0, 0, idle_sysctl_available, "A",
+    "list of available idle functions");
 
 static bool
 cpu_idle_selector(const char *new_idle_name)
@@ -699,8 +788,10 @@ cpu_idle_sysctl(SYSCTL_HANDLER_ARGS)
 	return (cpu_idle_selector(buf) ? 0 : EINVAL);
 }
 
-SYSCTL_PROC(_machdep, OID_AUTO, idle, CTLTYPE_STRING | CTLFLAG_RW, 0, 0,
-    cpu_idle_sysctl, "A", "currently selected idle function");
+SYSCTL_PROC(_machdep, OID_AUTO, idle,
+    CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_NEEDGIANT,
+    0, 0, cpu_idle_sysctl, "A",
+    "currently selected idle function");
 
 static void
 cpu_idle_tun(void *unused __unused)
@@ -714,6 +805,7 @@ cpu_idle_tun(void *unused __unused)
 		/* Ryzen erratas 1057, 1109. */
 		cpu_idle_selector("hlt");
 		idle_mwait = 0;
+		mwait_cpustop_broken = true;
 	}
 
 	if (cpu_vendor_id == CPU_VENDOR_INTEL && cpu_id == 0x506c9) {
@@ -725,25 +817,20 @@ cpu_idle_tun(void *unused __unused)
 		 * sleep states.
 		 */
 		cpu_idle_apl31_workaround = 1;
+		mwait_cpustop_broken = true;
 	}
 	TUNABLE_INT_FETCH("machdep.idle_apl31", &cpu_idle_apl31_workaround);
 }
 SYSINIT(cpu_idle_tun, SI_SUB_CPU, SI_ORDER_MIDDLE, cpu_idle_tun, NULL);
 
-static int panic_on_nmi = 1;
+static int panic_on_nmi = 0xff;
 SYSCTL_INT(_machdep, OID_AUTO, panic_on_nmi, CTLFLAG_RWTUN,
     &panic_on_nmi, 0,
-    "Panic on NMI raised by hardware failure");
+    "Panic on NMI: 1 = H/W failure; 2 = unknown; 0xff = all");
 int nmi_is_broadcast = 1;
 SYSCTL_INT(_machdep, OID_AUTO, nmi_is_broadcast, CTLFLAG_RWTUN,
     &nmi_is_broadcast, 0,
     "Chipset NMI is broadcast");
-#ifdef KDB
-int kdb_on_nmi = 1;
-SYSCTL_INT(_machdep, OID_AUTO, kdb_on_nmi, CTLFLAG_RWTUN,
-    &kdb_on_nmi, 0,
-    "Go to KDB on NMI with unknown source");
-#endif
 
 void
 nmi_call_kdb(u_int cpu, u_int type, struct trapframe *frame)
@@ -754,19 +841,31 @@ nmi_call_kdb(u_int cpu, u_int type, struct trapframe *frame)
 	/* machine/parity/power fail/"kitchen sink" faults */
 	if (isa_nmi(frame->tf_err)) {
 		claimed = true;
-		if (panic_on_nmi)
+		if ((panic_on_nmi & 1) != 0)
 			panic("NMI indicates hardware failure");
 	}
 #endif /* DEV_ISA */
+
+	/*
+	 * NMIs can be useful for debugging.  They can be hooked up to a
+	 * pushbutton, usually on an ISA, PCI, or PCIe card.  They can also be
+	 * generated by an IPMI BMC, either manually or in response to a
+	 * watchdog timeout.  For example, see the "power diag" command in
+	 * ports/sysutils/ipmitool.  They can also be generated by a
+	 * hypervisor; see "bhyvectl --inject-nmi".
+	 */
+
 #ifdef KDB
-	if (!claimed && kdb_on_nmi) {
-		/*
-		 * NMI can be hooked up to a pushbutton for debugging.
-		 */
-		printf("NMI/cpu%d ... going to debugger\n", cpu);
-		kdb_trap(type, 0, frame);
+	if (!claimed && (panic_on_nmi & 2) != 0) {
+		if (debugger_on_panic) {
+			printf("NMI/cpu%d ... going to debugger\n", cpu);
+			claimed = kdb_trap(type, 0, frame);
+		}
 	}
 #endif /* KDB */
+
+	if (!claimed && panic_on_nmi != 0)
+		panic("NMI");
 }
 
 void
@@ -782,31 +881,34 @@ nmi_handle_intr(u_int type, struct trapframe *frame)
 	nmi_call_kdb(PCPU_GET(cpuid), type, frame);
 }
 
-int hw_ibrs_active;
+static int hw_ibrs_active;
+int hw_ibrs_ibpb_active;
 int hw_ibrs_disable = 1;
 
 SYSCTL_INT(_hw, OID_AUTO, ibrs_active, CTLFLAG_RD, &hw_ibrs_active, 0,
     "Indirect Branch Restricted Speculation active");
 
-void
-hw_ibrs_recalculate(void)
-{
-	uint64_t v;
+SYSCTL_NODE(_machdep_mitigations, OID_AUTO, ibrs,
+    CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "Indirect Branch Restricted Speculation active");
 
+SYSCTL_INT(_machdep_mitigations_ibrs, OID_AUTO, active, CTLFLAG_RD,
+    &hw_ibrs_active, 0, "Indirect Branch Restricted Speculation active");
+
+void
+hw_ibrs_recalculate(bool for_all_cpus)
+{
 	if ((cpu_ia32_arch_caps & IA32_ARCH_CAP_IBRS_ALL) != 0) {
-		if (hw_ibrs_disable) {
-			v = rdmsr(MSR_IA32_SPEC_CTRL);
-			v &= ~(uint64_t)IA32_SPEC_CTRL_IBRS;
-			wrmsr(MSR_IA32_SPEC_CTRL, v);
-		} else {
-			v = rdmsr(MSR_IA32_SPEC_CTRL);
-			v |= IA32_SPEC_CTRL_IBRS;
-			wrmsr(MSR_IA32_SPEC_CTRL, v);
-		}
-		return;
+		x86_msr_op(MSR_IA32_SPEC_CTRL, (for_all_cpus ?
+		    MSR_OP_RENDEZVOUS : MSR_OP_LOCAL) |
+		    (hw_ibrs_disable != 0 ? MSR_OP_ANDNOT : MSR_OP_OR),
+		    IA32_SPEC_CTRL_IBRS);
+		hw_ibrs_active = hw_ibrs_disable == 0;
+		hw_ibrs_ibpb_active = 0;
+	} else {
+		hw_ibrs_active = hw_ibrs_ibpb_active = (cpu_stdext_feature3 &
+		    CPUID_STDEXT3_IBPB) != 0 && !hw_ibrs_disable;
 	}
-	hw_ibrs_active = (cpu_stdext_feature3 & CPUID_STDEXT3_IBPB) != 0 &&
-	    !hw_ibrs_disable;
 }
 
 static int
@@ -819,11 +921,16 @@ hw_ibrs_disable_handler(SYSCTL_HANDLER_ARGS)
 	if (error != 0 || req->newptr == NULL)
 		return (error);
 	hw_ibrs_disable = val != 0;
-	hw_ibrs_recalculate();
+	hw_ibrs_recalculate(true);
 	return (0);
 }
 SYSCTL_PROC(_hw, OID_AUTO, ibrs_disable, CTLTYPE_INT | CTLFLAG_RWTUN |
     CTLFLAG_NOFETCH | CTLFLAG_MPSAFE, NULL, 0, hw_ibrs_disable_handler, "I",
+    "Disable Indirect Branch Restricted Speculation");
+
+SYSCTL_PROC(_machdep_mitigations_ibrs, OID_AUTO, disable, CTLTYPE_INT |
+    CTLFLAG_RWTUN | CTLFLAG_NOFETCH | CTLFLAG_MPSAFE, NULL, 0,
+    hw_ibrs_disable_handler, "I",
     "Disable Indirect Branch Restricted Speculation");
 
 int hw_ssb_active;
@@ -833,47 +940,25 @@ SYSCTL_INT(_hw, OID_AUTO, spec_store_bypass_disable_active, CTLFLAG_RD,
     &hw_ssb_active, 0,
     "Speculative Store Bypass Disable active");
 
-static void
-hw_ssb_set_one(bool enable)
-{
-	uint64_t v;
+SYSCTL_NODE(_machdep_mitigations, OID_AUTO, ssb,
+    CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "Speculative Store Bypass Disable active");
 
-	v = rdmsr(MSR_IA32_SPEC_CTRL);
-	if (enable)
-		v |= (uint64_t)IA32_SPEC_CTRL_SSBD;
-	else
-		v &= ~(uint64_t)IA32_SPEC_CTRL_SSBD;
-	wrmsr(MSR_IA32_SPEC_CTRL, v);
-}
+SYSCTL_INT(_machdep_mitigations_ssb, OID_AUTO, active, CTLFLAG_RD,
+    &hw_ssb_active, 0, "Speculative Store Bypass Disable active");
 
 static void
 hw_ssb_set(bool enable, bool for_all_cpus)
 {
-	struct thread *td;
-	int bound_cpu, i, is_bound;
 
 	if ((cpu_stdext_feature3 & CPUID_STDEXT3_SSBD) == 0) {
 		hw_ssb_active = 0;
 		return;
 	}
 	hw_ssb_active = enable;
-	if (for_all_cpus) {
-		td = curthread;
-		thread_lock(td);
-		is_bound = sched_is_bound(td);
-		bound_cpu = td->td_oncpu;
-		CPU_FOREACH(i) {
-			sched_bind(td, i);
-			hw_ssb_set_one(enable);
-		}
-		if (is_bound)
-			sched_bind(td, bound_cpu);
-		else
-			sched_unbind(td);
-		thread_unlock(td);
-	} else {
-		hw_ssb_set_one(enable);
-	}
+	x86_msr_op(MSR_IA32_SPEC_CTRL,
+	    (enable ? MSR_OP_OR : MSR_OP_ANDNOT) |
+	    (for_all_cpus ? MSR_OP_SCHED : MSR_OP_LOCAL), IA32_SPEC_CTRL_SSBD);
 }
 
 void
@@ -914,6 +999,403 @@ SYSCTL_PROC(_hw, OID_AUTO, spec_store_bypass_disable, CTLTYPE_INT |
     CTLFLAG_RWTUN | CTLFLAG_NOFETCH | CTLFLAG_MPSAFE, NULL, 0,
     hw_ssb_disable_handler, "I",
     "Speculative Store Bypass Disable (0 - off, 1 - on, 2 - auto");
+
+SYSCTL_PROC(_machdep_mitigations_ssb, OID_AUTO, disable, CTLTYPE_INT |
+    CTLFLAG_RWTUN | CTLFLAG_NOFETCH | CTLFLAG_MPSAFE, NULL, 0,
+    hw_ssb_disable_handler, "I",
+    "Speculative Store Bypass Disable (0 - off, 1 - on, 2 - auto");
+
+int hw_mds_disable;
+
+/*
+ * Handler for Microarchitectural Data Sampling issues.  Really not a
+ * pointer to C function: on amd64 the code must not change any CPU
+ * architectural state except possibly %rflags. Also, it is always
+ * called with interrupts disabled.
+ */
+void mds_handler_void(void);
+void mds_handler_verw(void);
+void mds_handler_ivb(void);
+void mds_handler_bdw(void);
+void mds_handler_skl_sse(void);
+void mds_handler_skl_avx(void);
+void mds_handler_skl_avx512(void);
+void mds_handler_silvermont(void);
+void (*mds_handler)(void) = mds_handler_void;
+
+static int
+sysctl_hw_mds_disable_state_handler(SYSCTL_HANDLER_ARGS)
+{
+	const char *state;
+
+	if (mds_handler == mds_handler_void)
+		state = "inactive";
+	else if (mds_handler == mds_handler_verw)
+		state = "VERW";
+	else if (mds_handler == mds_handler_ivb)
+		state = "software IvyBridge";
+	else if (mds_handler == mds_handler_bdw)
+		state = "software Broadwell";
+	else if (mds_handler == mds_handler_skl_sse)
+		state = "software Skylake SSE";
+	else if (mds_handler == mds_handler_skl_avx)
+		state = "software Skylake AVX";
+	else if (mds_handler == mds_handler_skl_avx512)
+		state = "software Skylake AVX512";
+	else if (mds_handler == mds_handler_silvermont)
+		state = "software Silvermont";
+	else
+		state = "unknown";
+	return (SYSCTL_OUT(req, state, strlen(state)));
+}
+
+SYSCTL_PROC(_hw, OID_AUTO, mds_disable_state,
+    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, 0,
+    sysctl_hw_mds_disable_state_handler, "A",
+    "Microarchitectural Data Sampling Mitigation state");
+
+SYSCTL_NODE(_machdep_mitigations, OID_AUTO, mds,
+    CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "Microarchitectural Data Sampling Mitigation state");
+
+SYSCTL_PROC(_machdep_mitigations_mds, OID_AUTO, state,
+    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, 0,
+    sysctl_hw_mds_disable_state_handler, "A",
+    "Microarchitectural Data Sampling Mitigation state");
+
+_Static_assert(__offsetof(struct pcpu, pc_mds_tmp) % 64 == 0, "MDS AVX512");
+
+void
+hw_mds_recalculate(void)
+{
+	struct pcpu *pc;
+	vm_offset_t b64;
+	u_long xcr0;
+	int i;
+
+	/*
+	 * Allow user to force VERW variant even if MD_CLEAR is not
+	 * reported.  For instance, hypervisor might unknowingly
+	 * filter the cap out.
+	 * For the similar reasons, and for testing, allow to enable
+	 * mitigation even for RDCL_NO or MDS_NO caps.
+	 */
+	if (cpu_vendor_id != CPU_VENDOR_INTEL || hw_mds_disable == 0 ||
+	    ((cpu_ia32_arch_caps & (IA32_ARCH_CAP_RDCL_NO |
+	    IA32_ARCH_CAP_MDS_NO)) != 0 && hw_mds_disable == 3)) {
+		mds_handler = mds_handler_void;
+	} else if (((cpu_stdext_feature3 & CPUID_STDEXT3_MD_CLEAR) != 0 &&
+	    hw_mds_disable == 3) || hw_mds_disable == 1) {
+		mds_handler = mds_handler_verw;
+	} else if (CPUID_TO_FAMILY(cpu_id) == 0x6 &&
+	    (CPUID_TO_MODEL(cpu_id) == 0x2e || CPUID_TO_MODEL(cpu_id) == 0x1e ||
+	    CPUID_TO_MODEL(cpu_id) == 0x1f || CPUID_TO_MODEL(cpu_id) == 0x1a ||
+	    CPUID_TO_MODEL(cpu_id) == 0x2f || CPUID_TO_MODEL(cpu_id) == 0x25 ||
+	    CPUID_TO_MODEL(cpu_id) == 0x2c || CPUID_TO_MODEL(cpu_id) == 0x2d ||
+	    CPUID_TO_MODEL(cpu_id) == 0x2a || CPUID_TO_MODEL(cpu_id) == 0x3e ||
+	    CPUID_TO_MODEL(cpu_id) == 0x3a) &&
+	    (hw_mds_disable == 2 || hw_mds_disable == 3)) {
+		/*
+		 * Nehalem, SandyBridge, IvyBridge
+		 */
+		CPU_FOREACH(i) {
+			pc = pcpu_find(i);
+			if (pc->pc_mds_buf == NULL) {
+				pc->pc_mds_buf = malloc_domainset(672, M_TEMP,
+				    DOMAINSET_PREF(pc->pc_domain), M_WAITOK);
+				bzero(pc->pc_mds_buf, 16);
+			}
+		}
+		mds_handler = mds_handler_ivb;
+	} else if (CPUID_TO_FAMILY(cpu_id) == 0x6 &&
+	    (CPUID_TO_MODEL(cpu_id) == 0x3f || CPUID_TO_MODEL(cpu_id) == 0x3c ||
+	    CPUID_TO_MODEL(cpu_id) == 0x45 || CPUID_TO_MODEL(cpu_id) == 0x46 ||
+	    CPUID_TO_MODEL(cpu_id) == 0x56 || CPUID_TO_MODEL(cpu_id) == 0x4f ||
+	    CPUID_TO_MODEL(cpu_id) == 0x47 || CPUID_TO_MODEL(cpu_id) == 0x3d) &&
+	    (hw_mds_disable == 2 || hw_mds_disable == 3)) {
+		/*
+		 * Haswell, Broadwell
+		 */
+		CPU_FOREACH(i) {
+			pc = pcpu_find(i);
+			if (pc->pc_mds_buf == NULL) {
+				pc->pc_mds_buf = malloc_domainset(1536, M_TEMP,
+				    DOMAINSET_PREF(pc->pc_domain), M_WAITOK);
+				bzero(pc->pc_mds_buf, 16);
+			}
+		}
+		mds_handler = mds_handler_bdw;
+	} else if (CPUID_TO_FAMILY(cpu_id) == 0x6 &&
+	    ((CPUID_TO_MODEL(cpu_id) == 0x55 && (cpu_id &
+	    CPUID_STEPPING) <= 5) ||
+	    CPUID_TO_MODEL(cpu_id) == 0x4e || CPUID_TO_MODEL(cpu_id) == 0x5e ||
+	    (CPUID_TO_MODEL(cpu_id) == 0x8e && (cpu_id &
+	    CPUID_STEPPING) <= 0xb) ||
+	    (CPUID_TO_MODEL(cpu_id) == 0x9e && (cpu_id &
+	    CPUID_STEPPING) <= 0xc)) &&
+	    (hw_mds_disable == 2 || hw_mds_disable == 3)) {
+		/*
+		 * Skylake, KabyLake, CoffeeLake, WhiskeyLake,
+		 * CascadeLake
+		 */
+		CPU_FOREACH(i) {
+			pc = pcpu_find(i);
+			if (pc->pc_mds_buf == NULL) {
+				pc->pc_mds_buf = malloc_domainset(6 * 1024,
+				    M_TEMP, DOMAINSET_PREF(pc->pc_domain),
+				    M_WAITOK);
+				b64 = (vm_offset_t)malloc_domainset(64 + 63,
+				    M_TEMP, DOMAINSET_PREF(pc->pc_domain),
+				    M_WAITOK);
+				pc->pc_mds_buf64 = (void *)roundup2(b64, 64);
+				bzero(pc->pc_mds_buf64, 64);
+			}
+		}
+		xcr0 = rxcr(0);
+		if ((xcr0 & XFEATURE_ENABLED_ZMM_HI256) != 0 &&
+		    (cpu_stdext_feature & CPUID_STDEXT_AVX512DQ) != 0)
+			mds_handler = mds_handler_skl_avx512;
+		else if ((xcr0 & XFEATURE_ENABLED_AVX) != 0 &&
+		    (cpu_feature2 & CPUID2_AVX) != 0)
+			mds_handler = mds_handler_skl_avx;
+		else
+			mds_handler = mds_handler_skl_sse;
+	} else if (CPUID_TO_FAMILY(cpu_id) == 0x6 &&
+	    ((CPUID_TO_MODEL(cpu_id) == 0x37 ||
+	    CPUID_TO_MODEL(cpu_id) == 0x4a ||
+	    CPUID_TO_MODEL(cpu_id) == 0x4c ||
+	    CPUID_TO_MODEL(cpu_id) == 0x4d ||
+	    CPUID_TO_MODEL(cpu_id) == 0x5a ||
+	    CPUID_TO_MODEL(cpu_id) == 0x5d ||
+	    CPUID_TO_MODEL(cpu_id) == 0x6e ||
+	    CPUID_TO_MODEL(cpu_id) == 0x65 ||
+	    CPUID_TO_MODEL(cpu_id) == 0x75 ||
+	    CPUID_TO_MODEL(cpu_id) == 0x1c ||
+	    CPUID_TO_MODEL(cpu_id) == 0x26 ||
+	    CPUID_TO_MODEL(cpu_id) == 0x27 ||
+	    CPUID_TO_MODEL(cpu_id) == 0x35 ||
+	    CPUID_TO_MODEL(cpu_id) == 0x36 ||
+	    CPUID_TO_MODEL(cpu_id) == 0x7a))) {
+		/* Silvermont, Airmont */
+		CPU_FOREACH(i) {
+			pc = pcpu_find(i);
+			if (pc->pc_mds_buf == NULL)
+				pc->pc_mds_buf = malloc(256, M_TEMP, M_WAITOK);
+		}
+		mds_handler = mds_handler_silvermont;
+	} else {
+		hw_mds_disable = 0;
+		mds_handler = mds_handler_void;
+	}
+}
+
+static void
+hw_mds_recalculate_boot(void *arg __unused)
+{
+
+	hw_mds_recalculate();
+}
+SYSINIT(mds_recalc, SI_SUB_SMP, SI_ORDER_ANY, hw_mds_recalculate_boot, NULL);
+
+static int
+sysctl_mds_disable_handler(SYSCTL_HANDLER_ARGS)
+{
+	int error, val;
+
+	val = hw_mds_disable;
+	error = sysctl_handle_int(oidp, &val, 0, req);
+	if (error != 0 || req->newptr == NULL)
+		return (error);
+	if (val < 0 || val > 3)
+		return (EINVAL);
+	hw_mds_disable = val;
+	hw_mds_recalculate();
+	return (0);
+}
+
+SYSCTL_PROC(_hw, OID_AUTO, mds_disable, CTLTYPE_INT |
+    CTLFLAG_RWTUN | CTLFLAG_NOFETCH | CTLFLAG_MPSAFE, NULL, 0,
+    sysctl_mds_disable_handler, "I",
+    "Microarchitectural Data Sampling Mitigation "
+    "(0 - off, 1 - on VERW, 2 - on SW, 3 - on AUTO");
+
+SYSCTL_PROC(_machdep_mitigations_mds, OID_AUTO, disable, CTLTYPE_INT |
+    CTLFLAG_RWTUN | CTLFLAG_NOFETCH | CTLFLAG_MPSAFE, NULL, 0,
+    sysctl_mds_disable_handler, "I",
+    "Microarchitectural Data Sampling Mitigation "
+    "(0 - off, 1 - on VERW, 2 - on SW, 3 - on AUTO");
+
+/*
+ * Intel Transactional Memory Asynchronous Abort Mitigation
+ * CVE-2019-11135
+ */
+int x86_taa_enable;
+int x86_taa_state;
+enum {
+	TAA_NONE	= 0,	/* No mitigation enabled */
+	TAA_TSX_DISABLE	= 1,	/* Disable TSX via MSR */
+	TAA_VERW	= 2,	/* Use VERW mitigation */
+	TAA_AUTO	= 3,	/* Automatically select the mitigation */
+
+	/* The states below are not selectable by the operator */
+
+	TAA_TAA_UC	= 4,	/* Mitigation present in microcode */
+	TAA_NOT_PRESENT	= 5	/* TSX is not present */
+};
+
+static void
+taa_set(bool enable, bool all)
+{
+
+	x86_msr_op(MSR_IA32_TSX_CTRL,
+	    (enable ? MSR_OP_OR : MSR_OP_ANDNOT) |
+	    (all ? MSR_OP_RENDEZVOUS : MSR_OP_LOCAL),
+	    IA32_TSX_CTRL_RTM_DISABLE | IA32_TSX_CTRL_TSX_CPUID_CLEAR);
+}
+
+void
+x86_taa_recalculate(void)
+{
+	static int taa_saved_mds_disable = 0;
+	int taa_need = 0, taa_state = 0;
+	int mds_disable = 0, need_mds_recalc = 0;
+
+	/* Check CPUID.07h.EBX.HLE and RTM for the presence of TSX */
+	if ((cpu_stdext_feature & CPUID_STDEXT_HLE) == 0 ||
+	    (cpu_stdext_feature & CPUID_STDEXT_RTM) == 0) {
+		/* TSX is not present */
+		x86_taa_state = TAA_NOT_PRESENT;
+		return;
+	}
+
+	/* Check to see what mitigation options the CPU gives us */
+	if (cpu_ia32_arch_caps & IA32_ARCH_CAP_TAA_NO) {
+		/* CPU is not suseptible to TAA */
+		taa_need = TAA_TAA_UC;
+	} else if (cpu_ia32_arch_caps & IA32_ARCH_CAP_TSX_CTRL) {
+		/*
+		 * CPU can turn off TSX.  This is the next best option
+		 * if TAA_NO hardware mitigation isn't present
+		 */
+		taa_need = TAA_TSX_DISABLE;
+	} else {
+		/* No TSX/TAA specific remedies are available. */
+		if (x86_taa_enable == TAA_TSX_DISABLE) {
+			if (bootverbose)
+				printf("TSX control not available\n");
+			return;
+		} else
+			taa_need = TAA_VERW;
+	}
+
+	/* Can we automatically take action, or are we being forced? */
+	if (x86_taa_enable == TAA_AUTO)
+		taa_state = taa_need;
+	else
+		taa_state = x86_taa_enable;
+
+	/* No state change, nothing to do */
+	if (taa_state == x86_taa_state) {
+		if (bootverbose)
+			printf("No TSX change made\n");
+		return;
+	}
+
+	/* Does the MSR need to be turned on or off? */
+	if (taa_state == TAA_TSX_DISABLE)
+		taa_set(true, true);
+	else if (x86_taa_state == TAA_TSX_DISABLE)
+		taa_set(false, true);
+
+	/* Does MDS need to be set to turn on VERW? */
+	if (taa_state == TAA_VERW) {
+		taa_saved_mds_disable = hw_mds_disable;
+		mds_disable = hw_mds_disable = 1;
+		need_mds_recalc = 1;
+	} else if (x86_taa_state == TAA_VERW) {
+		mds_disable = hw_mds_disable = taa_saved_mds_disable;
+		need_mds_recalc = 1;
+	}
+	if (need_mds_recalc) {
+		hw_mds_recalculate();
+		if (mds_disable != hw_mds_disable) {
+			if (bootverbose)
+				printf("Cannot change MDS state for TAA\n");
+			/* Don't update our state */
+			return;
+		}
+	}
+
+	x86_taa_state = taa_state;
+	return;
+}
+
+static void
+taa_recalculate_boot(void * arg __unused)
+{
+
+	x86_taa_recalculate();
+}
+SYSINIT(taa_recalc, SI_SUB_SMP, SI_ORDER_ANY, taa_recalculate_boot, NULL);
+
+SYSCTL_NODE(_machdep_mitigations, OID_AUTO, taa,
+    CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "TSX Asynchronous Abort Mitigation");
+
+static int
+sysctl_taa_handler(SYSCTL_HANDLER_ARGS)
+{
+	int error, val;
+
+	val = x86_taa_enable;
+	error = sysctl_handle_int(oidp, &val, 0, req);
+	if (error != 0 || req->newptr == NULL)
+		return (error);
+	if (val < TAA_NONE || val > TAA_AUTO)
+		return (EINVAL);
+	x86_taa_enable = val;
+	x86_taa_recalculate();
+	return (0);
+}
+
+SYSCTL_PROC(_machdep_mitigations_taa, OID_AUTO, enable, CTLTYPE_INT |
+    CTLFLAG_RWTUN | CTLFLAG_NOFETCH | CTLFLAG_MPSAFE, NULL, 0,
+    sysctl_taa_handler, "I",
+    "TAA Mitigation enablement control "
+    "(0 - off, 1 - disable TSX, 2 - VERW, 3 - on AUTO");
+
+static int
+sysctl_taa_state_handler(SYSCTL_HANDLER_ARGS)
+{
+	const char *state;
+
+	switch (x86_taa_state) {
+	case TAA_NONE:
+		state = "inactive";
+		break;
+	case TAA_TSX_DISABLE:
+		state = "TSX disabled";
+		break;
+	case TAA_VERW:
+		state = "VERW";
+		break;
+	case TAA_TAA_UC:
+		state = "Mitigated in microcode";
+		break;
+	case TAA_NOT_PRESENT:
+		state = "TSX not present";
+		break;
+	default:
+		state = "unknown";
+	}
+
+	return (SYSCTL_OUT(req, state, strlen(state)));
+}
+
+SYSCTL_PROC(_machdep_mitigations_taa, OID_AUTO, state,
+    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, 0,
+    sysctl_taa_state_handler, "A",
+    "TAA Mitigation state");
 
 /*
  * Enable and restore kernel text write permissions.

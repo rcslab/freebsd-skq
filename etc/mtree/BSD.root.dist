@@ -18,6 +18,8 @@
             rockchip              tags=package=runtime
             ..
         ..
+        efi
+        ..
         firmware
         ..
         lua
@@ -51,6 +53,8 @@
         dma
         ..
         gss
+        ..
+        kyua
         ..
         mail
         ..

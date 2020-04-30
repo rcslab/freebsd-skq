@@ -278,14 +278,19 @@ cb_seek(void *arg, void *h, uint64_t offset, int whence)
 }
 
 static int
-cb_stat(void *arg, void *h, int *mode, int *uid, int *gid, uint64_t *size)
+cb_stat(void *arg, void *h, struct stat *sbp)
 {
 	struct cb_file *cf = h;
 
-	*mode = cf->cf_stat.st_mode;
-	*uid = cf->cf_stat.st_uid;
-	*gid = cf->cf_stat.st_gid;
-	*size = cf->cf_stat.st_size;
+	memset(sbp, 0, sizeof(struct stat));
+	sbp->st_mode = cf->cf_stat.st_mode;
+	sbp->st_uid = cf->cf_stat.st_uid;
+	sbp->st_gid = cf->cf_stat.st_gid;
+	sbp->st_size = cf->cf_stat.st_size;
+	sbp->st_mtime = cf->cf_stat.st_mtime;
+	sbp->st_dev = cf->cf_stat.st_dev;
+	sbp->st_ino = cf->cf_stat.st_ino;
+	
 	return (0);
 }
 
@@ -664,21 +669,19 @@ altcons_open(char *path)
 static int
 disk_open(char *path)
 {
-	int err, fd;
+	int fd;
 
 	if (ndisks >= NDISKS)
 		return (ERANGE);
 
-	err = 0;
 	fd = open(path, O_RDONLY);
+	if (fd < 0)
+		return (errno);
 
-	if (fd > 0) {
-		disk_fd[ndisks] = fd;
-		ndisks++;
-	} else 
-		err = errno;
+	disk_fd[ndisks] = fd;
+	ndisks++;
 
-	return (err);
+	return (0);
 }
 
 static void

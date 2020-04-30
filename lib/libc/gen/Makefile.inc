@@ -2,9 +2,11 @@
 # $FreeBSD$
 
 # machine-independent gen sources
-.PATH: ${LIBC_SRCTOP}/${LIBC_ARCH}/gen ${LIBC_SRCTOP}/gen
+.PATH: ${LIBC_SRCTOP}/${LIBC_ARCH}/gen ${LIBC_SRCTOP}/gen ${SRCTOP}/etc
 
-CONFS=	shells
+CONFS+=	group master.passwd shells
+CONFSMODE_master.passwd=	600
+CONFSPACKAGE=   runtime
 
 SRCS+=	__getosreldate.c \
 	__pthread_mutex_init_calloc_cb_stub.c \
@@ -193,6 +195,7 @@ SYM_MAPS+=${LIBC_SRCTOP}/gen/Symbol.map
 
 MAN+=	alarm.3 \
 	arc4random.3 \
+	auxv.3 \
 	basename.3 \
 	cap_rights_get.3 \
 	cap_sandboxed.3 \
@@ -321,7 +324,9 @@ MAN+=	alarm.3 \
 
 MLINKS+=arc4random.3 arc4random_buf.3 \
 	arc4random.3 arc4random_uniform.3
+MLINKS+=auxv.3 elf_aux_info.3
 MLINKS+=ctermid.3 ctermid_r.3
+MLINKS+=daemon.3 daemonfd.3
 MLINKS+=devname.3 devname_r.3
 MLINKS+=devname.3 fdevname.3
 MLINKS+=devname.3 fdevname_r.3
@@ -492,10 +497,13 @@ MLINKS+=setjmp.3 _longjmp.3 \
 MLINKS+=setmode.3 getmode.3
 MLINKS+=setproctitle.3 setproctitle_fast.3
 MLINKS+=sigsetops.3 sigaddset.3 \
+	sigsetops.3 sigandset.3 \
 	sigsetops.3 sigdelset.3 \
 	sigsetops.3 sigemptyset.3 \
 	sigsetops.3 sigfillset.3 \
-	sigsetops.3 sigismember.3
+	sigsetops.3 sigisemptyset.3 \
+	sigsetops.3 sigismember.3 \
+	sigsetops.3 sigorset.3
 MLINKS+=statvfs.3 fstatvfs.3
 MLINKS+=stringlist.3 sl_add.3 \
 	stringlist.3 sl_find.3 \
@@ -541,3 +549,18 @@ MLINKS+=vis.3 nvis.3 \
 	vis.3 svis.3
 
 MLINKS+=wordexp.3 wordfree.3
+
+.include <src.tools.mk>
+
+afterinstallconfig:
+.if ${MK_TCSH} == "no"
+	sed -i "" -e 's;/bin/csh;/bin/sh;' ${DESTDIR}/etc/master.passwd
+.endif
+	${PWD_MKDB_CMD} -i -p -d ${DESTDIR}/etc ${DESTDIR}/etc/master.passwd
+.if defined(NO_ROOT) && defined(METALOG)
+	( \
+		echo "./etc/pwd.db type=file mode=0644 uname=root gname=wheel"; \
+		echo "./etc/spwd.db type=file mode=0600 uname=root gname=wheel"; \
+		echo "./etc/passwd type=file mode=0644 uname=root gname=wheel"; \
+	) | cat -l >> ${METALOG}
+.endif

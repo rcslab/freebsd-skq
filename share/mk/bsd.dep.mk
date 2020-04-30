@@ -108,7 +108,7 @@ OBJS_DEPEND_GUESS.${_S:${OBJS_SRCS_FILTER:ts:}}.o+=	${_S}
 .for _LSRC in ${SRCS:M*.l:N*/*}
 .for _LC in ${_LSRC:R}.c
 ${_LC}: ${_LSRC}
-	${LEX} ${LFLAGS} -o${.TARGET} ${.ALLSRC}
+	${LEX} ${LFLAGS} ${LFLAGS.${_LSRC}} -o${.TARGET} ${.ALLSRC}
 OBJS_DEPEND_GUESS.${_LC:R}.o+=	${_LC}
 SRCS:=	${SRCS:S/${_LSRC}/${_LC}/}
 CLEANFILES+= ${_LC}
@@ -121,24 +121,34 @@ CLEANFILES+= ${_LC}
 SRCS:=	${SRCS:S/${_YSRC}/${_YC}/}
 CLEANFILES+= ${_YC}
 .if !empty(YFLAGS:M-d) && !empty(SRCS:My.tab.h)
-.ORDER: ${_YC} y.tab.h
-y.tab.h: .NOMETA
-${_YC} y.tab.h: ${_YSRC}
-	${YACC} ${YFLAGS} ${.ALLSRC}
+# Multi-output targets both expect a .meta file and will fight over it. Only
+# allow it on the .c file instead.
+y.tab.h: ${_YC} .NOMETA
+# Force rebuild the .c file if any of its other outputs are missing.
+.if !exists(y.tab.h)
+${_YC}: .PHONY .META
+.endif
+${_YC}: ${_YSRC}
+	${YACC} ${YFLAGS} ${YFLAGS.${_YSRC}} ${.ALLSRC}
 	cp y.tab.c ${_YC}
 CLEANFILES+= y.tab.c y.tab.h
 .elif !empty(YFLAGS:M-d)
 .for _YH in ${_YC:R}.h
-.ORDER: ${_YC} ${_YH}
-${_YH}: .NOMETA
-${_YC} ${_YH}: ${_YSRC}
-	${YACC} ${YFLAGS} -o ${_YC} ${.ALLSRC}
+# Multi-output targets both expect a .meta file and will fight over it. Only
+# allow it on the .c file instead.
+${_YH}: ${_YC} .NOMETA
+# Force rebuild the .c file if any of its other outputs are missing.
+.if !exists(${_YH})
+${_YC}: .PHONY .META
+.endif
+${_YC}: ${_YSRC}
+	${YACC} ${YFLAGS} ${YFLAGS.${_YSRC}} -o ${_YC} ${.ALLSRC}
 SRCS+=	${_YH}
 CLEANFILES+= ${_YH}
 .endfor
 .else
 ${_YC}: ${_YSRC}
-	${YACC} ${YFLAGS} -o ${_YC} ${.ALLSRC}
+	${YACC} ${YFLAGS} ${YFLAGS.${_YSRC}} -o ${_YC} ${.ALLSRC}
 .endif
 OBJS_DEPEND_GUESS.${_YC:R}.o+=	${_YC}
 .endfor
@@ -173,7 +183,7 @@ ${_D}.nossppico: ${_DSRC} ${SOBJS:S/^${_D}.nossppico$//}
 .endif
 .endfor
 .endfor
-
+.endif	# defined(SRCS)
 
 .if ${MAKE_VERSION} < 20160220
 DEPEND_MP?=	-MP
@@ -181,12 +191,18 @@ DEPEND_MP?=	-MP
 # Handle OBJS=../somefile.o hacks.  Just replace '/' rather than use :T to
 # avoid collisions.
 DEPEND_FILTER=	C,/,_,g
+.if !empty(OBJS)
+DEPENDOBJS+=	${OBJS}
+.else
 DEPENDSRCS+=	${SRCS:M*.[cSC]} ${SRCS:M*.cxx} ${SRCS:M*.cpp} ${SRCS:M*.cc}
-DEPENDSRCS+=	${DPSRCS:M*.[cSC]} ${SRCS:M*.cxx} ${SRCS:M*.cpp} ${SRCS:M*.cc}
+DEPENDSRCS+=	${DPSRCS:M*.[cSC]} ${DPSRCS:M*.cxx} ${DPSRCS:M*.cpp} ${DPSRCS:M*.cc}
 .if !empty(DEPENDSRCS)
 DEPENDOBJS+=	${DEPENDSRCS:${OBJS_SRCS_FILTER:ts:}:S,$,.o,}
 .endif
+.endif	# !empty(OBJS)
+.if !empty(DEPENDOBJS)
 DEPENDFILES+=	${DEPENDOBJS:O:u:${DEPEND_FILTER}:C/^/${DEPENDFILE}./}
+.endif
 .if defined(_SKIP_DEPEND)
 # Don't bother statting any .meta files for .depend*
 ${DEPENDOBJS}:	.NOMETA
@@ -213,7 +229,6 @@ CFLAGS+=	${${DEPEND_CFLAGS_CONDITION}:?${DEPEND_CFLAGS}:}
 .endif
 .endfor
 .endif	# !defined(_meta_filemon)
-.endif	# defined(SRCS)
 
 .if ${MK_DIRDEPS_BUILD} == "yes" && ${.MAKE.DEPENDFILE} != "/dev/null"
 # Prevent meta.autodep.mk from tracking "local dependencies".
@@ -251,18 +266,19 @@ _depfile=	${.OBJDIR}/${_meta_obj}
 .else
 _depfile=	${.OBJDIR}/${_dep_obj}
 .endif
-.if !exists(${_depfile})
+.if !exists(${_depfile}) || defined(_meta_filemon)
+# - Headers are normally built in beforebuild when included in DPSRCS or SRCS.
+#   So we don't need it as a guessed dependency (it may lead to cyclic problems
+#   if custom rules are defined).  The only time this causes a problem is when
+#   'make foo.o' is ran.
+# - For meta mode we still need to know which file to depend on to avoid
+#   ambiguous suffix transformation rules from .PATH.  Meta mode does not
+#   use .depend files when filemon is in use.
+.if !target(${__obj})
 ${__obj}: ${OBJS_DEPEND_GUESS}
+.endif
 ${__obj}: ${OBJS_DEPEND_GUESS.${__obj}}
-.elif defined(_meta_filemon)
-# For meta mode we still need to know which file to depend on to avoid
-# ambiguous suffix transformation rules from .PATH.  Meta mode does not
-# use .depend files.  We really only need source files, not headers since
-# they are typically in SRCS/beforebuild already.  For target-specific
-# guesses do include headers though since they may not be in SRCS.
-${__obj}: ${OBJS_DEPEND_GUESS:N*.h}
-${__obj}: ${OBJS_DEPEND_GUESS.${__obj}}
-.endif	# !exists(${_depfile})
+.endif	# !exists(${_depfile}) || defined(_meta_filemon)
 .endfor
 
 # Always run 'make depend' to generate dependencies early and to avoid the

@@ -409,7 +409,6 @@ minidumpsys(struct dumperinfo *di)
 	}
 
 	/* Dump memory chunks */
-	/* XXX cluster it up and use blk_dump() */
 	for (i = 0; i < vm_page_dump_size / sizeof(*vm_page_dump); i++) {
 		bits = vm_page_dump[i];
 		while (bits) {
@@ -448,9 +447,10 @@ minidumpsys(struct dumperinfo *di)
 	}
 	else if (error == ECANCELED)
 		printf("Dump aborted\n");
-	else if (error == E2BIG)
-		printf("Dump failed. Partition too small.\n");
-	else
+	else if (error == E2BIG) {
+		printf("Dump failed. Partition too small (about %lluMB were "
+		    "needed this time).\n", (long long)dumpsize >> 20);
+	} else
 		printf("** DUMP FAILED (ERROR %d) **\n", error);
 	return (error);
 }

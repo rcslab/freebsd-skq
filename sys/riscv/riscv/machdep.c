@@ -44,14 +44,17 @@ __FBSDID("$FreeBSD$");
 #include <sys/bus.h>
 #include <sys/cons.h>
 #include <sys/cpu.h>
+#include <sys/devmap.h>
 #include <sys/exec.h>
 #include <sys/imgact.h>
 #include <sys/kdb.h>
 #include <sys/kernel.h>
+#include <sys/ktr.h>
 #include <sys/limits.h>
 #include <sys/linker.h>
 #include <sys/msgbuf.h>
 #include <sys/pcpu.h>
+#include <sys/physmem.h>
 #include <sys/proc.h>
 #include <sys/ptrace.h>
 #include <sys/reboot.h>
@@ -61,54 +64,56 @@ __FBSDID("$FreeBSD$");
 #include <sys/syscallsubr.h>
 #include <sys/sysent.h>
 #include <sys/sysproto.h>
+#include <sys/tslog.h>
 #include <sys/ucontext.h>
+#include <sys/vmmeter.h>
 
 #include <vm/vm.h>
+#include <vm/vm_param.h>
 #include <vm/vm_kern.h>
 #include <vm/vm_object.h>
 #include <vm/vm_page.h>
+#include <vm/vm_phys.h>
 #include <vm/pmap.h>
 #include <vm/vm_map.h>
 #include <vm/vm_pager.h>
 
-#include <machine/riscvreg.h>
 #include <machine/cpu.h>
+#include <machine/intr.h>
 #include <machine/kdb.h>
 #include <machine/machdep.h>
+#include <machine/metadata.h>
 #include <machine/pcb.h>
+#include <machine/pte.h>
 #include <machine/reg.h>
+#include <machine/riscvreg.h>
+#include <machine/sbi.h>
 #include <machine/trap.h>
 #include <machine/vmparam.h>
-#include <machine/intr.h>
-#include <machine/sbi.h>
-
-#include <machine/asm.h>
 
 #ifdef FPE
 #include <machine/fpe.h>
 #endif
 
 #ifdef FDT
+#include <contrib/libfdt/libfdt.h>
 #include <dev/fdt/fdt_common.h>
 #include <dev/ofw/openfirm.h>
 #endif
+
+static void get_fpcontext(struct thread *td, mcontext_t *mcp);
+static void set_fpcontext(struct thread *td, mcontext_t *mcp);
 
 struct pcpu __pcpu[MAXCPU];
 
 static struct trapframe proc0_tf;
 
-vm_paddr_t phys_avail[PHYS_AVAIL_SIZE + 2];
-vm_paddr_t dump_avail[PHYS_AVAIL_SIZE + 2];
-
 int early_boot = 1;
 int cold = 1;
-long realmem = 0;
-long Maxmem = 0;
 
 #define	DTB_SIZE_MAX	(1024 * 1024)
 
-#define	PHYSMAP_SIZE	(2 * (VM_PHYSSEG_MAX - 1))
-vm_paddr_t physmap[PHYSMAP_SIZE];
+vm_paddr_t physmap[PHYS_AVAIL_ENTRIES];
 u_int physmap_idx;
 
 struct kva_md_info kmi;
@@ -117,27 +122,48 @@ int64_t dcache_line_size;	/* The minimum D cache line size */
 int64_t icache_line_size;	/* The minimum I cache line size */
 int64_t idcache_line_size;	/* The minimum cache line size */
 
+uint32_t boot_hart;	/* The hart we booted on. */
+cpuset_t all_harts;
+
 extern int *end;
-extern int *initstack_end;
-
-struct pcpu *pcpup;
-
-uintptr_t mcall_trap(uintptr_t mcause, uintptr_t* regs);
-
-uintptr_t
-mcall_trap(uintptr_t mcause, uintptr_t* regs)
-{
-
-	return (0);
-}
 
 static void
 cpu_startup(void *dummy)
 {
 
+	sbi_print_version();
 	identify_cpu();
 
+	printf("real memory  = %ju (%ju MB)\n", ptoa((uintmax_t)realmem),
+	    ptoa((uintmax_t)realmem) / (1024 * 1024));
+
+	/*
+	 * Display any holes after the first chunk of extended memory.
+	 */
+	if (bootverbose) {
+		int indx;
+
+		printf("Physical memory chunk(s):\n");
+		for (indx = 0; phys_avail[indx + 1] != 0; indx += 2) {
+			vm_paddr_t size;
+
+			size = phys_avail[indx + 1] - phys_avail[indx];
+			printf(
+			    "0x%016jx - 0x%016jx, %ju bytes (%ju pages)\n",
+			    (uintmax_t)phys_avail[indx],
+			    (uintmax_t)phys_avail[indx + 1] - 1,
+			    (uintmax_t)size, (uintmax_t)size / PAGE_SIZE);
+		}
+	}
+
 	vm_ksubmap_init(&kmi);
+
+	printf("avail memory = %ju (%ju MB)\n",
+	    ptoa((uintmax_t)vm_free_count()),
+	    ptoa((uintmax_t)vm_free_count()) / (1024 * 1024));
+	if (bootverbose)
+		devmap_print_table();
+
 	bufinit();
 	vm_pager_bufferinit();
 }
@@ -274,7 +300,7 @@ ptrace_clear_single_step(struct thread *td)
 }
 
 void
-exec_setregs(struct thread *td, struct image_params *imgp, u_long stack)
+exec_setregs(struct thread *td, struct image_params *imgp, uintptr_t stack)
 {
 	struct trapframe *tf;
 	struct pcb *pcb;
@@ -329,6 +355,7 @@ get_mcontext(struct thread *td, mcontext_t *mcp, int clear_ret)
 	mcp->mc_gpregs.gp_tp = tf->tf_tp;
 	mcp->mc_gpregs.gp_sepc = tf->tf_sepc;
 	mcp->mc_gpregs.gp_sstatus = tf->tf_sstatus;
+	get_fpcontext(td, mcp);
 
 	return (0);
 }
@@ -340,6 +367,19 @@ set_mcontext(struct thread *td, mcontext_t *mcp)
 
 	tf = td->td_frame;
 
+	/*
+	 * Permit changes to the USTATUS bits of SSTATUS.
+	 *
+	 * Ignore writes to read-only bits (SD, XS).
+	 *
+	 * Ignore writes to the FS field as set_fpcontext() will set
+	 * it explicitly.
+	 */
+	if (((mcp->mc_gpregs.gp_sstatus ^ tf->tf_sstatus) &
+	    ~(SSTATUS_SD | SSTATUS_XS_MASK | SSTATUS_FS_MASK | SSTATUS_UPIE |
+	    SSTATUS_UIE)) != 0)
+		return (EINVAL);
+
 	memcpy(tf->tf_t, mcp->mc_gpregs.gp_t, sizeof(tf->tf_t));
 	memcpy(tf->tf_s, mcp->mc_gpregs.gp_s, sizeof(tf->tf_s));
 	memcpy(tf->tf_a, mcp->mc_gpregs.gp_a, sizeof(tf->tf_a));
@@ -349,6 +389,7 @@ set_mcontext(struct thread *td, mcontext_t *mcp)
 	tf->tf_gp = mcp->mc_gpregs.gp_gp;
 	tf->tf_sepc = mcp->mc_gpregs.gp_sepc;
 	tf->tf_sstatus = mcp->mc_gpregs.gp_sstatus;
+	set_fpcontext(td, mcp);
 
 	return (0);
 }
@@ -390,7 +431,12 @@ set_fpcontext(struct thread *td, mcontext_t *mcp)
 {
 #ifdef FPE
 	struct pcb *curpcb;
+#endif
 
+	td->td_frame->tf_sstatus &= ~SSTATUS_FS_MASK;
+	td->td_frame->tf_sstatus |= SSTATUS_FS_OFF;
+
+#ifdef FPE
 	critical_enter();
 
 	if ((mcp->mc_flags & _MC_FP_VALID) != 0) {
@@ -400,6 +446,7 @@ set_fpcontext(struct thread *td, mcontext_t *mcp)
 		    sizeof(mcp->mc_fpregs));
 		curpcb->pcb_fcsr = mcp->mc_fpregs.fp_fcsr;
 		curpcb->pcb_fpflags = mcp->mc_fpregs.fp_flags & PCB_FP_USERMASK;
+		td->td_frame->tf_sstatus |= SSTATUS_FS_CLEAN;
 	}
 
 	critical_exit();
@@ -459,14 +506,16 @@ void
 spinlock_enter(void)
 {
 	struct thread *td;
+	register_t reg;
 
 	td = curthread;
 	if (td->td_md.md_spinlock_count == 0) {
+		reg = intr_disable();
 		td->td_md.md_spinlock_count = 1;
-		td->td_md.md_saved_sstatus_ie = intr_disable();
+		td->td_md.md_saved_sstatus_ie = reg;
+		critical_enter();
 	} else
 		td->td_md.md_spinlock_count++;
-	critical_enter();
 }
 
 void
@@ -476,11 +525,12 @@ spinlock_exit(void)
 	register_t sstatus_ie;
 
 	td = curthread;
-	critical_exit();
 	sstatus_ie = td->td_md.md_saved_sstatus_ie;
 	td->td_md.md_spinlock_count--;
-	if (td->td_md.md_spinlock_count == 0)
+	if (td->td_md.md_spinlock_count == 0) {
+		critical_exit();
 		intr_restore(sstatus_ie);
+	}
 }
 
 #ifndef	_SYS_SYSPROTO_H_
@@ -492,29 +542,15 @@ struct sigreturn_args {
 int
 sys_sigreturn(struct thread *td, struct sigreturn_args *uap)
 {
-	uint64_t sstatus;
 	ucontext_t uc;
 	int error;
 
-	if (uap == NULL)
-		return (EFAULT);
 	if (copyin(uap->sigcntxp, &uc, sizeof(uc)))
 		return (EFAULT);
-
-	/*
-	 * Make sure the processor mode has not been tampered with and
-	 * interrupts have not been disabled.
-	 * Supervisor interrupts in user mode are always enabled.
-	 */
-	sstatus = uc.uc_mcontext.mc_gpregs.gp_sstatus;
-	if ((sstatus & SSTATUS_SPP) != 0)
-		return (EINVAL);
 
 	error = set_mcontext(td, &uc.uc_mcontext);
 	if (error != 0)
 		return (error);
-
-	set_fpcontext(td, &uc.uc_mcontext);
 
 	/* Restore signal mask. */
 	kern_sigprocmask(td, SIG_SETMASK, &uc.uc_sigmask, NULL, 0);
@@ -533,15 +569,12 @@ void
 makectx(struct trapframe *tf, struct pcb *pcb)
 {
 
-	memcpy(pcb->pcb_t, tf->tf_t, sizeof(tf->tf_t));
 	memcpy(pcb->pcb_s, tf->tf_s, sizeof(tf->tf_s));
-	memcpy(pcb->pcb_a, tf->tf_a, sizeof(tf->tf_a));
 
-	pcb->pcb_ra = tf->tf_ra;
+	pcb->pcb_ra = tf->tf_sepc;
 	pcb->pcb_sp = tf->tf_sp;
 	pcb->pcb_gp = tf->tf_gp;
 	pcb->pcb_tp = tf->tf_tp;
-	pcb->pcb_sepc = tf->tf_sepc;
 }
 
 void
@@ -586,7 +619,6 @@ sendsig(sig_t catcher, ksiginfo_t *ksi, sigset_t *mask)
 	/* Fill in the frame to copy out */
 	bzero(&frame, sizeof(frame));
 	get_mcontext(td, &frame.sf_uc.uc_mcontext, 0);
-	get_fpcontext(td, &frame.sf_uc.uc_mcontext);
 	frame.sf_si = ksi->ksi_info;
 	frame.sf_uc.uc_sigmask = *mask;
 	frame.sf_uc.uc_stack = td->td_sigstk;
@@ -627,92 +659,35 @@ sendsig(sig_t catcher, ksiginfo_t *ksi, sigset_t *mask)
 static void
 init_proc0(vm_offset_t kstack)
 {
+	struct pcpu *pcpup;
 
 	pcpup = &__pcpu[0];
 
 	proc_linkup0(&proc0, &thread0);
 	thread0.td_kstack = kstack;
-	thread0.td_pcb = (struct pcb *)(thread0.td_kstack) - 1;
+	thread0.td_kstack_pages = KSTACK_PAGES;
+	thread0.td_pcb = (struct pcb *)(thread0.td_kstack +
+	    thread0.td_kstack_pages * PAGE_SIZE) - 1;
 	thread0.td_pcb->pcb_fpflags = 0;
 	thread0.td_frame = &proc0_tf;
 	pcpup->pc_curpcb = thread0.td_pcb;
 }
 
-static int
-add_physmap_entry(uint64_t base, uint64_t length, vm_paddr_t *physmap,
-    u_int *physmap_idxp)
-{
-	u_int i, insert_idx, _physmap_idx;
-
-	_physmap_idx = *physmap_idxp;
-
-	if (length == 0)
-		return (1);
-
-	/*
-	 * Find insertion point while checking for overlap.  Start off by
-	 * assuming the new entry will be added to the end.
-	 */
-	insert_idx = _physmap_idx;
-	for (i = 0; i <= _physmap_idx; i += 2) {
-		if (base < physmap[i + 1]) {
-			if (base + length <= physmap[i]) {
-				insert_idx = i;
-				break;
-			}
-			if (boothowto & RB_VERBOSE)
-				printf(
-		    "Overlapping memory regions, ignoring second region\n");
-			return (1);
-		}
-	}
-
-	/* See if we can prepend to the next entry. */
-	if (insert_idx <= _physmap_idx &&
-	    base + length == physmap[insert_idx]) {
-		physmap[insert_idx] = base;
-		return (1);
-	}
-
-	/* See if we can append to the previous entry. */
-	if (insert_idx > 0 && base == physmap[insert_idx - 1]) {
-		physmap[insert_idx - 1] += length;
-		return (1);
-	}
-
-	_physmap_idx += 2;
-	*physmap_idxp = _physmap_idx;
-	if (_physmap_idx == PHYSMAP_SIZE) {
-		printf(
-		"Too many segments in the physical address map, giving up\n");
-		return (0);
-	}
-
-	/*
-	 * Move the last 'N' entries down to make room for the new
-	 * entry if needed.
-	 */
-	for (i = _physmap_idx; i > insert_idx; i -= 2) {
-		physmap[i] = physmap[i - 2];
-		physmap[i + 1] = physmap[i - 1];
-	}
-
-	/* Insert the new entry. */
-	physmap[insert_idx] = base;
-	physmap[insert_idx + 1] = base + length;
-
-	printf("physmap[%d] = 0x%016lx\n", insert_idx, base);
-	printf("physmap[%d] = 0x%016lx\n", insert_idx + 1, base + length);
-	return (1);
-}
-
 #ifdef FDT
 static void
-try_load_dtb(caddr_t kmdp, vm_offset_t dtbp)
+try_load_dtb(caddr_t kmdp)
 {
+	vm_offset_t dtbp;
+
+	dtbp = MD_FETCH(kmdp, MODINFOMD_DTBP, vm_offset_t);
 
 #if defined(FDT_DTB_STATIC)
-	dtbp = (vm_offset_t)&fdt_static_dtb;
+	/*
+	 * In case the device tree blob was not retrieved (from metadata) try
+	 * to use the statically embedded one.
+	 */
+	if (dtbp == (vm_offset_t)NULL)
+		dtbp = (vm_offset_t)&fdt_static_dtb;
 #endif
 
 	if (dtbp == (vm_offset_t)NULL) {
@@ -733,6 +708,10 @@ cache_setup(void)
 {
 
 	/* TODO */
+
+	dcache_line_size = 0;
+	icache_line_size = 0;
+	idcache_line_size = 0;
 }
 
 /*
@@ -740,13 +719,14 @@ cache_setup(void)
  * RISCVTODO: This needs to be done via loader (when it's available).
  */
 vm_offset_t
-fake_preload_metadata(struct riscv_bootparams *rvbp __unused)
+fake_preload_metadata(struct riscv_bootparams *rvbp)
 {
 	static uint32_t fake_preload[35];
 #ifdef DDB
 	vm_offset_t zstart = 0, zend = 0;
 #endif
 	vm_offset_t lastaddr;
+	size_t dtb_size;
 	int i;
 
 	i = 0;
@@ -787,9 +767,22 @@ fake_preload_metadata(struct riscv_bootparams *rvbp __unused)
 #endif
 #endif
 		lastaddr = (vm_offset_t)&end;
+
+	/* Copy the DTB to KVA space. */
+	lastaddr = roundup(lastaddr, sizeof(int));
+	fake_preload[i++] = MODINFO_METADATA | MODINFOMD_DTBP;
+	fake_preload[i++] = sizeof(vm_offset_t);
+	*(vm_offset_t *)&fake_preload[i] = (vm_offset_t)lastaddr;
+	i += sizeof(vm_offset_t) / sizeof(uint32_t);
+	dtb_size = fdt_totalsize(rvbp->dtbp_virt);
+	memmove((void *)lastaddr, (const void *)rvbp->dtbp_virt, dtb_size);
+	lastaddr = roundup(lastaddr + dtb_size, sizeof(int));
+
 	fake_preload[i++] = 0;
 	fake_preload[i] = 0;
 	preload_metadata = (void *)fake_preload;
+
+	KASSERT(i < nitems(fake_preload), ("Too many fake_preload items"));
 
 	return (lastaddr);
 }
@@ -798,13 +791,26 @@ void
 initriscv(struct riscv_bootparams *rvbp)
 {
 	struct mem_region mem_regions[FDT_MEM_REGIONS];
-	vm_offset_t rstart, rend;
-	vm_offset_t s, e;
+	struct pcpu *pcpup;
 	int mem_regions_sz;
 	vm_offset_t lastaddr;
 	vm_size_t kernlen;
 	caddr_t kmdp;
-	int i;
+
+	TSRAW(&thread0, TS_ENTER, __func__, NULL);
+
+	/* Set the pcpu data, this is needed by pmap_bootstrap */
+	pcpup = &__pcpu[0];
+	pcpu_init(pcpup, 0, sizeof(struct pcpu));
+	pcpup->pc_hart = boot_hart;
+
+	/* Set the pcpu pointer */
+	__asm __volatile("mv tp, %0" :: "r"(pcpup));
+
+	PCPU_SET(curthread, &thread0);
+
+	/* Initialize SBI interface. */
+	sbi_init();
 
 	/* Set the module data location */
 	lastaddr = fake_preload_metadata(rvbp);
@@ -820,43 +826,23 @@ initriscv(struct riscv_bootparams *rvbp)
 	kern_envp = NULL;
 
 #ifdef FDT
-	try_load_dtb(kmdp, rvbp->dtbp_virt);
-#endif
+	try_load_dtb(kmdp);
 
-	/* Load the physical memory ranges */
-	physmap_idx = 0;
-
-#ifdef FDT
-	/* Grab physical memory regions information from device tree. */
-	if (fdt_get_mem_regions(mem_regions, &mem_regions_sz, NULL) != 0)
-		panic("Cannot get physical memory regions");
-
-	s = rvbp->dtbp_phys;
-	e = s + DTB_SIZE_MAX;
-
-	for (i = 0; i < mem_regions_sz; i++) {
-		rstart = mem_regions[i].mr_start;
-		rend = (mem_regions[i].mr_start + mem_regions[i].mr_size);
-
-		if ((rstart < s) && (rend > e)) {
-			/* Exclude DTB region. */
-			add_physmap_entry(rstart, (s - rstart), physmap, &physmap_idx);
-			add_physmap_entry(e, (rend - e), physmap, &physmap_idx);
-		} else {
-			add_physmap_entry(mem_regions[i].mr_start,
-			    mem_regions[i].mr_size, physmap, &physmap_idx);
-		}
+	/*
+	 * Exclude reserved memory specified by the device tree. Typically,
+	 * this contains an entry for memory used by the runtime SBI firmware.
+	 */
+	if (fdt_get_reserved_mem(mem_regions, &mem_regions_sz) == 0) {
+		physmem_exclude_regions(mem_regions, mem_regions_sz,
+		    EXFLAG_NODUMP | EXFLAG_NOALLOC);
 	}
+
+	/* Grab physical memory regions information from device tree. */
+	if (fdt_get_mem_regions(mem_regions, &mem_regions_sz, NULL) != 0) {
+		panic("Cannot get physical memory regions");
+	}
+	physmem_hardware_regions(mem_regions, mem_regions_sz);
 #endif
-
-	/* Set the pcpu data, this is needed by pmap_bootstrap */
-	pcpup = &__pcpu[0];
-	pcpu_init(pcpup, 0, sizeof(struct pcpu));
-
-	/* Set the pcpu pointer */
-	__asm __volatile("mv gp, %0" :: "r"(pcpup));
-
-	PCPU_SET(curthread, &thread0);
 
 	/* Do basic tuning, hz etc */
 	init_param1();
@@ -865,7 +851,27 @@ initriscv(struct riscv_bootparams *rvbp)
 
 	/* Bootstrap enough of pmap to enter the kernel proper */
 	kernlen = (lastaddr - KERNBASE);
-	pmap_bootstrap(rvbp->kern_l1pt, mem_regions[0].mr_start, kernlen);
+	pmap_bootstrap(rvbp->kern_l1pt, rvbp->kern_phys, kernlen);
+
+#ifdef FDT
+	/*
+	 * XXX: Exclude the lowest 2MB of physical memory, if it hasn't been
+	 * already, as this area is assumed to contain the SBI firmware. This
+	 * is a little fragile, but it is consistent with the platforms we
+	 * support so far.
+	 *
+	 * TODO: remove this when the all regular booting methods properly
+	 * report their reserved memory in the device tree.
+	 */
+	if (mem_regions[0].mr_start == physmap[0]) {
+		physmem_exclude_region(mem_regions[0].mr_start, L2_SIZE,
+		    EXFLAG_NODUMP | EXFLAG_NOALLOC);
+	}
+#endif
+	physmem_init_kernel_globals();
+
+	/* Establish static device mappings */
+	devmap_bootstrap(0, NULL);
 
 	cninit();
 
@@ -876,7 +882,12 @@ initriscv(struct riscv_bootparams *rvbp)
 	init_param2(physmem);
 	kdb_init();
 
+	if (boothowto & RB_VERBOSE)
+		physmem_print_tables();
+
 	early_boot = 0;
+
+	TSEXIT();
 }
 
 #undef bzero

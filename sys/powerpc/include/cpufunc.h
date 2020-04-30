@@ -212,6 +212,57 @@ get_pcpu(void)
 	return (ret);
 }
 
+#define	HAVE_INLINE_FLS
+static __inline __pure2 int
+fls(int mask)
+{
+	return (mask ? 32 - __builtin_clz(mask) : 0);
+}
+
+#define HAVE_INLINE_FLSL
+static __inline __pure2 int
+flsl(long mask)
+{
+	return (mask ? (8 * sizeof(long) - __builtin_clzl(mask)) : 0);
+}
+
+/* "NOP" operations to signify priorities to the kernel. */
+static __inline void
+nop_prio_vlow(void)
+{
+	__asm __volatile("or 31,31,31");
+}
+
+static __inline void
+nop_prio_low(void)
+{
+	__asm __volatile("or 1,1,1");
+}
+
+static __inline void
+nop_prio_mlow(void)
+{
+	__asm __volatile("or 6,6,6");
+}
+
+static __inline void
+nop_prio_medium(void)
+{
+	__asm __volatile("or 2,2,2");
+}
+
+static __inline void
+nop_prio_mhigh(void)
+{
+	__asm __volatile("or 5,5,5");
+}
+
+static __inline void
+nop_prio_high(void)
+{
+	__asm __volatile("or 3,3,3");
+}
+
 #endif /* _KERNEL */
 
 #endif /* !_MACHINE_CPUFUNC_H_ */

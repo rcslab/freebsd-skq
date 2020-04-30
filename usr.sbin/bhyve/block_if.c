@@ -3,6 +3,7 @@
  *
  * Copyright (c) 2013  Peter Grehan <grehan@freebsd.org>
  * All rights reserved.
+ * Copyright 2020 Joyent, Inc.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -59,13 +60,14 @@ __FBSDID("$FreeBSD$");
 #include <machine/atomic.h>
 
 #include "bhyverun.h"
+#include "debug.h"
 #include "mevent.h"
 #include "block_if.h"
 
 #define BLOCKIF_SIG	0xb109b109
 
 #define BLOCKIF_NUMTHR	8
-#define BLOCKIF_MAXREQ	(64 + BLOCKIF_NUMTHR)
+#define BLOCKIF_MAXREQ	(BLOCKIF_RING_MAX + BLOCKIF_NUMTHR)
 
 enum blockop {
 	BOP_READ,
@@ -409,6 +411,8 @@ blockif_open(const char *optstr, const char *ident)
 	off_t size, psectsz, psectoff;
 	int extra, fd, i, sectsz;
 	int nocache, sync, ro, candelete, geom, ssopt, pssopt;
+	int nodelete;
+
 #ifndef WITHOUT_CAPSICUM
 	cap_rights_t rights;
 	cap_ioctl_t cmds[] = { DIOCGFLUSH, DIOCGDELETE };
@@ -421,6 +425,7 @@ blockif_open(const char *optstr, const char *ident)
 	nocache = 0;
 	sync = 0;
 	ro = 0;
+	nodelete = 0;
 
 	/*
 	 * The first element in the optstring is always a pathname.
@@ -433,6 +438,8 @@ blockif_open(const char *optstr, const char *ident)
 			continue;
 		else if (!strcmp(cp, "nocache"))
 			nocache = 1;
+		else if (!strcmp(cp, "nodelete"))
+			nodelete = 1;
 		else if (!strcmp(cp, "sync") || !strcmp(cp, "direct"))
 			sync = 1;
 		else if (!strcmp(cp, "ro"))
@@ -442,7 +449,7 @@ blockif_open(const char *optstr, const char *ident)
 		else if (sscanf(cp, "sectorsize=%d", &ssopt) == 1)
 			pssopt = ssopt;
 		else {
-			fprintf(stderr, "Invalid device option \"%s\"\n", cp);
+			EPRINTLN("Invalid device option \"%s\"", cp);
 			goto err;
 		}
 	}
@@ -499,7 +506,7 @@ blockif_open(const char *optstr, const char *ident)
 			ioctl(fd, DIOCGSTRIPEOFFSET, &psectoff);
 		strlcpy(arg.name, "GEOM::candelete", sizeof(arg.name));
 		arg.len = sizeof(arg.value.i);
-		if (ioctl(fd, DIOCGATTR, &arg) == 0)
+		if (nodelete == 0 && ioctl(fd, DIOCGATTR, &arg) == 0)
 			candelete = arg.value.i;
 		if (ioctl(fd, DIOCGPROVIDERNAME, name) == 0)
 			geom = 1;
@@ -514,7 +521,7 @@ blockif_open(const char *optstr, const char *ident)
 	if (ssopt != 0) {
 		if (!powerof2(ssopt) || !powerof2(pssopt) || ssopt < 512 ||
 		    ssopt > pssopt) {
-			fprintf(stderr, "Invalid sector size %d/%d\n",
+			EPRINTLN("Invalid sector size %d/%d",
 			    ssopt, pssopt);
 			goto err;
 		}
@@ -528,8 +535,8 @@ blockif_open(const char *optstr, const char *ident)
 		 */
 		if (S_ISCHR(sbuf.st_mode)) {
 			if (ssopt < sectsz || (ssopt % sectsz) != 0) {
-				fprintf(stderr, "Sector size %d incompatible "
-				    "with underlying device sector size %d\n",
+				EPRINTLN("Sector size %d incompatible "
+				    "with underlying device sector size %d",
 				    ssopt, sectsz);
 				goto err;
 			}

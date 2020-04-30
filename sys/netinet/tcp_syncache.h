@@ -45,10 +45,10 @@ int	 syncache_expand(struct in_conninfo *, struct tcpopt *,
 	     struct tcphdr *, struct socket **, struct mbuf *);
 int	 syncache_add(struct in_conninfo *, struct tcpopt *,
 	     struct tcphdr *, struct inpcb *, struct socket **, struct mbuf *,
-	     void *, void *);
+	     void *, void *, uint8_t);
 void	 syncache_chkrst(struct in_conninfo *, struct tcphdr *, struct mbuf *);
 void	 syncache_badack(struct in_conninfo *);
-int	 syncache_pcblist(struct sysctl_req *req, int max_pcbs, int *pcbs_exported);
+int	 syncache_pcblist(struct sysctl_req *);
 
 struct syncache {
 	TAILQ_ENTRY(syncache)	sc_hash;
@@ -90,6 +90,10 @@ struct syncache {
 #define SCF_SIGNATURE	0x20			/* send MD5 digests */
 #define SCF_SACK	0x80			/* send SACK option */
 #define SCF_ECN		0x100			/* send ECN setup packet */
+#define SCF_ACE_N	0x200			/* send ACE non-ECT setup */
+#define SCF_ACE_0	0x400			/* send ACE ECT0 setup */
+#define SCF_ACE_1	0x800			/* send ACE ECT1 setup */
+#define SCF_ACE_CE	0x1000			/* send ACE CE setup */
 
 struct syncache_head {
 	struct mtx	sch_mtx;
@@ -111,6 +115,9 @@ struct syncookie_secret {
 	u_int lifetime;
 };
 
+#define	TCP_SYNCACHE_PAUSE_TIME		SYNCOOKIE_LIFETIME
+#define	TCP_SYNCACHE_MAX_BACKOFF	6	/* 16 minutes */
+
 struct tcp_syncache {
 	struct	syncache_head *hashbase;
 	uma_zone_t zone;
@@ -122,6 +129,11 @@ struct tcp_syncache {
 	uint32_t hash_secret;
 	struct vnet *vnet;
 	struct syncookie_secret secret;
+	struct mtx pause_mtx;
+	struct callout pause_co;
+	time_t	pause_until;
+	uint8_t pause_backoff;
+	volatile bool paused;
 };
 
 /* Internal use for the syncookie functions. */

@@ -626,7 +626,8 @@ _warc_rdver(const char *buf, size_t bsz)
 		if (ver >= 1200U) {
 			if (memcmp(c, "\r\n", 2U) != 0)
 				ver = 0U;
-		} else if (ver < 1200U) {
+		} else {
+			/* ver < 1200U */
 			if (*c != ' ' && *c != '\t')
 				ver = 0U;
 		}
@@ -744,8 +745,9 @@ _warc_rdlen(const char *buf, size_t bsz)
 	/* there must be at least one digit */
 	if (!isdigit((unsigned char)*val))
 		return -1;
+	errno = 0;
 	len = strtol(val, &on, 10);
-	if (on != eol) {
+	if (errno != 0 || on != eol) {
 		/* line must end here */
 		return -1;
 	}

@@ -28,7 +28,7 @@
 .\"     @(#)open.2	8.2 (Berkeley) 11/16/93
 .\" $FreeBSD$
 .\"
-.Dd November 11, 2018
+.Dd March 30, 2020
 .Dt OPEN 2
 .Os
 .Sh NAME
@@ -166,6 +166,7 @@ O_RDONLY	open for reading only
 O_WRONLY	open for writing only
 O_RDWR		open for reading and writing
 O_EXEC		open for execute only
+O_SEARCH	open for search only, an alias for O_EXEC
 O_NONBLOCK	do not block on open
 O_APPEND	append on each write
 O_CREAT		create file if it does not exist
@@ -224,10 +225,7 @@ The descriptor remains in non-blocking mode for subsequent operations.
 If
 .Dv O_FSYNC
 is used in the mask, all writes will
-immediately be written to disk,
-the kernel will not cache written data
-and all writes on the descriptor will not return until
-the data to be written completes.
+immediately and synchronously be written to disk.
 .Pp
 .Dv O_SYNC
 is a synonym for
@@ -329,6 +327,19 @@ If the specified path is absolute,
 allows arbitrary prefix that ends up at the topping directory,
 after which all further resolved components must be under it.
 .Pp
+When
+.Fa fd
+is opened with
+.Dv O_SEARCH ,
+execute permissions are checked at open time.
+The
+.Fa fd
+may not be used for any read operations like
+.Xr getdirentries 2 .
+The primary use for this descriptor will be as the lookup descriptor for the
+.Fn *at
+family of functions.
+.Pp
 If successful,
 .Fn open
 returns a non-negative integer, termed a file descriptor.
@@ -422,6 +433,11 @@ Too many symbolic links were encountered in translating the pathname.
 .It Bq Er EISDIR
 The named file is a directory, and the arguments specify
 it is to be modified.
+.It Bq Er EISDIR
+The named file is a directory, and the flags specified
+.Dv O_CREAT
+without
+.Dv O_DIRECTORY .
 .It Bq Er EROFS
 The named file resides on a read-only file system,
 and the file is to be modified.
@@ -494,6 +510,8 @@ which the file is being created has been exhausted.
 An I/O error occurred while making the directory entry or
 allocating the inode for
 .Dv O_CREAT .
+.It Bq Er EINTEGRITY
+Corrupted data was detected while reading from the file system.
 .It Bq Er ETXTBSY
 The file is a pure procedure (shared text) file that is being
 executed and the
@@ -516,9 +534,12 @@ An attempt was made to open a descriptor with an illegal combination
 of
 .Dv O_RDONLY ,
 .Dv O_WRONLY ,
-.Dv O_RDWR
+or
+.Dv O_RDWR ,
 and
-.Dv O_EXEC .
+.Dv O_EXEC
+or
+.Dv O_SEARCH .
 .It Bq Er EBADF
 The
 .Fa path
@@ -613,3 +634,8 @@ permits searches.
 The present implementation of the
 .Fa openat
 checks the current permissions of directory instead.
+.Pp
+The
+.Fa mode
+argument is variadic and may result in different calling conventions
+than might otherwise be expected.

@@ -33,6 +33,8 @@
 #include <sys/queue.h>
 #include <sys/linker_set.h>
 
+#include "readin.h"
+
 /* Commands and return values; nonzero return sets command_errmsg != NULL */
 typedef int	(bootblk_cmd_t)(int argc, char *argv[]);
 #define	COMMAND_ERRBUFSZ	(256)
@@ -70,8 +72,8 @@ void	hexdump(caddr_t region, size_t len);
 size_t	strlenout(vm_offset_t str);
 char	*strdupout(vm_offset_t str);
 void	kern_bzero(vm_offset_t dest, size_t len);
-int	kern_pread(int fd, vm_offset_t dest, size_t len, off_t off);
-void	*alloc_pread(int fd, off_t off, size_t len);
+int	kern_pread(readin_handle_t fd, vm_offset_t dest, size_t len, off_t off);
+void	*alloc_pread(readin_handle_t fd, off_t off, size_t len);
 
 /* bcache.c */
 void	bcache_init(size_t nblks, size_t bsize);
@@ -303,7 +305,7 @@ struct arch_switch
     ssize_t	(*arch_copyout)(const vm_offset_t src, void *dest,
 				const size_t len);
     /* Read from file to module address space, same semantics as read() */
-    ssize_t	(*arch_readin)(const int fd, vm_offset_t dest,
+    ssize_t	(*arch_readin)(readin_handle_t fd, vm_offset_t dest,
 			       const size_t len);
     /* Perform ISA byte port I/O (only for systems with ISA) */
     int		(*arch_isainb)(int port);
@@ -329,6 +331,9 @@ struct arch_switch
 
     /* Probe ZFS pool(s), if needed. */
     void	(*arch_zfs_probe)(void);
+
+    /* Return the hypervisor name/type or NULL if not virtualized. */
+    const char *(*arch_hypervisor)(void);
 
     /* For kexec-type loaders, get ksegment structure */
     void	(*arch_kexec_kseg_get)(int *nseg, void **kseg);

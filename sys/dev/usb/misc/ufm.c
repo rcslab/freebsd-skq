@@ -1,8 +1,7 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
  *
- * Copyright (c) 2001 M. Warner Losh
- * All rights reserved.
+ * Copyright (c) 2001 M. Warner Losh <imp@FreeBSD.org>
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -165,6 +164,7 @@ ufm_attach(device_t dev)
 	if (error) {
 		goto detach;
 	}
+	gone_in_dev(dev, 13, "Driver no longer relevant");
 	return (0);			/* success */
 
 detach:

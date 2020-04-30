@@ -13,8 +13,6 @@ cpu		CPU_BERI
 
 options 	HZ=200
 
-makeoptions	ARCH_FLAGS="-march=mips64 -mabi=64"
-
 makeoptions 	KERNLOADADDR=0xffffffff80100000
 
 include		"../beri/std.beri"
@@ -33,6 +31,7 @@ options 	CAPABILITIES
 
 options 	COMPAT_FREEBSD10
 options 	COMPAT_FREEBSD11
+options 	COMPAT_FREEBSD12
 
 options 	INTRNG
 options 	SCHED_ULE
@@ -60,5 +59,4 @@ device		ether
 device		geom_map
 device		loop
 device		md
-device		random
 device		snp

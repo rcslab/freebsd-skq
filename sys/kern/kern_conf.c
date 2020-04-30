@@ -166,12 +166,6 @@ dev_rel(struct cdev *dev)
 	dev->si_refcount--;
 	KASSERT(dev->si_refcount >= 0,
 	    ("dev_rel(%s) gave negative count", devtoname(dev)));
-#if 0
-	if (dev->si_usecount == 0 &&
-	    (dev->si_flags & SI_CHEAPCLONE) && (dev->si_flags & SI_NAMED))
-		;
-	else 
-#endif
 	if (dev->si_devsw == NULL && dev->si_refcount == 0) {
 		LIST_REMOVE(dev, si_list);
 		flag = 1;
@@ -192,16 +186,16 @@ dev_refthread(struct cdev *dev, int *ref)
 		*ref = 0;
 		return (dev->si_devsw);
 	}
-	dev_lock();
+	cdp = cdev2priv(dev);
+	mtx_lock(&cdp->cdp_threadlock);
 	csw = dev->si_devsw;
 	if (csw != NULL) {
-		cdp = cdev2priv(dev);
 		if ((cdp->cdp_flags & CDP_SCHED_DTR) == 0)
 			atomic_add_long(&dev->si_threadcount, 1);
 		else
 			csw = NULL;
 	}
-	dev_unlock();
+	mtx_unlock(&cdp->cdp_threadlock);
 	if (csw != NULL)
 		*ref = 1;
 	return (csw);
@@ -229,19 +223,21 @@ devvn_refthread(struct vnode *vp, struct cdev **devp, int *ref)
 	}
 
 	csw = NULL;
-	dev_lock();
+	VI_LOCK(vp);
 	dev = vp->v_rdev;
 	if (dev == NULL) {
-		dev_unlock();
+		VI_UNLOCK(vp);
 		return (NULL);
 	}
 	cdp = cdev2priv(dev);
+	mtx_lock(&cdp->cdp_threadlock);
 	if ((cdp->cdp_flags & CDP_SCHED_DTR) == 0) {
 		csw = dev->si_devsw;
 		if (csw != NULL)
 			atomic_add_long(&dev->si_threadcount, 1);
 	}
-	dev_unlock();
+	mtx_unlock(&cdp->cdp_threadlock);
+	VI_UNLOCK(vp);
 	if (csw != NULL) {
 		*devp = dev;
 		*ref = 1;
@@ -576,20 +572,41 @@ newdev(struct make_dev_args *args, struct cdev *si)
 
 	mtx_assert(&devmtx, MA_OWNED);
 	csw = args->mda_devsw;
+	si2 = NULL;
 	if (csw->d_flags & D_NEEDMINOR) {
 		/* We may want to return an existing device */
 		LIST_FOREACH(si2, &csw->d_devs, si_list) {
 			if (dev2unit(si2) == args->mda_unit) {
 				dev_free_devlocked(si);
-				return (si2);
+				si = si2;
+				break;
 			}
 		}
+
+		/*
+		 * If we're returning an existing device, we should make sure
+		 * it isn't already initialized.  This would have been caught
+		 * in consumers anyways, but it's good to catch such a case
+		 * early.  We still need to complete initialization of the
+		 * device, and we'll use whatever make_dev_args were passed in
+		 * to do so.
+		 */
+		KASSERT(si2 == NULL || (si2->si_flags & SI_NAMED) == 0,
+		    ("make_dev() by driver %s on pre-existing device (min=%x, name=%s)",
+		    args->mda_devsw->d_name, dev2unit(si2), devtoname(si2)));
 	}
 	si->si_drv0 = args->mda_unit;
-	si->si_devsw = csw;
 	si->si_drv1 = args->mda_si_drv1;
 	si->si_drv2 = args->mda_si_drv2;
-	LIST_INSERT_HEAD(&csw->d_devs, si, si_list);
+	/* Only push to csw->d_devs if it's not a cloned device. */
+	if (si2 == NULL) {
+		si->si_devsw = csw;
+		LIST_INSERT_HEAD(&csw->d_devs, si, si_list);
+	} else {
+		KASSERT(si->si_devsw == csw,
+		    ("%s: inconsistent devsw between clone_create() and make_dev()",
+		    __func__));
+	}
 	return (si);
 }
 
@@ -649,6 +666,9 @@ prep_cdevsw(struct cdevsw *devsw, int flags)
 	}
 	
 	if (devsw->d_flags & D_NEEDGIANT) {
+		printf("WARNING: Device \"%s\" is Giant locked and may be "
+		    "deleted before FreeBSD 13.0.\n",
+		    devsw->d_name == NULL ? "???" : devsw->d_name);
 		if (devsw->d_gianttrick == NULL) {
 			memcpy(dsw2, devsw, sizeof *dsw2);
 			devsw->d_gianttrick = dsw2;
@@ -799,17 +819,6 @@ make_dev_sv(struct make_dev_args *args1, struct cdev **dres,
 		dev_refl(dev);
 	if ((args.mda_flags & MAKEDEV_ETERNAL) != 0)
 		dev->si_flags |= SI_ETERNAL;
-	if (dev->si_flags & SI_CHEAPCLONE &&
-	    dev->si_flags & SI_NAMED) {
-		/*
-		 * This is allowed as it removes races and generally
-		 * simplifies cloning devices.
-		 * XXX: still ??
-		 */
-		dev_unlock_and_free();
-		*dres = dev;
-		return (0);
-	}
 	KASSERT(!(dev->si_flags & SI_NAMED),
 	    ("make_dev() by driver %s on pre-existing device (min=%x, name=%s)",
 	    args.mda_devsw->d_name, dev2unit(dev), devtoname(dev)));
@@ -940,7 +949,6 @@ dev_dependsl(struct cdev *pdev, struct cdev *cdev)
 	cdev->si_flags |= SI_CHILD;
 	LIST_INSERT_HEAD(&pdev->si_children, cdev, si_siblings);
 }
-
 
 void
 dev_depends(struct cdev *pdev, struct cdev *cdev)
@@ -1129,20 +1137,26 @@ destroy_devl(struct cdev *dev)
 		dev->si_flags &= ~SI_CLONELIST;
 	}
 
+	mtx_lock(&cdp->cdp_threadlock);
 	csw = dev->si_devsw;
 	dev->si_devsw = NULL;	/* already NULL for SI_ALIAS */
 	while (csw != NULL && csw->d_purge != NULL && dev->si_threadcount) {
 		csw->d_purge(dev);
+		mtx_unlock(&cdp->cdp_threadlock);
 		msleep(csw, &devmtx, PRIBIO, "devprg", hz/10);
+		mtx_lock(&cdp->cdp_threadlock);
 		if (dev->si_threadcount)
 			printf("Still %lu threads in %s\n",
 			    dev->si_threadcount, devtoname(dev));
 	}
 	while (dev->si_threadcount != 0) {
 		/* Use unique dummy wait ident */
+		mtx_unlock(&cdp->cdp_threadlock);
 		msleep(&csw, &devmtx, PRIBIO, "devdrn", hz / 10);
+		mtx_lock(&cdp->cdp_threadlock);
 	}
 
+	mtx_unlock(&cdp->cdp_threadlock);
 	dev_unlock();
 	if ((cdp->cdp_flags & CDP_UNREF_DTR) == 0) {
 		/* avoid out of order notify events */
@@ -1309,7 +1323,6 @@ clone_create(struct clonedevs **cdp, struct cdevsw *csw, int *up,
 	    ("Too high unit (0x%x) in clone_create", *up));
 	KASSERT(csw->d_flags & D_NEEDMINOR,
 	    ("clone_create() on cdevsw without minor numbers"));
-
 
 	/*
 	 * Search the list for a lot of things in one go:
@@ -1544,7 +1557,6 @@ DB_SHOW_COMMAND(cdev, db_show_cdev)
 	SI_FLAG(SI_ETERNAL);
 	SI_FLAG(SI_ALIAS);
 	SI_FLAG(SI_NAMED);
-	SI_FLAG(SI_CHEAPCLONE);
 	SI_FLAG(SI_CHILD);
 	SI_FLAG(SI_DUMPDEV);
 	SI_FLAG(SI_CLONELIST);

@@ -2,7 +2,6 @@
  * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
  *
  * Copyright (c) 2017 John H. Baldwin <jhb@FreeBSD.org>
- * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -32,6 +31,7 @@
 #define	__GDB_H__
 
 void	gdb_cpu_add(int vcpu);
+void	gdb_cpu_breakpoint(int vcpu, struct vm_exit *vmexit);
 void	gdb_cpu_mtrap(int vcpu);
 void	gdb_cpu_suspend(int vcpu);
 void	init_gdb(struct vmctx *ctx, int sport, bool wait);

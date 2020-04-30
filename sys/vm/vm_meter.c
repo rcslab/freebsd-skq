@@ -97,6 +97,8 @@ struct vmmeter __read_mostly vm_cnt = {
 	.v_wire_count = EARLY_COUNTER,
 };
 
+u_long __exclusive_cache_line vm_user_wire_count;
+
 static void
 vmcounter_startup(void)
 {
@@ -256,7 +258,7 @@ vmtotal(SYSCTL_HANDLER_ARGS)
 			continue;
 		}
 		if (object->ref_count == 1 &&
-		    (object->flags & OBJ_NOSPLIT) != 0) {
+		    (object->flags & OBJ_ANON) == 0) {
 			/*
 			 * Also skip otherwise unreferenced swap
 			 * objects backing tmpfs vnodes, and POSIX or
@@ -311,12 +313,14 @@ vmtotal(SYSCTL_HANDLER_ARGS)
 SYSCTL_PROC(_vm, VM_TOTAL, vmtotal, CTLTYPE_OPAQUE | CTLFLAG_RD |
     CTLFLAG_MPSAFE, NULL, 0, vmtotal, "S,vmtotal",
     "System virtual memory statistics");
-SYSCTL_NODE(_vm, OID_AUTO, stats, CTLFLAG_RW, 0, "VM meter stats");
-static SYSCTL_NODE(_vm_stats, OID_AUTO, sys, CTLFLAG_RW, 0,
-	"VM meter sys stats");
-static SYSCTL_NODE(_vm_stats, OID_AUTO, vm, CTLFLAG_RW, 0,
-	"VM meter vm stats");
-SYSCTL_NODE(_vm_stats, OID_AUTO, misc, CTLFLAG_RW, 0, "VM meter misc stats");
+SYSCTL_NODE(_vm, OID_AUTO, stats, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "VM meter stats");
+static SYSCTL_NODE(_vm_stats, OID_AUTO, sys, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "VM meter sys stats");
+static SYSCTL_NODE(_vm_stats, OID_AUTO, vm, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "VM meter vm stats");
+SYSCTL_NODE(_vm_stats, OID_AUTO, misc, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "VM meter misc stats");
 
 static int
 sysctl_handle_vmstat(SYSCTL_HANDLER_ARGS)
@@ -394,6 +398,8 @@ sysctl_handle_vmstat_proc(SYSCTL_HANDLER_ARGS)
 
 #define	VM_STATS_UINT(var, descr)	\
     SYSCTL_UINT(_vm_stats_vm, OID_AUTO, var, CTLFLAG_RD, &vm_cnt.var, 0, descr)
+#define	VM_STATS_ULONG(var, descr)	\
+    SYSCTL_ULONG(_vm_stats_vm, OID_AUTO, var, CTLFLAG_RD, &vm_cnt.var, 0, descr)
 
 VM_STATS_UINT(v_page_size, "Page size in bytes");
 VM_STATS_UINT(v_page_count, "Total number of pages in system");
@@ -410,6 +416,9 @@ VM_STATS_PROC(v_laundry_count, "Pages eligible for laundering",
 VM_STATS_UINT(v_pageout_free_min, "Min pages reserved for kernel");
 VM_STATS_UINT(v_interrupt_free_min, "Reserved pages for interrupt code");
 VM_STATS_UINT(v_free_severe, "Severe page depletion point");
+
+SYSCTL_ULONG(_vm_stats_vm, OID_AUTO, v_user_wire_count, CTLFLAG_RD,
+    &vm_user_wire_count, 0, "User-wired virtual memory");
 
 #ifdef COMPAT_FREEBSD11
 /*
@@ -494,9 +503,9 @@ vm_domain_stats_init(struct vm_domain *vmd, struct sysctl_oid *parent)
 	struct sysctl_oid *oid;
 
 	vmd->vmd_oid = SYSCTL_ADD_NODE(NULL, SYSCTL_CHILDREN(parent), OID_AUTO,
-	    vmd->vmd_name, CTLFLAG_RD, NULL, "");
+	    vmd->vmd_name, CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "");
 	oid = SYSCTL_ADD_NODE(NULL, SYSCTL_CHILDREN(vmd->vmd_oid), OID_AUTO,
-	    "stats", CTLFLAG_RD, NULL, "");
+	    "stats", CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "");
 	SYSCTL_ADD_UINT(NULL, SYSCTL_CHILDREN(oid), OID_AUTO,
 	    "free_count", CTLFLAG_RD, &vmd->vmd_free_count, 0,
 	    "Free pages");
@@ -553,7 +562,7 @@ vm_stats_init(void *arg __unused)
 	int i;
 
 	oid = SYSCTL_ADD_NODE(NULL, SYSCTL_STATIC_CHILDREN(_vm), OID_AUTO,
-	    "domain", CTLFLAG_RD, NULL, "");
+	    "domain", CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "");
 	for (i = 0; i < vm_ndomains; i++)
 		vm_domain_stats_init(VM_DOMAIN(i), oid);
 }

@@ -261,6 +261,10 @@ DRIVER_MODULE(virtio_blk, virtio_pci, vtblk_driver, vtblk_devclass,
 MODULE_VERSION(virtio_blk, 1);
 MODULE_DEPEND(virtio_blk, virtio, 1, 1, 1);
 
+VIRTIO_SIMPLE_PNPTABLE(virtio_blk, VIRTIO_ID_BLOCK, "VirtIO Block Adapter");
+VIRTIO_SIMPLE_PNPINFO(virtio_mmio, virtio_blk);
+VIRTIO_SIMPLE_PNPINFO(virtio_pci, virtio_blk);
+
 static int
 vtblk_modevent(module_t mod, int type, void *unused)
 {
@@ -285,13 +289,7 @@ vtblk_modevent(module_t mod, int type, void *unused)
 static int
 vtblk_probe(device_t dev)
 {
-
-	if (virtio_get_device_type(dev) != VIRTIO_ID_BLOCK)
-		return (ENXIO);
-
-	device_set_desc(dev, "VirtIO Block Adapter");
-
-	return (BUS_PROBE_DEFAULT);
+	return (VIRTIO_SIMPLE_PROBE(dev, virtio_blk));
 }
 
 static int
@@ -548,6 +546,12 @@ vtblk_strategy(struct bio *bp)
 	if (sc->vtblk_flags & VTBLK_FLAG_READONLY &&
 	    (bp->bio_cmd == BIO_WRITE || bp->bio_cmd == BIO_FLUSH)) {
 		vtblk_bio_done(sc, bp, EROFS);
+		return;
+	}
+
+	if ((bp->bio_cmd != BIO_READ) && (bp->bio_cmd != BIO_WRITE) &&
+	    (bp->bio_cmd != BIO_FLUSH)) {
+		vtblk_bio_done(sc, bp, EOPNOTSUPP);
 		return;
 	}
 
@@ -1388,8 +1392,9 @@ vtblk_setup_sysctl(struct vtblk_softc *sc)
 	child = SYSCTL_CHILDREN(tree);
 
 	SYSCTL_ADD_PROC(ctx, child, OID_AUTO, "writecache_mode",
-	    CTLTYPE_INT | CTLFLAG_RW, sc, 0, vtblk_write_cache_sysctl,
-	    "I", "Write cache mode (writethrough (0) or writeback (1))");
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_MPSAFE, sc, 0,
+	    vtblk_write_cache_sysctl, "I",
+	    "Write cache mode (writethrough (0) or writeback (1))");
 }
 
 static int

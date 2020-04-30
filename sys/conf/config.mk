@@ -8,6 +8,13 @@
 # the code here when they all produce identical results
 # (or should)
 .if !defined(KERNBUILDDIR)
+opt_global.h:
+	touch ${.TARGET}
+.if ${MACHINE} != "mips"
+	@echo "#define SMP 1" >> ${.TARGET}
+	@echo "#define MAC 1" >> ${.TARGET}
+	@echo "#define VIMAGE 1" >> ${.TARGET}
+.endif
 opt_bpf.h:
 	echo "#define DEV_BPF 1" > ${.TARGET}
 .if ${MK_INET_SUPPORT} != "no"
@@ -45,6 +52,8 @@ KERN_OPTS+= INET TCP_OFFLOAD
 KERN_OPTS+= INET6
 .endif
 .elif !defined(KERN_OPTS)
+# Add all the options that are mentioned in any opt_*.h file when we
+# have a kernel build directory to pull them from.
 KERN_OPTS!=cat ${KERNBUILDDIR}/opt*.h | awk '{print $$2;}' | sort -u
 .export KERN_OPTS
 .endif

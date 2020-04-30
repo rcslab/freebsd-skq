@@ -83,7 +83,8 @@ struct ufsmount {
 	struct	cdev *um_dev;			/* (r) device mounted */
 	struct	g_consumer *um_cp;		/* (r) GEOM access point */
 	struct	bufobj *um_bo;			/* (r) Buffer cache object */
-	struct	vnode *um_devvp;		/* (r) blk dev mounted vnode */
+	struct	vnode *um_odevvp;		/* (r) devfs dev vnode */
+	struct	vnode *um_devvp;		/* (r) mntfs private vnode */
 	u_long	um_fstype;			/* (c) type of filesystem */
 	struct	fs *um_fs;			/* (r) pointer to superblock */
 	struct	ufs_extattr_per_mount um_extattr; /* (c) extended attrs */
@@ -100,6 +101,10 @@ struct ufsmount {
 	char	um_qflags[MAXQUOTAS];		/* (i) quota specific flags */
 	int64_t	um_savedmaxfilesize;		/* (c) track maxfilesize */
 	u_int	um_flags;			/* (i) filesystem flags */
+	struct	timeval um_last_fullmsg;	/* (i) last full msg time */
+	int	um_secs_fullmsg;		/* (i) seconds since full msg */
+	struct	timeval um_last_integritymsg;	/* (i) last integrity msg */
+	int	um_secs_integritymsg;		/* (i) secs since integ msg */
 	u_int	um_trim_inflight;		/* (i) outstanding trim count */
 	u_int	um_trim_inflight_blks;		/* (i) outstanding trim blks */
 	u_long	um_trim_total;			/* (i) total trim count */
@@ -119,6 +124,7 @@ struct ufsmount {
 	void	(*um_ifree)(struct ufsmount *, struct inode *);
 	int	(*um_rdonly)(struct inode *);
 	void	(*um_snapgone)(struct inode *);
+	int	(*um_check_blkno)(struct mount *, ino_t, daddr_t, int);
 };
 
 /*
@@ -126,19 +132,27 @@ struct ufsmount {
  */
 #define UM_CANDELETE		0x00000001	/* devvp supports TRIM */
 #define UM_WRITESUSPENDED	0x00000002	/* suspension in progress */
+#define UM_CANSPEEDUP		0x00000004	/* devvp supports SPEEDUP */
 
 /*
  * function prototypes
  */
-#define	UFS_BALLOC(aa, bb, cc, dd, ee, ff) VFSTOUFS((aa)->v_mount)->um_balloc(aa, bb, cc, dd, ee, ff)
-#define	UFS_BLKATOFF(aa, bb, cc, dd) VFSTOUFS((aa)->v_mount)->um_blkatoff(aa, bb, cc, dd)
-#define	UFS_TRUNCATE(aa, bb, cc, dd) VFSTOUFS((aa)->v_mount)->um_truncate(aa, bb, cc, dd)
+#define	UFS_BALLOC(aa, bb, cc, dd, ee, ff) \
+	VFSTOUFS((aa)->v_mount)->um_balloc(aa, bb, cc, dd, ee, ff)
+#define	UFS_BLKATOFF(aa, bb, cc, dd) \
+	VFSTOUFS((aa)->v_mount)->um_blkatoff(aa, bb, cc, dd)
+#define	UFS_TRUNCATE(aa, bb, cc, dd) \
+	VFSTOUFS((aa)->v_mount)->um_truncate(aa, bb, cc, dd)
 #define	UFS_UPDATE(aa, bb) VFSTOUFS((aa)->v_mount)->um_update(aa, bb)
-#define	UFS_VALLOC(aa, bb, cc, dd) VFSTOUFS((aa)->v_mount)->um_valloc(aa, bb, cc, dd)
+#define	UFS_VALLOC(aa, bb, cc, dd) \
+	VFSTOUFS((aa)->v_mount)->um_valloc(aa, bb, cc, dd)
 #define	UFS_VFREE(aa, bb, cc) VFSTOUFS((aa)->v_mount)->um_vfree(aa, bb, cc)
 #define	UFS_IFREE(aa, bb) ((aa)->um_ifree(aa, bb))
 #define	UFS_RDONLY(aa) (ITOUMP(aa)->um_rdonly(aa))
 #define	UFS_SNAPGONE(aa) (ITOUMP(aa)->um_snapgone(aa))
+#define	UFS_CHECK_BLKNO(aa, bb, cc, dd) 		\
+	(VFSTOUFS(aa)->um_check_blkno == NULL ? 0 :	\
+	 VFSTOUFS(aa)->um_check_blkno(aa, bb, cc, dd))
 
 #define	UFS_LOCK(aa)	mtx_lock(&(aa)->um_lock)
 #define	UFS_UNLOCK(aa)	mtx_unlock(&(aa)->um_lock)

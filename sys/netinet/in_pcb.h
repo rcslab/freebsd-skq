@@ -51,14 +51,9 @@
 #include <sys/lock.h>
 #include <sys/rwlock.h>
 #include <net/vnet.h>
-#include <net/if.h>
-#include <net/if_var.h>
 #include <vm/uma.h>
 #endif
 #include <sys/ck.h>
-
-#define	in6pcb		inpcb	/* for KAME src sync over BSD*'s */
-#define	in6p_sp		inp_sp	/* for KAME src sync over BSD*'s */
 
 /*
  * struct inpcb is the common protocol control block structure used in most
@@ -168,22 +163,22 @@ struct in_conninfo {
  * (h) - Protected by the pcbhash lock for the inpcb
  * (s) - Protected by another subsystem's locks
  * (x) - Undefined locking
- * 
+ *
  * Notes on the tcp_hpts:
- * 
+ *
  * First Hpts lock order is
  * 1) INP_WLOCK()
- * 2) HPTS_LOCK() i.e. hpts->pmtx 
+ * 2) HPTS_LOCK() i.e. hpts->pmtx
  *
- * To insert a TCB on the hpts you *must* be holding the INP_WLOCK(). 
- * You may check the inp->inp_in_hpts flag without the hpts lock. 
- * The hpts is the only one that will clear this flag holding 
+ * To insert a TCB on the hpts you *must* be holding the INP_WLOCK().
+ * You may check the inp->inp_in_hpts flag without the hpts lock.
+ * The hpts is the only one that will clear this flag holding
  * only the hpts lock. This means that in your tcp_output()
- * routine when you test for the inp_in_hpts flag to be 1 
- * it may be transitioning to 0 (by the hpts). 
- * That's ok since that will just mean an extra call to tcp_output 
+ * routine when you test for the inp_in_hpts flag to be 1
+ * it may be transitioning to 0 (by the hpts).
+ * That's ok since that will just mean an extra call to tcp_output
  * that most likely will find the call you executed
- * (when the mis-match occured) will have put the TCB back 
+ * (when the mis-match occured) will have put the TCB back
  * on the hpts and it will return. If your
  * call did not add the inp back to the hpts then you will either
  * over-send or the cwnd will block you from sending more.
@@ -194,7 +189,7 @@ struct in_conninfo {
  * the INP_WLOCK() or from destroying your TCB where again
  * you should already have the INP_WLOCK().
  *
- * The inp_hpts_cpu, inp_hpts_cpu_set, inp_input_cpu and 
+ * The inp_hpts_cpu, inp_hpts_cpu_set, inp_input_cpu and
  * inp_input_cpu_set fields are controlled completely by
  * the hpts. Do not ever set these. The inp_hpts_cpu_set
  * and inp_input_cpu_set fields indicate if the hpts has
@@ -248,14 +243,14 @@ struct inpcb {
 					 * fits in the pacing window (i&b). */
 	/*
 	 * Note the next fields are protected by a
-	 * different lock (hpts-lock). This means that 
+	 * different lock (hpts-lock). This means that
 	 * they must correspond in size to the smallest
 	 * protectable bit field (uint8_t on x86, and
 	 * other platfomrs potentially uint32_t?). Also
 	 * since CPU switches can occur at different times the two
 	 * fields can *not* be collapsed into a signal bit field.
 	 */
-#if defined(__amd64__) || defined(__i386__)	
+#if defined(__amd64__) || defined(__i386__)
 	volatile uint8_t inp_in_hpts; /* on output hpts (lock b) */
 	volatile uint8_t inp_in_input; /* on input hpts (lock b) */
 #else
@@ -272,7 +267,7 @@ struct inpcb {
 			 inp_hpts_calls :1,	/* (i) from output hpts */
 			 inp_input_calls :1,	/* (i) from input hpts */
 			 inp_spare_bits2 : 4;
-	uint8_t inp_spare_byte;		/* Compiler hole */
+	uint8_t inp_numa_domain;	/* numa domain */
 	void	*inp_ppcb;		/* (i) pointer to per-protocol pcb */
 	struct	socket *inp_socket;	/* (i) back pointer to socket */
 	uint32_t 	 inp_hptsslot;	/* Hpts wheel slot this tcb is Lock(i&b) */
@@ -342,7 +337,6 @@ struct inpcb {
 #define	in6p_faddr	inp_inc.inc6_faddr
 #define	in6p_laddr	inp_inc.inc6_laddr
 #define	in6p_zoneid	inp_inc.inc6_zoneid
-#define	in6p_flowinfo	inp_flow
 
 #define	inp_vnet	inp_pcbinfo->ipi_vnet
 
@@ -590,6 +584,7 @@ struct inpcblbgroup {
 #define INP_TRY_WLOCK(inp)	rw_try_wlock(&(inp)->inp_lock)
 #define INP_RUNLOCK(inp)	rw_runlock(&(inp)->inp_lock)
 #define INP_WUNLOCK(inp)	rw_wunlock(&(inp)->inp_lock)
+#define INP_UNLOCK(inp)		rw_unlock(&(inp)->inp_lock)
 #define	INP_TRY_UPGRADE(inp)	rw_try_upgrade(&(inp)->inp_lock)
 #define	INP_DOWNGRADE(inp)	rw_downgrade(&(inp)->inp_lock)
 #define	INP_WLOCKED(inp)	rw_wowned(&(inp)->inp_lock)
@@ -632,19 +627,14 @@ int	inp_so_options(const struct inpcb *inp);
 #define INP_INFO_LOCK_INIT(ipi, d) \
 	mtx_init(&(ipi)->ipi_lock, (d), NULL, MTX_DEF| MTX_RECURSE)
 #define INP_INFO_LOCK_DESTROY(ipi)  mtx_destroy(&(ipi)->ipi_lock)
-#define INP_INFO_RLOCK_ET(ipi, et)	NET_EPOCH_ENTER((et))
 #define INP_INFO_WLOCK(ipi) mtx_lock(&(ipi)->ipi_lock)
 #define INP_INFO_TRY_WLOCK(ipi)	mtx_trylock(&(ipi)->ipi_lock)
 #define INP_INFO_WLOCKED(ipi)	mtx_owned(&(ipi)->ipi_lock)
-#define INP_INFO_RUNLOCK_ET(ipi, et)	NET_EPOCH_EXIT((et))
-#define INP_INFO_RUNLOCK_TP(ipi, tp)	NET_EPOCH_EXIT(*(tp)->t_inpcb->inp_et)
 #define INP_INFO_WUNLOCK(ipi)	mtx_unlock(&(ipi)->ipi_lock)
 #define	INP_INFO_LOCK_ASSERT(ipi)	MPASS(in_epoch(net_epoch_preempt) || mtx_owned(&(ipi)->ipi_lock))
-#define INP_INFO_RLOCK_ASSERT(ipi)	MPASS(in_epoch(net_epoch_preempt))
 #define INP_INFO_WLOCK_ASSERT(ipi)	mtx_assert(&(ipi)->ipi_lock, MA_OWNED)
 #define INP_INFO_WUNLOCK_ASSERT(ipi)	\
 	mtx_assert(&(ipi)->ipi_lock, MA_NOTOWNED)
-#define INP_INFO_UNLOCK_ASSERT(ipi)	MPASS(!in_epoch(net_epoch_preempt) && !mtx_owned(&(ipi)->ipi_lock))
 
 #define INP_LIST_LOCK_INIT(ipi, d) \
         rw_init_flags(&(ipi)->ipi_list_lock, (d), 0)
@@ -667,11 +657,7 @@ int	inp_so_options(const struct inpcb *inp);
 
 #define	INP_HASH_LOCK_INIT(ipi, d) mtx_init(&(ipi)->ipi_hash_lock, (d), NULL, MTX_DEF)
 #define	INP_HASH_LOCK_DESTROY(ipi)	mtx_destroy(&(ipi)->ipi_hash_lock)
-#define	INP_HASH_RLOCK(ipi)		struct epoch_tracker inp_hash_et; epoch_enter_preempt(net_epoch_preempt, &inp_hash_et)
-#define	INP_HASH_RLOCK_ET(ipi, et)		epoch_enter_preempt(net_epoch_preempt, &(et))
 #define	INP_HASH_WLOCK(ipi)		mtx_lock(&(ipi)->ipi_hash_lock)
-#define	INP_HASH_RUNLOCK(ipi)		NET_EPOCH_EXIT(inp_hash_et)
-#define	INP_HASH_RUNLOCK_ET(ipi, et)	NET_EPOCH_EXIT((et))
 #define	INP_HASH_WUNLOCK(ipi)		mtx_unlock(&(ipi)->ipi_hash_lock)
 #define	INP_HASH_LOCK_ASSERT(ipi)	MPASS(in_epoch(net_epoch_preempt) || mtx_owned(&(ipi)->ipi_hash_lock))
 #define	INP_HASH_WLOCK_ASSERT(ipi)	mtx_assert(&(ipi)->ipi_hash_lock, MA_OWNED);
@@ -759,7 +745,9 @@ int	inp_so_options(const struct inpcb *inp);
 #define	INP_ORIGDSTADDR		0x00000800 /* receive IP dst address/port */
 #define INP_CANNOT_DO_ECN	0x00001000 /* The stack does not do ECN */
 #define	INP_REUSEPORT_LB	0x00002000 /* SO_REUSEPORT_LB option is set */
-
+#define INP_SUPPORTS_MBUFQ	0x00004000 /* Supports the mbuf queue method of LRO */
+#define INP_MBUF_QUEUE_READY	0x00008000 /* The transport is pacing, inputs can be queued */
+#define INP_DONT_SACK_QUEUE	0x00010000 /* If a sack arrives do not wake me */
 /*
  * Flags passed to in_pcblookup*() functions.
  */
@@ -771,7 +759,6 @@ int	inp_so_options(const struct inpcb *inp);
 			    INPLOOKUP_WLOCKPCB)
 
 #define	sotoinpcb(so)	((struct inpcb *)(so)->so_pcb)
-#define	sotoin6pcb(so)	sotoinpcb(so) /* for KAME src sync over BSD*'s */
 
 #define	INP_SOCKAF(so) so->so_proto->pr_domain->dom_family
 
@@ -843,7 +830,7 @@ int	in_pcbbind_setup(struct inpcb *, struct sockaddr *, in_addr_t *,
 	    u_short *, struct ucred *);
 int	in_pcbconnect(struct inpcb *, struct sockaddr *, struct ucred *);
 int	in_pcbconnect_mbuf(struct inpcb *, struct sockaddr *, struct ucred *,
-	    struct mbuf *);
+	    struct mbuf *, bool);
 int	in_pcbconnect_setup(struct inpcb *, struct sockaddr *, in_addr_t *,
 	    u_short *, in_addr_t *, u_short *, struct inpcb **,
 	    struct ucred *);
@@ -852,7 +839,7 @@ void	in_pcbdisconnect(struct inpcb *);
 void	in_pcbdrop(struct inpcb *);
 void	in_pcbfree(struct inpcb *);
 int	in_pcbinshash(struct inpcb *);
-int	in_pcbinshash_nopcbgroup(struct inpcb *);
+int	in_pcbinshash_mbuf(struct inpcb *, struct mbuf *);
 int	in_pcbladdr(struct inpcb *, struct in_addr *, struct in_addr *,
 	    struct ucred *);
 struct inpcb *
@@ -881,8 +868,13 @@ struct sockaddr *
 	in_sockaddr(in_port_t port, struct in_addr *addr);
 void	in_pcbsosetlabel(struct socket *so);
 #ifdef RATELIMIT
-int	in_pcbattach_txrtlmt(struct inpcb *, struct ifnet *, uint32_t, uint32_t, uint32_t);
+int
+in_pcboutput_txrtlmt_locked(struct inpcb *, struct ifnet *,
+	    struct mbuf *, uint32_t);
+int	in_pcbattach_txrtlmt(struct inpcb *, struct ifnet *, uint32_t, uint32_t,
+	    uint32_t, struct m_snd_tag **);
 void	in_pcbdetach_txrtlmt(struct inpcb *);
+void    in_pcbdetach_tag(struct ifnet *ifp, struct m_snd_tag *mst);
 int	in_pcbmodify_txrtlmt(struct inpcb *, uint32_t);
 int	in_pcbquery_txrtlmt(struct inpcb *, uint32_t *);
 int	in_pcbquery_txrlevel(struct inpcb *, uint32_t *);

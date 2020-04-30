@@ -45,7 +45,12 @@ CFLAGS+= -I${CNTRB_GDB}/gdb/config
 CFLAGS+= -I${CNTRB_BU}/include
 CFLAGS+= -I${CNTRB_GDB}/include
 CFLAGS+= -I${CNTRB_BU}/bfd
-CFLAGS+= -I${SRCTOP}/lib/libedit/edit
+CFLAGS+= -I${SYSROOT:U${DESTDIR}}/${INCLUDEDIR}/edit
+
+# Some bits here currently rely on some of the linker-merging magic that happens
+# with -fcommon.  While this is the default right now, explicitly set -fcommon
+# so that it continues to build when the default flips.
+CFCOMMONFLAG= -fcommon
 
 GENSRCS+= nm.h tm.h
 
@@ -53,7 +58,7 @@ GENSRCS+= nm.h tm.h
 CFLAGS+= -DCROSS_DEBUGGER -I${BMAKE_ROOT:H:H}
 GDB_SUFFIX= -${TARGET_ARCH}
 MAN=
-.elif ${MK_GDB_LIBEXEC} != "no"
+.else
 BINDIR?=	/usr/libexec
 MAN=
 .endif

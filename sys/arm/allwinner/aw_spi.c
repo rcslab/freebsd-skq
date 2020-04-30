@@ -32,7 +32,9 @@ __FBSDID("$FreeBSD$");
 #include <sys/systm.h>
 #include <sys/bus.h>
 #include <sys/kernel.h>
+#include <sys/lock.h>
 #include <sys/module.h>
+#include <sys/mutex.h>
 #include <sys/rman.h>
 #include <sys/resource.h>
 #include <machine/bus.h>
@@ -240,7 +242,7 @@ aw_spi_attach(device_t dev)
 
 	sc->spibus = device_add_child(dev, "spibus", -1);
 
-	return (0);
+	return (bus_generic_attach(dev));
 
 fail:
 	aw_spi_detach(dev);

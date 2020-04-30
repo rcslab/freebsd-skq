@@ -20,8 +20,6 @@ MACHINE_CPU = mips
 MACHINE_CPU = aim
 . elif ${MACHINE_CPUARCH} == "riscv"
 MACHINE_CPU = riscv
-. elif ${MACHINE_CPUARCH} == "sparc64"
-MACHINE_CPU = ultrasparc
 . endif
 .else
 
@@ -31,6 +29,8 @@ MACHINE_CPU = ultrasparc
 . if ${MACHINE_CPUARCH} == "amd64" || ${MACHINE_CPUARCH} == "i386"
 .  if ${CPUTYPE} == "barcelona"
 CPUTYPE = amdfam10
+.  elif ${CPUTYPE} == "skx"
+CPUTYPE = skylake-avx512
 .  elif ${CPUTYPE} == "core-avx2"
 CPUTYPE = haswell
 .  elif ${CPUTYPE} == "core-avx-i"
@@ -72,12 +72,6 @@ CPUTYPE = pentium-mmx
 .   elif ${CPUTYPE} == "i586"
 CPUTYPE = pentium
 .   endif
-.  endif
-. elif ${MACHINE_ARCH} == "sparc64"
-.  if ${CPUTYPE} == "us"
-CPUTYPE = ultrasparc
-.  elif ${CPUTYPE} == "us3"
-CPUTYPE = ultrasparc3
 .  endif
 . endif
 
@@ -134,8 +128,6 @@ _CPUCFLAGS = -Wa,-me500 -msoft-float
 .  else
 _CPUCFLAGS = -mcpu=${CPUTYPE} -mno-powerpc64
 .  endif
-. elif ${MACHINE_ARCH} == "powerpcspe"
-_CPUCFLAGS = -Wa,-me500 -mspe=yes -mabi=spe -mfloat-gprs=double -mcpu=8548
 . elif ${MACHINE_ARCH} == "powerpc64"
 _CPUCFLAGS = -mcpu=${CPUTYPE}
 . elif ${MACHINE_CPUARCH} == "mips"
@@ -152,14 +144,6 @@ _CPUCFLAGS = -march=${CPUTYPE}
 #	sb1, xlp, xlr
 _CPUCFLAGS = -march=${CPUTYPE:S/^mips//}
 . endif
-. elif ${MACHINE_ARCH} == "sparc64"
-.  if ${CPUTYPE} == "v9"
-_CPUCFLAGS = -mcpu=v9
-.  elif ${CPUTYPE} == "ultrasparc"
-_CPUCFLAGS = -mcpu=ultrasparc
-.  elif ${CPUTYPE} == "ultrasparc3"
-_CPUCFLAGS = -mcpu=ultrasparc3
-.  endif
 . elif ${MACHINE_CPUARCH} == "aarch64"
 _CPUCFLAGS = -mcpu=${CPUTYPE}
 . endif
@@ -170,7 +154,7 @@ _CPUCFLAGS = -mcpu=${CPUTYPE}
 
 ########## i386
 . if ${MACHINE_CPUARCH} == "i386"
-.  if ${CPUTYPE} == "znver1"
+.  if ${CPUTYPE} == "znver2" || ${CPUTYPE} == "znver1"
 MACHINE_CPU = avx2 avx sse42 sse41 ssse3 sse4a sse3 sse2 sse mmx k6 k5 i586
 .  elif ${CPUTYPE} == "bdver4"
 MACHINE_CPU = xop avx2 avx sse42 sse41 ssse3 sse4a sse3 sse2 sse mmx k6 k5 i586
@@ -199,15 +183,18 @@ MACHINE_CPU = 3dnow mmx k6 k5 i586
 MACHINE_CPU = mmx k6 k5 i586
 .  elif ${CPUTYPE} == "k5"
 MACHINE_CPU = k5 i586
-.  elif ${CPUTYPE} == "cannonlake" || ${CPUTYPE} == "knm" || \
-    ${CPUTYPE} == "skylake-avx512" || ${CPUTYPE} == "knl"
+.  elif ${CPUTYPE} == "tigerlake" || ${CPUTYPE} == "cooperlake" || \
+    ${CPUTYPE} == "cascadelake" || ${CPUTYPE} == "icelake-server" || \
+    ${CPUTYPE} == "icelake-client" || ${CPUTYPE} == "cannonlake" || \
+    ${CPUTYPE} == "knm" || ${CPUTYPE} == "skylake-avx512" || ${CPUTYPE} == "knl"
 MACHINE_CPU = avx512 avx2 avx sse42 sse41 ssse3 sse3 sse2 sse i686 mmx i586
 .  elif ${CPUTYPE} == "skylake" || ${CPUTYPE} == "broadwell" || \
     ${CPUTYPE} == "haswell"
 MACHINE_CPU = avx2 avx sse42 sse41 ssse3 sse3 sse2 sse i686 mmx i586
 .  elif ${CPUTYPE} == "ivybridge" || ${CPUTYPE} == "sandybridge"
 MACHINE_CPU = avx sse42 sse41 ssse3 sse3 sse2 sse i686 mmx i586
-.  elif ${CPUTYPE} == "goldmont" || ${CPUTYPE} == "westmere" || \
+.  elif ${CPUTYPE} == "tremont" || ${CPUTYPE} == "goldmont-plus" || \
+    ${CPUTYPE} == "goldmont" || ${CPUTYPE} == "westmere" || \
     ${CPUTYPE} == "nehalem" || ${CPUTYPE} == "silvermont"
 MACHINE_CPU = sse42 sse41 ssse3 sse3 sse2 sse i686 mmx i586
 .  elif ${CPUTYPE} == "penryn"
@@ -243,7 +230,7 @@ MACHINE_CPU = mmx
 MACHINE_CPU += i486
 ########## amd64
 . elif ${MACHINE_CPUARCH} == "amd64"
-.  if ${CPUTYPE} == "znver1"
+.  if ${CPUTYPE} == "znver2" || ${CPUTYPE} == "znver1"
 MACHINE_CPU = avx2 avx sse42 sse41 ssse3 sse4a sse3
 .  elif ${CPUTYPE} == "bdver4"
 MACHINE_CPU = xop avx2 avx sse42 sse41 ssse3 sse4a sse3
@@ -262,15 +249,18 @@ MACHINE_CPU = k8 3dnow sse3
 .  elif ${CPUTYPE} == "opteron" || ${CPUTYPE} == "athlon64" || \
     ${CPUTYPE} == "athlon-fx" || ${CPUTYPE} == "k8"
 MACHINE_CPU = k8 3dnow
-.  elif ${CPUTYPE} == "cannonlake" || ${CPUTYPE} == "knm" || \
-    ${CPUTYPE} == "skylake-avx512" || ${CPUTYPE} == "knl"
+.  elif ${CPUTYPE} == "tigerlake" || ${CPUTYPE} == "cooperlake" || \
+    ${CPUTYPE} == "cascadelake" || ${CPUTYPE} == "icelake-server" || \
+    ${CPUTYPE} == "icelake-client" || ${CPUTYPE} == "cannonlake" || \
+    ${CPUTYPE} == "knm" || ${CPUTYPE} == "skylake-avx512" || ${CPUTYPE} == "knl"
 MACHINE_CPU = avx512 avx2 avx sse42 sse41 ssse3 sse3
 .  elif ${CPUTYPE} == "skylake" || ${CPUTYPE} == "broadwell" || \
     ${CPUTYPE} == "haswell"
 MACHINE_CPU = avx2 avx sse42 sse41 ssse3 sse3
 .  elif ${CPUTYPE} == "ivybridge" || ${CPUTYPE} == "sandybridge"
 MACHINE_CPU = avx sse42 sse41 ssse3 sse3
-.  elif ${CPUTYPE} == "goldmont" || ${CPUTYPE} == "westmere" || \
+.  elif ${CPUTYPE} == "tremont" || ${CPUTYPE} == "goldmont-plus" || \
+    ${CPUTYPE} == "goldmont" || ${CPUTYPE} == "westmere" || \
     ${CPUTYPE} == "nehalem" || ${CPUTYPE} == "silvermont"
 MACHINE_CPU = sse42 sse41 ssse3 sse3
 .  elif ${CPUTYPE} == "penryn"
@@ -292,41 +282,25 @@ MACHINE_CPU = booke softfp
 ########## riscv
 . elif ${MACHINE_CPUARCH} == "riscv"
 MACHINE_CPU = riscv
-########## sparc64
-. elif ${MACHINE_ARCH} == "sparc64"
-.  if ${CPUTYPE} == "v9"
-MACHINE_CPU = v9
-.  elif ${CPUTYPE} == "ultrasparc"
-MACHINE_CPU = v9 ultrasparc
-.  elif ${CPUTYPE} == "ultrasparc3"
-MACHINE_CPU = v9 ultrasparc ultrasparc3
-.  endif
 . endif
 .endif
 
 .if ${MACHINE_CPUARCH} == "mips"
 CFLAGS += -G0
+AFLAGS+= -${MIPS_ENDIAN} -mabi=${MIPS_ABI}
+CFLAGS+= -${MIPS_ENDIAN} -mabi=${MIPS_ABI}
+LDFLAGS+= -${MIPS_ENDIAN} -mabi=${MIPS_ABI}
 . if ${MACHINE_ARCH:Mmips*el*} != ""
-AFLAGS += -EL
-CFLAGS += -EL
-LDFLAGS += -EL
+MIPS_ENDIAN=	EL
 . else
-AFLAGS += -EB
-CFLAGS += -EB
-LDFLAGS += -EB
+MIPS_ENDIAN=	EB
 . endif
 . if ${MACHINE_ARCH:Mmips64*} != ""
-AFLAGS+= -mabi=64
-CFLAGS+= -mabi=64
-LDFLAGS+= -mabi=64
+MIPS_ABI?=	64
 . elif ${MACHINE_ARCH:Mmipsn32*} != ""
-AFLAGS+= -mabi=n32
-CFLAGS+= -mabi=n32
-LDFLAGS+= -mabi=n32
+MIPS_ABI?=	n32
 . else
-AFLAGS+= -mabi=32
-CFLAGS+= -mabi=32
-LDFLAGS+= -mabi=32
+MIPS_ABI?=	32
 . endif
 . if ${MACHINE_ARCH:Mmips*hf}
 CFLAGS += -mhard-float
@@ -354,15 +328,24 @@ MACHINE_CPU += softfp
 # when CPUTYPE has 'soft' in it, we use the soft-float ABI to allow building of
 # soft-float ABI libraries. In this case, we have to add the -mfloat-abi=softfp
 # to force that.
-.if ${MACHINE_ARCH:Marmv[67]*} && defined(CPUTYPE) && ${CPUTYPE:M*soft*} != ""
+. if ${MACHINE_ARCH:Marmv[67]*} && defined(CPUTYPE) && ${CPUTYPE:M*soft*} != ""
 # Needs to be CFLAGS not _CPUCFLAGS because it's needed for the ABI
-# not a nice optimization.
+# not a nice optimization. Please note: softfp ABI uses hardware floating
+# instructions, but passes arguments to function calls in integer regsiters.
+# -mfloat-abi=soft is full software floating point, but is not currently
+# supported. softfp support in FreeBSD may disappear in FreeBSD 13.0 since
+# it was a transition tool from FreeBSD 10 to 11 and is a bit of an odd duck.
 CFLAGS += -mfloat-abi=softfp
+. endif
 .endif
+
+.if ${MACHINE_ARCH} == "powerpc" || ${MACHINE_ARCH} == "powerpcspe"
+LDFLAGS.bfd+= -Wl,--secure-plt
 .endif
 
 .if ${MACHINE_ARCH} == "powerpcspe"
-CFLAGS += -mcpu=8548 -Wa,-me500 -mspe=yes -mabi=spe -mfloat-gprs=double
+CFLAGS += -mcpu=8548 -mspe
+CFLAGS.gcc+= -mabi=spe -mfloat-gprs=double -Wa,-me500
 .endif
 
 .if ${MACHINE_CPUARCH} == "riscv"
@@ -404,3 +387,4 @@ CFLAGS_NO_SIMD += ${CFLAGS_NO_SIMD.${COMPILER_TYPE}}
 # These come from make.conf or the command line or the environment.
 CFLAGS += ${CFLAGS.${MACHINE_ARCH}}
 CXXFLAGS += ${CXXFLAGS.${MACHINE_ARCH}}
+

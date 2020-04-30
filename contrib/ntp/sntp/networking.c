@@ -26,7 +26,7 @@ sendpkt (
 	cc = sendto(rsock, (void *)pkt, len, 0, &dest->sa, 
 		    SOCKLEN(dest));
 	if (cc == SOCKET_ERROR) {
-		msyslog(LOG_ERR, "Send to %s failed, %m",
+		msyslog(LOG_ERR, "sendpkt: sendto(%s) failed: %m",
 			sptoa(dest));
 		return FALSE;
 	}
@@ -78,7 +78,8 @@ skip_efields(
 	
 	u_int nlen;	/* next extension length */
 	while ((tail - head) > 6) {
-		nlen = ntohl(*head++) & 0xffff;
+		nlen = ntohl(*head) & 0xffff;
+		++head;
 		nlen = (nlen + 3) >> 2;
 		if (nlen > (u_int)(tail - head) || nlen < 4)
 			return NULL;	/* Blooper! Inconsistent! */

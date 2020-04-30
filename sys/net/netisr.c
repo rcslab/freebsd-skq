@@ -127,7 +127,8 @@ static struct rmlock	netisr_rmlock;
 #define	NETISR_WUNLOCK()	rm_wunlock(&netisr_rmlock)
 /* #define	NETISR_LOCKING */
 
-static SYSCTL_NODE(_net, OID_AUTO, isr, CTLFLAG_RW, 0, "netisr");
+static SYSCTL_NODE(_net, OID_AUTO, isr, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "netisr");
 
 /*-
  * Three global direct dispatch policies are supported:
@@ -152,7 +153,8 @@ static SYSCTL_NODE(_net, OID_AUTO, isr, CTLFLAG_RW, 0, "netisr");
 #define	NETISR_DISPATCH_POLICY_MAXSTR	20 /* Used for temporary buffers. */
 static u_int	netisr_dispatch_policy = NETISR_DISPATCH_POLICY_DEFAULT;
 static int	sysctl_netisr_dispatch_policy(SYSCTL_HANDLER_ARGS);
-SYSCTL_PROC(_net_isr, OID_AUTO, dispatch, CTLTYPE_STRING | CTLFLAG_RWTUN,
+SYSCTL_PROC(_net_isr, OID_AUTO, dispatch,
+    CTLTYPE_STRING | CTLFLAG_RWTUN | CTLFLAG_NEEDGIANT,
     0, 0, sysctl_netisr_dispatch_policy, "A",
     "netisr dispatch policy");
 
@@ -839,6 +841,7 @@ netisr_select_cpuid(struct netisr_proto *npp, u_int dispatch_policy,
 	    ("%s: invalid policy %u for %s", __func__, npp->np_policy,
 	    npp->np_name));
 
+	MPASS((m->m_pkthdr.csum_flags & CSUM_SND_TAG) == 0);
 	ifp = m->m_pkthdr.rcvif;
 	if (ifp != NULL)
 		*cpuidp = nws_array[(ifp->if_index + source) % nws_count];
@@ -1055,6 +1058,8 @@ netisr_queue_src(u_int proto, uintptr_t source, struct mbuf *m)
 	if (m != NULL) {
 		KASSERT(!CPU_ABSENT(cpuid), ("%s: CPU %u absent", __func__,
 		    cpuid));
+		VNET_ASSERT(m->m_pkthdr.rcvif != NULL,
+		    ("%s:%d rcvif == NULL: m=%p", __func__, __LINE__, m));
 		error = netisr_queue_internal(proto, m, cpuid);
 	} else
 		error = ENOBUFS;
@@ -1087,6 +1092,7 @@ netisr_dispatch_src(u_int proto, uintptr_t source, struct mbuf *m)
 	int dosignal, error;
 	u_int cpuid, dispatch_policy;
 
+	NET_EPOCH_ASSERT();
 	KASSERT(proto < NETISR_MAXPROT,
 	    ("%s: invalid proto %u", __func__, proto));
 #ifdef NETISR_LOCKING
@@ -1243,7 +1249,7 @@ netisr_start_swi(u_int cpuid, struct pcpu *pc)
 	nwsp->nws_cpu = cpuid;
 	snprintf(swiname, sizeof(swiname), "netisr %u", cpuid);
 	error = swi_add(&nwsp->nws_intr_event, swiname, swi_net, nwsp,
-	    SWI_NET, INTR_MPSAFE, &nwsp->nws_swi_cookie);
+	    SWI_NET, INTR_TYPE_NET | INTR_MPSAFE, &nwsp->nws_swi_cookie);
 	if (error)
 		panic("%s: swi_add %d", __func__, error);
 	pc->pc_netisr = nwsp->nws_intr_event;

@@ -32,6 +32,7 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
+#include "opt_kern_tls.h"
 #include "opt_ratelimit.h"
 
 #include <sys/param.h>
@@ -196,7 +197,8 @@ static void	lacp_dprintf(const struct lacp_port *, const char *, ...)
 
 VNET_DEFINE_STATIC(int, lacp_debug);
 #define	V_lacp_debug	VNET(lacp_debug)
-SYSCTL_NODE(_net_link_lagg, OID_AUTO, lacp, CTLFLAG_RD, 0, "ieee802.3ad");
+SYSCTL_NODE(_net_link_lagg, OID_AUTO, lacp, CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
+    "ieee802.3ad");
 SYSCTL_INT(_net_link_lagg_lacp, OID_AUTO, debug, CTLFLAG_RWTUN | CTLFLAG_VNET,
     &VNET_NAME(lacp_debug), 0, "Enable LACP debug logging (1=debug, 2=trace)");
 
@@ -830,12 +832,13 @@ lacp_stop(struct lagg_softc *sc)
 }
 
 struct lagg_port *
-lacp_select_tx_port(struct lagg_softc *sc, struct mbuf *m)
+lacp_select_tx_port_by_hash(struct lagg_softc *sc, uint32_t hash, uint8_t numa_domain)
 {
 	struct lacp_softc *lsc = LACP_SOFTC(sc);
 	struct lacp_portmap *pm;
 	struct lacp_port *lp;
-	uint32_t hash;
+	struct lacp_port **map;
+	int count;
 
 	if (__predict_false(lsc->lsc_suppress_distributing)) {
 		LACP_DPRINTF((NULL, "%s: waiting transit\n", __func__));
@@ -848,13 +851,26 @@ lacp_select_tx_port(struct lagg_softc *sc, struct mbuf *m)
 		return (NULL);
 	}
 
-	if ((sc->sc_opts & LAGG_OPT_USE_FLOWID) &&
-	    M_HASHTYPE_GET(m) != M_HASHTYPE_NONE)
-		hash = m->m_pkthdr.flowid >> sc->flowid_shift;
-	else
-		hash = m_ether_tcpip_hash(sc->sc_flags, m, lsc->lsc_hashkey);
-	hash %= pm->pm_count;
-	lp = pm->pm_map[hash];
+#ifdef NUMA
+	if ((sc->sc_opts & LAGG_OPT_USE_NUMA) &&
+	    pm->pm_num_dom > 1 && numa_domain < MAXMEMDOM) {
+		count = pm->pm_numa[numa_domain].count;
+		if (count > 0) {
+			map = pm->pm_numa[numa_domain].map;
+		} else {
+			/* No ports on this domain; use global hash. */
+			map = pm->pm_map;
+			count = pm->pm_count;
+		}
+	} else
+#endif
+	{
+		map = pm->pm_map;
+		count = pm->pm_count;
+	}
+
+	hash %= count;
+	lp = map[hash];
 
 	KASSERT((lp->lp_state & LACP_STATE_DISTRIBUTING) != 0,
 	    ("aggregated port is not distributing"));
@@ -862,33 +878,22 @@ lacp_select_tx_port(struct lagg_softc *sc, struct mbuf *m)
 	return (lp->lp_lagg);
 }
 
-#ifdef RATELIMIT
 struct lagg_port *
-lacp_select_tx_port_by_hash(struct lagg_softc *sc, uint32_t flowid)
+lacp_select_tx_port(struct lagg_softc *sc, struct mbuf *m)
 {
 	struct lacp_softc *lsc = LACP_SOFTC(sc);
-	struct lacp_portmap *pm;
-	struct lacp_port *lp;
 	uint32_t hash;
+	uint8_t numa_domain;
 
-	if (__predict_false(lsc->lsc_suppress_distributing)) {
-		LACP_DPRINTF((NULL, "%s: waiting transit\n", __func__));
-		return (NULL);
-	}
+	if ((sc->sc_opts & LAGG_OPT_USE_FLOWID) &&
+	    M_HASHTYPE_GET(m) != M_HASHTYPE_NONE)
+		hash = m->m_pkthdr.flowid >> sc->flowid_shift;
+	else
+		hash = m_ether_tcpip_hash(sc->sc_flags, m, lsc->lsc_hashkey);
 
-	pm = &lsc->lsc_pmap[lsc->lsc_activemap];
-	if (pm->pm_count == 0) {
-		LACP_DPRINTF((NULL, "%s: no active aggregator\n", __func__));
-		return (NULL);
-	}
-
-	hash = flowid >> sc->flowid_shift;
-	hash %= pm->pm_count;
-	lp = pm->pm_map[hash];
-
-	return (lp->lp_lagg);
+	numa_domain = m->m_pkthdr.numa_domain;
+	return (lacp_select_tx_port_by_hash(sc, hash, numa_domain));
 }
-#endif
 
 /*
  * lacp_suppress_distributing: drop transmit packets for a while
@@ -1044,6 +1049,10 @@ lacp_update_portmap(struct lacp_softc *lsc)
 	uint64_t speed;
 	u_int newmap;
 	int i;
+#ifdef NUMA
+	int count;
+	uint8_t domain;
+#endif
 
 	newmap = lsc->lsc_activemap == 0 ? 1 : 0;
 	p = &lsc->lsc_pmap[newmap];
@@ -1054,9 +1063,25 @@ lacp_update_portmap(struct lacp_softc *lsc)
 	if (la != NULL && la->la_nports > 0) {
 		p->pm_count = la->la_nports;
 		i = 0;
-		TAILQ_FOREACH(lp, &la->la_ports, lp_dist_q)
+		TAILQ_FOREACH(lp, &la->la_ports, lp_dist_q) {
 			p->pm_map[i++] = lp;
+#ifdef NUMA
+			domain = lp->lp_ifp->if_numa_domain;
+			if (domain >= MAXMEMDOM)
+				continue;
+			count = p->pm_numa[domain].count;
+			p->pm_numa[domain].map[count] = lp;
+			p->pm_numa[domain].count++;
+#endif
+		}
 		KASSERT(i == p->pm_count, ("Invalid port count"));
+
+#ifdef NUMA
+		for (i = 0; i < MAXMEMDOM; i++) {
+			if (p->pm_numa[i].count != 0)
+				p->pm_num_dom++;
+		}
+#endif
 		speed = lacp_aggregator_bandwidth(la);
 	}
 	sc->sc_ifp->if_baudrate = speed;
@@ -1153,6 +1178,7 @@ lacp_compose_key(struct lacp_port *lp)
 		case IFM_50G_PCIE:
 		case IFM_50G_CR2:
 		case IFM_50G_KR2:
+		case IFM_50G_KR4:
 		case IFM_50G_SR2:
 		case IFM_50G_LR2:
 		case IFM_50G_LAUI2_AC:

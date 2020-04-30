@@ -31,6 +31,7 @@
 __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
+#include <sys/eventhandler.h>
 #include <sys/systm.h>
 #include <sys/queue.h>
 #include <sys/systm.h>
@@ -83,7 +84,8 @@ __FBSDID("$FreeBSD$");
 #ifdef	USB_DEBUG
 static int usie_debug = 0;
 
-static SYSCTL_NODE(_hw_usb, OID_AUTO, usie, CTLFLAG_RW, 0, "sierra USB modem");
+static SYSCTL_NODE(_hw_usb, OID_AUTO, usie, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "sierra USB modem");
 SYSCTL_INT(_hw_usb_usie, OID_AUTO, debug, CTLFLAG_RWTUN, &usie_debug, 0,
     "usie debug level");
 #endif
@@ -772,6 +774,7 @@ tr_setup:
 static void
 usie_if_rx_callback(struct usb_xfer *xfer, usb_error_t error)
 {
+	struct epoch_tracker et;
 	struct usie_softc *sc = usbd_xfer_softc(xfer);
 	struct ifnet *ifp = sc->sc_ifp;
 	struct mbuf *m0;
@@ -851,6 +854,7 @@ tr_setup:
 	err = pkt = 0;
 
 	/* HW can aggregate multiple frames in a single USB xfer */
+	NET_EPOCH_ENTER(et);
 	for (;;) {
 		rxd = mtod(m, struct usie_desc *);
 
@@ -917,6 +921,7 @@ tr_setup:
 		m->m_data += diff;
 		m->m_pkthdr.len = (m->m_len -= diff);
 	}
+	NET_EPOCH_EXIT(et);
 
 	mtx_lock(&sc->sc_mtx);
 

@@ -188,6 +188,7 @@ DIRDEPS+= \
 	usr.bin/dirname \
 	usr.bin/dpv \
 	usr.bin/drill \
+	usr.bin/dtc \
 	usr.bin/du \
 	usr.bin/ee \
 	usr.bin/elf2aout \
@@ -443,6 +444,7 @@ DIRDEPS+= \
 	usr.sbin/bluetooth/hccontrol \
 	usr.sbin/bluetooth/hcsecd \
 	usr.sbin/bluetooth/hcseriald \
+	usr.sbin/bluetooth/iwmbtfw \
 	usr.sbin/bluetooth/l2control \
 	usr.sbin/bluetooth/l2ping \
 	usr.sbin/bluetooth/rfcomm_pppd \
@@ -651,13 +653,6 @@ DIRDEPS+= \
 	usr.sbin/ntp/ntpq \
 	usr.sbin/ntp/ntptime \
 	usr.sbin/ntp/sntp \
-	usr.sbin/pc-sysinstall/backend \
-	usr.sbin/pc-sysinstall/backend-partmanager \
-	usr.sbin/pc-sysinstall/backend-query \
-	usr.sbin/pc-sysinstall/conf \
-	usr.sbin/pc-sysinstall/doc \
-	usr.sbin/pc-sysinstall/examples \
-	usr.sbin/pc-sysinstall/pc-sysinstall \
 	usr.sbin/pciconf \
 	usr.sbin/periodic \
 	usr.sbin/pkg \
@@ -772,15 +767,6 @@ DIRDEPS+= \
 DIRDEPS+=	usr.sbin/efidp
 .endif
 
-.if ${MK_NAND} != "no"
-DIRDEPS+= \
-	sbin/nandfs \
-	sbin/newfs_nandfs \
-	usr.sbin/nandsim \
-	usr.sbin/nandtool \
-
-.endif
-
 DIRDEPS.amd64= \
 	sbin/bsdlabel \
 	sbin/fdisk \
@@ -827,7 +813,6 @@ DIRDEPS.i386= \
 	usr.sbin/hyperv/tools/kvp \
 	usr.sbin/hyperv/tools/vss \
 	usr.sbin/kgmon \
-	usr.sbin/kgzip \
 	usr.sbin/lptcontrol \
 	usr.sbin/mptable \
 	usr.sbin/ndiscvt \
@@ -869,10 +854,6 @@ DIRDEPS+= usr.sbin/cxgbetool
 
 .if ${MK_MLX5TOOL} != "no"
 DIRDEPS+= usr.sbin/mlx5tool
-.endif
-
-.if ${MK_GPL_DTC} != "yes"
-DIRDEPS+= usr.bin/dtc
 .endif
 
 DIRDEPS+= ${DIRDEPS.${MACHINE}:U}

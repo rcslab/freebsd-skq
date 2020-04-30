@@ -3031,6 +3031,7 @@ static void
 iwn_rx_done(struct iwn_softc *sc, struct iwn_rx_desc *desc,
     struct iwn_rx_data *data)
 {
+	struct epoch_tracker et;
 	struct iwn_ops *ops = &sc->ops;
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct iwn_rx_ring *ring = &sc->rxq;
@@ -3190,6 +3191,7 @@ iwn_rx_done(struct iwn_softc *sc, struct iwn_rx_desc *desc,
 	}
 
 	IWN_UNLOCK(sc);
+	NET_EPOCH_ENTER(et);
 
 	/* Send the frame to the 802.11 layer. */
 	if (ni != NULL) {
@@ -3201,6 +3203,7 @@ iwn_rx_done(struct iwn_softc *sc, struct iwn_rx_desc *desc,
 	} else
 		(void)ieee80211_input_all(ic, m, rssi - nf, nf);
 
+	NET_EPOCH_EXIT(et);
 	IWN_LOCK(sc);
 
 	DPRINTF(sc, IWN_DEBUG_TRACE, "->%s: end\n",__func__);
@@ -9102,18 +9105,12 @@ iwn_scan_end(struct ieee80211com *ic)
 static void
 iwn_set_channel(struct ieee80211com *ic)
 {
-	const struct ieee80211_channel *c = ic->ic_curchan;
 	struct iwn_softc *sc = ic->ic_softc;
 	int error;
 
 	DPRINTF(sc, IWN_DEBUG_TRACE, "->Doing %s\n", __func__);
 
 	IWN_LOCK(sc);
-	sc->sc_rxtap.wr_chan_freq = htole16(c->ic_freq);
-	sc->sc_rxtap.wr_chan_flags = htole16(c->ic_flags);
-	sc->sc_txtap.wt_chan_freq = htole16(c->ic_freq);
-	sc->sc_txtap.wt_chan_flags = htole16(c->ic_flags);
-
 	/*
 	 * Only need to set the channel in Monitor mode. AP scanning and auth
 	 * are already taken care of by their respective firmware commands.

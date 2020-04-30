@@ -13,6 +13,7 @@
 #include "exynos4412.dtsi"
 #include "exynos4412-ppmu-common.dtsi"
 #include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
 #include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/clock/maxim,max77686.h>
 #include <dt-bindings/pinctrl/samsung.h>
@@ -90,6 +91,15 @@
 		regulator-max-microvolt = <1800000>;
 		gpio = <&gpl0 4 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
+	};
+
+	touchkey_reg: voltage-regulator-6 {
+		compatible = "regulator-fixed";
+		regulator-name = "LED_VDD_3.3V";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		enable-active-high;
+		status = "disabled";
 	};
 
 	gpio-keys {
@@ -197,6 +207,25 @@
 		};
 	};
 
+	i2c-gpio-4 {
+		compatible = "i2c-gpio";
+		sda-gpios = <&gpl0 2 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&gpl0 1 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <2>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		touchkey@20 {
+			compatible = "cypress,midas-touchkey";
+			reg = <0x20>;
+			vdd-supply = <&touchkey_reg>;
+			vcc-supply = <&ldo5_reg>;
+			interrupt-parent = <&gpj0>;
+			interrupts = <3 IRQ_TYPE_EDGE_FALLING>;
+			linux,keycodes = <KEY_BACK KEY_MENU>;
+		};
+	};
+
 	i2c-mhl {
 		compatible = "i2c-gpio";
 		gpios = <&gpf0 4 GPIO_ACTIVE_HIGH>, <&gpf0 6 GPIO_ACTIVE_HIGH>;
@@ -267,11 +296,15 @@
 			cooling-maps {
 				map0 {
 				     /* Corresponds to 800MHz at freq_table */
-				     cooling-device = <&cpu0 7 7>;
+				     cooling-device = <&cpu0 7 7>, <&cpu1 7 7>,
+						      <&cpu2 7 7>, <&cpu3 7 7>;
 				};
 				map1 {
 				     /* Corresponds to 200MHz at freq_table */
-				     cooling-device = <&cpu0 13 13>;
+				     cooling-device = <&cpu0 13 13>,
+						      <&cpu1 13 13>,
+						      <&cpu2 13 13>,
+						      <&cpu3 13 13>;
 			       };
 		       };
 		};
@@ -446,6 +479,11 @@
 };
 
 &fimd {
+	status = "okay";
+};
+
+&gpu {
+	mali-supply = <&buck4_reg>;
 	status = "okay";
 };
 

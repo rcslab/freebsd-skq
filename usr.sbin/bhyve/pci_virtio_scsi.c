@@ -61,6 +61,7 @@ __FBSDID("$FreeBSD$");
 #include <camlib.h>
 
 #include "bhyverun.h"
+#include "debug.h"
 #include "pci_emul.h"
 #include "virtio.h"
 #include "iov.h"
@@ -86,8 +87,8 @@ __FBSDID("$FreeBSD$");
 #define	VIRTIO_SCSI_F_CHANGE	(1 << 2)
 
 static int pci_vtscsi_debug = 0;
-#define	DPRINTF(params) if (pci_vtscsi_debug) printf params
-#define	WPRINTF(params) printf params
+#define	DPRINTF(params) if (pci_vtscsi_debug) PRINTLN params
+#define	WPRINTF(params) PRINTLN params
 
 struct pci_vtscsi_config {
 	uint32_t num_queues;
@@ -287,7 +288,7 @@ pci_vtscsi_proc(void *arg)
 		vq_endchains(q->vsq_vq, 0);
 		pthread_mutex_unlock(&q->vsq_qmtx);
 
-		DPRINTF(("virtio-scsi: request <idx=%d> completed\n",
+		DPRINTF(("virtio-scsi: request <idx=%d> completed",
 		    req->vsr_idx));
 		free(req);
 	}
@@ -303,13 +304,14 @@ pci_vtscsi_reset(void *vsc)
 
 	sc = vsc;
 
-	DPRINTF(("vtscsi: device reset requested\n"));
+	DPRINTF(("vtscsi: device reset requested"));
 	vi_reset_dev(&sc->vss_vs);
 
 	/* initialize config structure */
 	sc->vss_config = (struct pci_vtscsi_config){
 		.num_queues = VTSCSI_REQUESTQ,
-		.seg_max = VTSCSI_MAXSEG,
+		/* Leave room for the request and the response. */
+		.seg_max = VTSCSI_MAXSEG - 2,
 		.max_sectors = 2,
 		.cmd_per_lun = 1,
 		.event_info_size = sizeof(struct pci_vtscsi_event),
@@ -437,7 +439,7 @@ pci_vtscsi_tmf_handle(struct pci_vtscsi_softc *sc,
 
 	err = ioctl(sc->vss_ctl_fd, CTL_IO, io);
 	if (err != 0)
-		WPRINTF(("CTL_IO: err=%d (%s)\n", errno, strerror(errno)));
+		WPRINTF(("CTL_IO: err=%d (%s)", errno, strerror(errno)));
 
 	tmf->response = io->taskio.task_status;
 	ctl_scsi_free_io(io);
@@ -464,7 +466,7 @@ pci_vtscsi_request_handle(struct pci_vtscsi_queue *q, struct iovec *iov_in,
 	int data_niov_in, data_niov_out;
 	void *ext_data_ptr = NULL;
 	uint32_t ext_data_len = 0, ext_sg_entries = 0;
-	int err;
+	int err, nxferred;
 
 	seek_iov(iov_in, niov_in, data_iov_in, &data_niov_in,
 	    VTSCSI_IN_HEADER_LEN(sc));
@@ -530,7 +532,7 @@ pci_vtscsi_request_handle(struct pci_vtscsi_queue *q, struct iovec *iov_in,
 
 	err = ioctl(sc->vss_ctl_fd, CTL_IO, io);
 	if (err != 0) {
-		WPRINTF(("CTL_IO: err=%d (%s)\n", errno, strerror(errno)));
+		WPRINTF(("CTL_IO: err=%d (%s)", errno, strerror(errno)));
 		cmd_wr->response = VIRTIO_SCSI_S_FAILURE;
 	} else {
 		cmd_wr->sense_len = MIN(io->scsiio.sense_len,
@@ -543,10 +545,11 @@ pci_vtscsi_request_handle(struct pci_vtscsi_queue *q, struct iovec *iov_in,
 	}
 
 	buf_to_iov(cmd_wr, VTSCSI_OUT_HEADER_LEN(sc), iov_out, niov_out, 0);
+	nxferred = VTSCSI_OUT_HEADER_LEN(sc) + io->scsiio.ext_data_filled;
 	free(cmd_rd);
 	free(cmd_wr);
 	ctl_scsi_free_io(io);
-	return (VTSCSI_OUT_HEADER_LEN(sc) + io->scsiio.ext_data_filled);
+	return (nxferred);
 }
 
 static void
@@ -581,7 +584,7 @@ static void
 pci_vtscsi_eventq_notify(void *vsc, struct vqueue_info *vq)
 {
 
-	vq->vq_used->vu_flags |= VRING_USED_F_NO_NOTIFY;
+	vq_kick_disable(vq);
 }
 
 static void
@@ -625,7 +628,7 @@ pci_vtscsi_requestq_notify(void *vsc, struct vqueue_info *vq)
 		pthread_cond_signal(&q->vsq_cv);
 		pthread_mutex_unlock(&q->vsq_mtx);
 
-		DPRINTF(("virtio-scsi: request <idx=%d> enqueued\n", idx));
+		DPRINTF(("virtio-scsi: request <idx=%d> enqueued", idx));
 	}
 }
 
@@ -634,7 +637,7 @@ pci_vtscsi_init_queue(struct pci_vtscsi_softc *sc,
     struct pci_vtscsi_queue *queue, int num)
 {
 	struct pci_vtscsi_worker *worker;
-	char threadname[16];
+	char tname[MAXCOMLEN + 1];
 	int i;
 
 	queue->vsq_sc = sc;
@@ -653,8 +656,8 @@ pci_vtscsi_init_queue(struct pci_vtscsi_softc *sc,
 		pthread_create(&worker->vsw_thread, NULL, &pci_vtscsi_proc,
 		    (void *)worker);
 
-		sprintf(threadname, "virtio-scsi:%d-%d", num, i);
-		pthread_set_name_np(worker->vsw_thread, threadname);
+		snprintf(tname, sizeof(tname), "vtscsi:%d-%d", num, i);
+		pthread_set_name_np(worker->vsw_thread, tname);
 		LIST_INSERT_HEAD(&queue->vsq_workers, worker, vsw_link);
 	}
 
@@ -681,7 +684,7 @@ pci_vtscsi_init(struct vmctx *ctx, struct pci_devinst *pi, char *opts)
 		} else if (strcmp(optname, "iid") == 0 && opt != NULL) {
 			sc->vss_iid = strtoul(opt, NULL, 10);
 		} else {
-			fprintf(stderr, "Invalid option %s\n", optname);
+			EPRINTLN("Invalid option %s", optname);
 			free(sc);
 			return (1);
 		}
@@ -690,7 +693,7 @@ pci_vtscsi_init(struct vmctx *ctx, struct pci_devinst *pi, char *opts)
 
 	sc->vss_ctl_fd = open(devname, O_RDWR);
 	if (sc->vss_ctl_fd < 0) {
-		WPRINTF(("cannot open %s: %s\n", devname, strerror(errno)));
+		WPRINTF(("cannot open %s: %s", devname, strerror(errno)));
 		free(sc);
 		return (1);
 	}

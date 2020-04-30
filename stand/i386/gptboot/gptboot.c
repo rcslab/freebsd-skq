@@ -232,7 +232,7 @@ static int
 gptinit(void)
 {
 
-	if (gptread(&freebsd_ufs_uuid, &gdsk.dsk, dmadat->secbuf) == -1) {
+	if (gptread(&gdsk.dsk, dmadat->secbuf) == -1) {
 		printf("%s: unable to load GPT\n", BOOTPROG);
 		return (-1);
 	}
@@ -574,10 +574,12 @@ parse_cmds(char *cmdstr, int *dskupdated)
 				if (arg[1] != 'p' || gdsk.dsk.unit > 9)
 					return (-1);
 				arg += 2;
-				gdsk.dsk.part = *arg - '0';
-				if (gdsk.dsk.part < 1 || gdsk.dsk.part > 9)
+				j = 0;
+				while (*arg >= '0' && *arg <= '9')
+					j = j * 10 + *arg++ - '0';
+				gdsk.dsk.part = j;
+				if (gdsk.dsk.part < 1 || gdsk.dsk.part > 128)
 					return (-1);
-				arg++;
 				if (arg[0] != ')')
 					return (-1);
 				arg++;

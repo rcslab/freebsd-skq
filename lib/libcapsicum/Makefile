@@ -1,13 +1,12 @@
 # $FreeBSD$
 
-PACKAGE=lib${LIB}
-
 INCS=	capsicum_helpers.h
 
 MAN+=	capsicum_helpers.3
 
 MLINKS+=capsicum_helpers.3 caph_enter.3
 MLINKS+=capsicum_helpers.3 caph_enter_casper.3
+MLINKS+=capsicum_helpers.3 caph_stream_rights.3
 MLINKS+=capsicum_helpers.3 caph_rights_limit.3
 MLINKS+=capsicum_helpers.3 caph_fcntls_limit.3
 MLINKS+=capsicum_helpers.3 caph_ioctls_limit.3

@@ -66,7 +66,7 @@ SET_DECLARE(compressors, struct compressor_methods);
 
 #ifdef GZIO
 
-#include <sys/zutil.h>
+#include <contrib/zlib/zutil.h>
 
 struct gz_stream {
 	uint8_t		*gz_buffer;	/* output buffer */
@@ -117,6 +117,13 @@ gz_init(size_t maxiosize, int level)
 	s->gz_stream.next_in = Z_NULL;
 	s->gz_stream.avail_in = 0;
 
+	if (level != Z_DEFAULT_COMPRESSION) {
+		if (level < Z_BEST_SPEED)
+			level = Z_BEST_SPEED;
+		else if (level > Z_BEST_COMPRESSION)
+			level = Z_BEST_COMPRESSION;
+	}
+
 	error = deflateInit2(&s->gz_stream, level, Z_DEFLATED, -MAX_WBITS,
 	    DEF_MEM_LEVEL, Z_DEFAULT_STRATEGY);
 	if (error != 0)
@@ -140,7 +147,7 @@ gz_reset(void *stream)
 
 	s = stream;
 	s->gz_off = 0;
-	s->gz_crc = ~0U;
+	s->gz_crc = crc32(0L, Z_NULL, 0);
 
 	(void)deflateReset(&s->gz_stream);
 	s->gz_stream.avail_out = s->gz_bufsz;
@@ -172,9 +179,8 @@ gz_write(void *stream, void *data, size_t len, compressor_cb_t cb,
 	if (len > 0) {
 		s->gz_stream.avail_in = len;
 		s->gz_stream.next_in = data;
-		s->gz_crc = crc32_raw(data, len, s->gz_crc);
-	} else
-		s->gz_crc ^= ~0U;
+		s->gz_crc = crc32(s->gz_crc, data, len);
+	}
 
 	error = 0;
 	do {

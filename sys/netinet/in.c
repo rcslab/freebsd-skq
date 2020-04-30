@@ -139,21 +139,18 @@ in_localip(struct in_addr in)
 int
 in_ifhasaddr(struct ifnet *ifp, struct in_addr in)
 {
-	struct epoch_tracker et;
 	struct ifaddr *ifa;
 	struct in_ifaddr *ia;
 
-	NET_EPOCH_ENTER(et);
+	NET_EPOCH_ASSERT();
+
 	CK_STAILQ_FOREACH(ifa, &ifp->if_addrhead, ifa_link) {
 		if (ifa->ifa_addr->sa_family != AF_INET)
 			continue;
 		ia = (struct in_ifaddr *)ifa;
-		if (ia->ia_addr.sin_addr.s_addr == in.s_addr) {
-			NET_EPOCH_EXIT(et);
+		if (ia->ia_addr.sin_addr.s_addr == in.s_addr)
 			return (1);
-		}
 	}
-	NET_EPOCH_EXIT(et);
 
 	return (0);
 }
@@ -191,15 +188,10 @@ int
 in_canforward(struct in_addr in)
 {
 	u_long i = ntohl(in.s_addr);
-	u_long net;
 
-	if (IN_EXPERIMENTAL(i) || IN_MULTICAST(i) || IN_LINKLOCAL(i))
+	if (IN_EXPERIMENTAL(i) || IN_MULTICAST(i) || IN_LINKLOCAL(i) ||
+	    IN_ZERONET(i) || IN_LOOPBACK(i))
 		return (0);
-	if (IN_CLASSA(i)) {
-		net = i & IN_CLASSA_NET;
-		if (net == 0 || net == (IN_LOOPBACKNET << IN_CLASSA_NSHIFT))
-			return (0);
-	}
 	return (1);
 }
 
@@ -828,11 +820,11 @@ in_scrubprefix(struct in_ifaddr *target, u_int flags)
 
 	if ((target->ia_flags & IFA_ROUTE) == 0) {
 		int fibnum;
-		
+
 		fibnum = V_rt_add_addr_allfibs ? RT_ALL_FIBS :
 			target->ia_ifp->if_fib;
 		rt_addrmsg(RTM_DELETE, &target->ia_ifa, fibnum);
-	
+
 		/*
 		 * Removing address from !IFF_UP interface or
 		 * prefix which exists on other interface (along with route).
@@ -970,9 +962,10 @@ in_ifaddr_broadcast(struct in_addr in, struct in_ifaddr *ia)
 int
 in_broadcast(struct in_addr in, struct ifnet *ifp)
 {
-	struct epoch_tracker et;
 	struct ifaddr *ifa;
 	int found;
+
+	NET_EPOCH_ASSERT();
 
 	if (in.s_addr == INADDR_BROADCAST ||
 	    in.s_addr == INADDR_ANY)
@@ -984,14 +977,12 @@ in_broadcast(struct in_addr in, struct ifnet *ifp)
 	 * Look through the list of addresses for a match
 	 * with a broadcast address.
 	 */
-	NET_EPOCH_ENTER(et);
 	CK_STAILQ_FOREACH(ifa, &ifp->if_addrhead, ifa_link)
 		if (ifa->ifa_addr->sa_family == AF_INET &&
 		    in_ifaddr_broadcast(in, (struct in_ifaddr *)ifa)) {
 			found = 1;
 			break;
 		}
-	NET_EPOCH_EXIT(et);
 	return (found);
 }
 
@@ -1096,7 +1087,7 @@ in_lltable_destroy_lle(struct llentry *lle)
 {
 
 	LLE_WUNLOCK(lle);
-	epoch_call(net_epoch_preempt,  &lle->lle_epoch_ctx, in_lltable_destroy_lle_unlocked);
+	NET_EPOCH_CALL(in_lltable_destroy_lle_unlocked, &lle->lle_epoch_ctx);
 }
 
 static struct llentry *
@@ -1357,7 +1348,7 @@ in_lltable_alloc(struct lltable *llt, u_int flags, const struct sockaddr *l3addr
 		linkhdrsize = LLE_MAX_LINKHDR;
 		if (lltable_calc_llheader(ifp, AF_INET, IF_LLADDR(ifp),
 		    linkhdr, &linkhdrsize, &lladdr_off) != 0) {
-			epoch_call(net_epoch_preempt,  &lle->lle_epoch_ctx, in_lltable_destroy_lle_unlocked);
+			NET_EPOCH_CALL(in_lltable_destroy_lle_unlocked, &lle->lle_epoch_ctx);
 			return (NULL);
 		}
 		lltable_set_entry_addr(ifp, lle, linkhdr, linkhdrsize,

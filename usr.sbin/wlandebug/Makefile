@@ -2,8 +2,8 @@
 
 PROG=	wlandebug
 MAN=	wlandebug.8
-MK_PIE:=	no
 
+CFLAGS+=	-I${SRCTOP}/lib/libifconfig
 LIBADD+=	ifconfig
 
 WARNS?=	2

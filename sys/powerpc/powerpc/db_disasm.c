@@ -224,7 +224,7 @@ const struct opcode opcodes_1f[] = {
 	{ "ldx",	0xfc0007fe, 0x7c00002a, Op_D | Op_A | Op_B },
 	{ "lwzx",	0xfc0007fe, 0x7c00002e, Op_D | Op_A | Op_B },
 	{ "slw",	0xfc0007fe, 0x7c000030, Op_D | Op_A | Op_B | Op_Rc },
-	{ "cntlzw",	0xfc0007fe, 0x7c000034, Op_D | Op_A | Op_Rc },
+	{ "cntlzw",	0xfc0007fe, 0x7c000034, Op_S | Op_A | Op_Rc },
 	{ "sld",	0xfc0007fe, 0x7c000036, Op_D | Op_A | Op_B | Op_Rc },
 	{ "and",	0xfc0007fe, 0x7c000038, Op_D | Op_A | Op_B | Op_Rc },
 	{ "cmplw",	0xfc2007fe, 0x7c000040, Op_crfD | Op_A | Op_B },
@@ -425,11 +425,7 @@ const struct specialreg sprregs[] = {
 	{ 0x019, "sdr1" },
 	{ 0x01a, "srr0" },
 	{ 0x01b, "srr1" },
-#ifdef BOOKE_PPC4XX
-	{ 0x100, "usprg0" },
-#else
 	{ 0x100, "vrsave" },
-#endif
 	{ 0x110, "sprg0" },
 	{ 0x111, "sprg1" },
 	{ 0x112, "sprg2" },
@@ -496,14 +492,6 @@ const struct specialreg sprregs[] = {
 	{ 0x3db, "pit" },
 	{ 0x3de, "srr2" },
 	{ 0x3df, "srr3" },
-#ifdef BOOKE_PPC4XX
-	{ 0x3f0, "dbsr" },
-	{ 0x3f2, "dbcr0" },
-	{ 0x3f4, "iac1" },
-	{ 0x3f5, "iac2" },
-	{ 0x3f6, "dac1" },
-	{ 0x3f7, "dac2" },
-#else
 	{ 0x3f0, "hid0" },
 	{ 0x3f1, "hid1" },
 	{ 0x3f2, "iabr" },
@@ -511,7 +499,6 @@ const struct specialreg sprregs[] = {
 	{ 0x3f5, "dabr" },
 	{ 0x3f6, "msscr0" },
 	{ 0x3f7, "msscr1" },
-#endif
 	{ 0x3f9, "l2cr" },
 	{ 0x3fa, "dccr" },
 	{ 0x3fb, "iccr" },
@@ -1073,6 +1060,8 @@ db_disasm(db_addr_t loc, bool extended)
 	int class;
 	instr_t opcode;
 	opcode = *(instr_t *)(loc);
+	if (extended)
+		db_printf("|%08x| ", opcode);
 	class = opcode >> 26;
 	(opcodes_base[class])(opcode, loc);
 

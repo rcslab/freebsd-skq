@@ -57,6 +57,11 @@
 #define	LINUX_MS_REMOUNT	0x0020
 
 /*
+ * umount2 flags
+ */
+#define	LINUX_MNT_FORCE		0x0001
+
+/*
  * common open/fcntl flags
  */
 #define	LINUX_O_RDONLY		00000000
@@ -126,5 +131,19 @@
 #define	LINUX_F_WRLCK		1
 #define	LINUX_F_UNLCK		2
 #endif
+
+/*
+ * renameat2 flags
+ */
+#define	LINUX_RENAME_NOREPLACE	0x00000001
+#define	LINUX_RENAME_EXCHANGE	0x00000002
+#define	LINUX_RENAME_WHITEOUT	0x00000004
+
+/*
+ * sync_file_range flags
+ */
+#define	LINUX_SYNC_FILE_RANGE_WAIT_BEFORE	1
+#define	LINUX_SYNC_FILE_RANGE_WRITE		2
+#define	LINUX_SYNC_FILE_RANGE_WAIT_AFTER	4
 
 #endif	/* !_LINUX_FILE_H_ */

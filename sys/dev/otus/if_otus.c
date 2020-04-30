@@ -75,7 +75,8 @@ __FBSDID("$FreeBSD$");
 #include "if_otusreg.h"
 
 static int otus_debug = 0;
-static SYSCTL_NODE(_hw_usb, OID_AUTO, otus, CTLFLAG_RW, 0, "USB otus");
+static SYSCTL_NODE(_hw_usb, OID_AUTO, otus, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "USB otus");
 SYSCTL_INT(_hw_usb_otus, OID_AUTO, debug, CTLFLAG_RWTUN, &otus_debug, 0,
     "Debug level");
 #define	OTUS_DEBUG_XMIT		0x00000001
@@ -1670,8 +1671,6 @@ otus_sub_rxeof(struct otus_softc *sc, uint8_t *buf, int len, struct mbufq *rxq)
 		struct mbuf mb;
 
 		tap->wr_flags = 0;
-		tap->wr_chan_freq = htole16(ic->ic_ibss_chan->ic_freq);
-		tap->wr_chan_flags = htole16(ic->ic_ibss_chan->ic_flags);
 		tap->wr_antsignal = tail->rssi;
 		tap->wr_rate = 2;	/* In case it can't be found below. */
 		switch (tail->status & AR_RX_STATUS_MT_MASK) {
@@ -1772,6 +1771,7 @@ otus_rxeof(struct usb_xfer *xfer, struct otus_data *data, struct mbufq *rxq)
 static void
 otus_bulk_rx_callback(struct usb_xfer *xfer, usb_error_t error)
 {
+	struct epoch_tracker et;
 	struct otus_softc *sc = usbd_xfer_softc(xfer);
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct ieee80211_frame *wh;
@@ -1822,6 +1822,7 @@ tr_setup:
 		 * callback and safe to unlock.
 		 */
 		OTUS_UNLOCK(sc);
+		NET_EPOCH_ENTER(et);
 		while ((m = mbufq_dequeue(&scrx)) != NULL) {
 			wh = mtod(m, struct ieee80211_frame *);
 			ni = ieee80211_find_rxnode(ic,
@@ -1834,6 +1835,7 @@ tr_setup:
 			} else
 				(void)ieee80211_input_mimo_all(ic, m);
 		}
+		NET_EPOCH_EXIT(et);
 #ifdef	IEEE80211_SUPPORT_SUPERG
 		ieee80211_ff_age_all(ic, 100);
 #endif
@@ -2310,63 +2312,63 @@ otus_tx(struct otus_softc *sc, struct ieee80211_node *ni, struct mbuf *m,
 	return 0;
 }
 
+static u_int
+otus_hash_maddr(void *arg, struct sockaddr_dl *sdl, u_int cnt)
+{
+	uint32_t val, *hashes = arg;
+
+	val = le32dec(LLADDR(sdl) + 4);
+	/* Get address byte 5 */
+	val = val & 0x0000ff00;
+	val = val >> 8;
+
+	/* As per below, shift it >> 2 to get only 6 bits */
+	val = val >> 2;
+	if (val < 32)
+		hashes[0] |= 1 << val;
+	else
+		hashes[1] |= 1 << (val - 32);
+
+	return (1);
+}
+
+
 int
 otus_set_multi(struct otus_softc *sc)
 {
-	uint32_t lo, hi;
 	struct ieee80211com *ic = &sc->sc_ic;
+	uint32_t hashes[2];
 	int r;
 
 	if (ic->ic_allmulti > 0 || ic->ic_promisc > 0 ||
 	    ic->ic_opmode == IEEE80211_M_MONITOR) {
-		lo = 0xffffffff;
-		hi = 0xffffffff;
+		hashes[0] = 0xffffffff;
+		hashes[1] = 0xffffffff;
 	} else {
 		struct ieee80211vap *vap;
-		struct ifnet *ifp;
-		struct ifmultiaddr *ifma;
 
-		lo = hi = 0;
-		TAILQ_FOREACH(vap, &ic->ic_vaps, iv_next) {
-			ifp = vap->iv_ifp;
-			if_maddr_rlock(ifp);
-			CK_STAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
-				caddr_t dl;
-				uint32_t val;
-
-				dl = LLADDR((struct sockaddr_dl *) ifma->ifma_addr);
-				val = le32dec(dl + 4);
-				/* Get address byte 5 */
-				val = val & 0x0000ff00;
-				val = val >> 8;
-
-				/* As per below, shift it >> 2 to get only 6 bits */
-				val = val >> 2;
-				if (val < 32)
-					lo |= 1 << val;
-				else
-					hi |= 1 << (val - 32);
-			}
-			if_maddr_runlock(ifp);
-		}
+		hashes[0] = hashes[1] = 0;
+		TAILQ_FOREACH(vap, &ic->ic_vaps, iv_next)
+			if_foreach_llmaddr(vap->iv_ifp, otus_hash_maddr,
+			    hashes);
 	}
 #if 0
 	/* XXX openbsd code */
 	while (enm != NULL) {
 		bit = enm->enm_addrlo[5] >> 2;
 		if (bit < 32)
-			lo |= 1 << bit;
+			hashes[0] |= 1 << bit;
 		else
-			hi |= 1 << (bit - 32);
+			hashes[1] |= 1 << (bit - 32);
 		ETHER_NEXT_MULTI(step, enm);
 	}
 #endif
 
-	hi |= 1U << 31;	/* Make sure the broadcast bit is set. */
+	hashes[1] |= 1U << 31;	/* Make sure the broadcast bit is set. */
 
 	OTUS_LOCK(sc);
-	otus_write(sc, AR_MAC_REG_GROUP_HASH_TBL_L, lo);
-	otus_write(sc, AR_MAC_REG_GROUP_HASH_TBL_H, hi);
+	otus_write(sc, AR_MAC_REG_GROUP_HASH_TBL_L, hashes[0]);
+	otus_write(sc, AR_MAC_REG_GROUP_HASH_TBL_H, hashes[1]);
 	r = otus_write_barrier(sc);
 	/* XXX operating mode? filter? */
 	OTUS_UNLOCK(sc);
@@ -3110,7 +3112,7 @@ otus_set_operating_mode(struct otus_softc *sc)
 	 */
 	IEEE80211_ADDR_COPY(bssid, zero_macaddr);
 	vap = TAILQ_FIRST(&ic->ic_vaps);
-	macaddr = ic->ic_macaddr;
+	macaddr = vap ? vap->iv_myaddr : ic->ic_macaddr;
 
 	switch (ic->ic_opmode) {
 	case IEEE80211_M_STA:

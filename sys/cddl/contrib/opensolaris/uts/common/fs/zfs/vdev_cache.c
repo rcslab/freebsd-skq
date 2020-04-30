@@ -90,7 +90,8 @@ int zfs_vdev_cache_bshift = 16;
 #define	VCBS (1 << zfs_vdev_cache_bshift)	/* 64KB */
 
 SYSCTL_DECL(_vfs_zfs_vdev);
-SYSCTL_NODE(_vfs_zfs_vdev, OID_AUTO, cache, CTLFLAG_RW, 0, "ZFS VDEV Cache");
+SYSCTL_NODE(_vfs_zfs_vdev, OID_AUTO, cache, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "ZFS VDEV Cache");
 SYSCTL_INT(_vfs_zfs_vdev_cache, OID_AUTO, max, CTLFLAG_RDTUN,
     &zfs_vdev_cache_max, 0, "Maximum I/O request size that increase read size");
 SYSCTL_INT(_vfs_zfs_vdev_cache, OID_AUTO, size, CTLFLAG_RDTUN,
@@ -114,29 +115,24 @@ static vdc_stats_t vdc_stats = {
 
 #define	VDCSTAT_BUMP(stat)	atomic_inc_64(&vdc_stats.stat.value.ui64);
 
-static int
+static inline int
 vdev_cache_offset_compare(const void *a1, const void *a2)
 {
-	const vdev_cache_entry_t *ve1 = a1;
-	const vdev_cache_entry_t *ve2 = a2;
+	const vdev_cache_entry_t *ve1 = (const vdev_cache_entry_t *)a1;
+	const vdev_cache_entry_t *ve2 = (const vdev_cache_entry_t *)a2;
 
-	if (ve1->ve_offset < ve2->ve_offset)
-		return (-1);
-	if (ve1->ve_offset > ve2->ve_offset)
-		return (1);
-	return (0);
+	return (AVL_CMP(ve1->ve_offset, ve2->ve_offset));
 }
 
 static int
 vdev_cache_lastused_compare(const void *a1, const void *a2)
 {
-	const vdev_cache_entry_t *ve1 = a1;
-	const vdev_cache_entry_t *ve2 = a2;
+	const vdev_cache_entry_t *ve1 = (const vdev_cache_entry_t *)a1;
+	const vdev_cache_entry_t *ve2 = (const vdev_cache_entry_t *)a2;
 
-	if (ve1->ve_lastused < ve2->ve_lastused)
-		return (-1);
-	if (ve1->ve_lastused > ve2->ve_lastused)
-		return (1);
+	int cmp = AVL_CMP(ve1->ve_lastused, ve2->ve_lastused);
+	if (likely(cmp))
+		return (cmp);
 
 	/*
 	 * Among equally old entries, sort by offset to ensure uniqueness.

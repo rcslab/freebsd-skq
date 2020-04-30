@@ -1,4 +1,4 @@
-.. index: API
+.. index:: API
 
 The libxo API
 =============
@@ -155,14 +155,14 @@ Output Styles (XO_STYLE\_\*)
 
 The libxo functions accept a set of output styles:
 
-=============== =========================
- Flag            Description
-=============== =========================
- XO_STYLE_TEXT   Traditional text output
- XO_STYLE_XML    XML encoded data
- XO_STYLE_JSON   JSON encoded data
- XO_STYLE_HTML   HTML encoded data
-=============== =========================
+  =============== =========================
+   Flag            Description
+  =============== =========================
+   XO_STYLE_TEXT   Traditional text output
+   XO_STYLE_XML    XML encoded data
+   XO_STYLE_JSON   JSON encoded data
+   XO_STYLE_HTML   HTML encoded data
+  =============== =========================
 
 The "XML", "JSON", and "HTML" output styles all use the UTF-8
 character encoding.  "TEXT" using locale-based encoding.
@@ -256,26 +256,26 @@ Flags (XOF\_\*)
 
 The set of valid flags include:
 
-=================== =========================================
- Flag                Description
-=================== =========================================
- XOF_CLOSE_FP        Close file pointer on `xo_destroy`
- XOF_COLOR           Enable color and effects in output
- XOF_COLOR_ALLOWED   Allow color/effect for terminal output
- XOF_DTRT            Enable "do the right thing" mode
- XOF_INFO            Display info data attributes (HTML)
- XOF_KEYS            Emit the key attribute (XML)
- XOF_NO_ENV          Do not use the :ref:`libxo-options` env var
- XOF_NO_HUMANIZE     Display humanization (TEXT, HTML)
- XOF_PRETTY          Make "pretty printed" output
- XOF_UNDERSCORES     Replaces hyphens with underscores
- XOF_UNITS           Display units (XML, HMTL)
- XOF_WARN            Generate warnings for broken calls
- XOF_WARN_XML        Generate warnings in XML on stdout
- XOF_XPATH           Emit XPath expressions (HTML)
- XOF_COLUMNS         Force xo_emit to return columns used
- XOF_FLUSH           Flush output after each `xo_emit` call
-=================== =========================================
+  =================== =========================================
+   Flag                Description
+  =================== =========================================
+   XOF_CLOSE_FP        Close file pointer on `xo_destroy`
+   XOF_COLOR           Enable color and effects in output
+   XOF_COLOR_ALLOWED   Allow color/effect for terminal output
+   XOF_DTRT            Enable "do the right thing" mode
+   XOF_INFO            Display info data attributes (HTML)
+   XOF_KEYS            Emit the key attribute (XML)
+   XOF_NO_ENV          Do not use the :ref:`libxo-options` env var
+   XOF_NO_HUMANIZE     Display humanization (TEXT, HTML)
+   XOF_PRETTY          Make "pretty printed" output
+   XOF_UNDERSCORES     Replaces hyphens with underscores
+   XOF_UNITS           Display units (XML, HMTL)
+   XOF_WARN            Generate warnings for broken calls
+   XOF_WARN_XML        Generate warnings in XML on stdout
+   XOF_XPATH           Emit XPath expressions (HTML)
+   XOF_COLUMNS         Force xo_emit to return columns used
+   XOF_FLUSH           Flush output after each `xo_emit` call
+  =================== =========================================
 
 The `XOF_CLOSE_FP` flag will trigger the call of the *close_func*
 (provided via `xo_set_writer`) when the handle is destroyed.
@@ -300,12 +300,12 @@ regardless of whether warnings are enabled.
 If the style is `XO_STYLE_HTML`, the following additional flags can be
 used:
 
-=============== =========================================
- Flag            Description
-=============== =========================================
- XOF_XPATH       Emit "data-xpath" attributes
- XOF_INFO        Emit additional info fields
-=============== =========================================
+  =============== =========================================
+   Flag            Description
+  =============== =========================================
+   XOF_XPATH       Emit "data-xpath" attributes
+   XOF_INFO        Emit additional info fields
+  =============== =========================================
 
 The `XOF_XPATH` flag enables the emission of XPath expressions detailing
 the hierarchy of XML elements used to encode the data field, if the
@@ -317,11 +317,11 @@ output.  See :ref:`field-information` for details.
 If the style is `XO_STYLE_XML`, the following additional flags can be
 used:
 
-=============== =========================================
- Flag            Description
-=============== =========================================
- XOF_KEYS        Flag "key" fields for XML
-=============== =========================================
+  =============== =========================================
+   Flag            Description
+  =============== =========================================
+   XOF_KEYS        Flag "key" fields for XML
+  =============== =========================================
 
 The `XOF_KEYS` flag adds "key" attribute to the XML encoding for
 field definitions that use the "k" modifier.  The key attribute has
@@ -400,28 +400,28 @@ string, since an inappropriate cast can ruin your day.  The vap
 argument to `xo_emit_hv` points to a variable argument list that can
 be used to retrieve arguments via `va_arg`.
 
-.. c:function:: int xo_emit (const char *fmt, ...)
+.. c:function:: xo_ssize_t xo_emit (const char *fmt, ...)
 
   :param fmt: The format string, followed by zero or more arguments
   :returns: If XOF_COLUMNS is set, the number of columns used; otherwise the number of bytes emitted
-  :rtype: int
+  :rtype: xo_ssize_t
 
-.. c:function:: int xo_emit_h (xo_handle_t *xop, const char *fmt, ...)
+.. c:function:: xo_ssize_t xo_emit_h (xo_handle_t *xop, const char *fmt, ...)
 
   :param xop: Handle for modify (or NULL for default handle)
   :type xop: xo_handle_t \*
   :param fmt: The format string, followed by zero or more arguments
   :returns: If XOF_COLUMNS is set, the number of columns used; otherwise the number of bytes emitted
-  :rtype: int
+  :rtype: xo_ssize_t
 
-.. c:function:: int xo_emit_hv (xo_handle_t *xop, const char *fmt, va_list vap)
+.. c:function:: xo_ssize_t xo_emit_hv (xo_handle_t *xop, const char *fmt, va_list vap)
 
   :param xop: Handle for modify (or NULL for default handle)
   :type xop: xo_handle_t \*
   :param fmt: The format string
   :param va_list vap: A set of variadic arguments
   :returns: If XOF_COLUMNS is set, the number of columns used; otherwise the number of bytes emitted
-  :rtype: int
+  :rtype: xo_ssize_t
 
 .. index:: xo_emit_field
 
@@ -434,7 +434,7 @@ scenario where one would otherwise need to compose a format
 descriptors using `snprintf`.  The individual parts of the format
 descriptor are passed in distinctly.
 
-.. c:function:: int xo_emit_field (const char *rolmod, const char *contents, const char *fmt, const char *efmt, ...)
+.. c:function:: xo_ssize_t xo_emit_field (const char *rolmod, const char *contents, const char *fmt, const char *efmt, ...)
 
   :param rolmod: A comma-separated list of field roles and field modifiers
   :type rolmod: const char *
@@ -445,7 +445,7 @@ descriptor are passed in distinctly.
   :param efmt: Encoding format string, followed by additional arguments
   :type efmt: const char *
   :returns: If XOF_COLUMNS is set, the number of columns used; otherwise the number of bytes emitted
-  :rtype: int
+  :rtype: xo_ssize_t
 
   ::
 
@@ -453,7 +453,7 @@ descriptor are passed in distinctly.
         xo_emit_field("T", "Host name is ", NULL, NULL);
         xo_emit_field("V", "host-name", NULL, NULL, host-name);
 
-.. c:function:: int xo_emit_field_h (xo_handle_t *xop, const char *rolmod, const char *contents, const char *fmt, const char *efmt, ...)
+.. c:function:: xo_ssize_t xo_emit_field_h (xo_handle_t *xop, const char *rolmod, const char *contents, const char *fmt, const char *efmt, ...)
 
   :param xop: Handle for modify (or NULL for default handle)
   :type xop: xo_handle_t \*
@@ -466,9 +466,9 @@ descriptor are passed in distinctly.
   :param efmt: Encoding format string, followed by additional arguments
   :type efmt: const char *
   :returns: If XOF_COLUMNS is set, the number of columns used; otherwise the number of bytes emitted
-  :rtype: int
+  :rtype: xo_ssize_t
 
-.. c:function:: int xo_emit_field_hv (xo_handle_t *xop, const char *rolmod, const char *contents, const char *fmt, const char *efmt, va_list vap)
+.. c:function:: xo_ssize_t xo_emit_field_hv (xo_handle_t *xop, const char *rolmod, const char *contents, const char *fmt, const char *efmt, va_list vap)
 
   :param xop: Handle for modify (or NULL for default handle)
   :type xop: xo_handle_t \*
@@ -482,7 +482,7 @@ descriptor are passed in distinctly.
   :type efmt: const char *
   :param va_list vap: A set of variadic arguments
   :returns: If XOF_COLUMNS is set, the number of columns used; otherwise the number of bytes emitted
-  :rtype: int
+  :rtype: xo_ssize_t
 
 .. index:: xo_attr
 .. _xo_attr:
@@ -505,14 +505,14 @@ Since attributes are only emitted in XML, their use should be limited
 to meta-data and additional or redundant representations of data
 already emitted in other form.
 
-.. c:function:: int xo_attr (const char *name, const char *fmt, ...)
+.. c:function:: xo_ssize_t xo_attr (const char *name, const char *fmt, ...)
 
   :param name: Attribute name
   :type name: const char *
   :param fmt: Attribute value, as variadic arguments
   :type fmt: const char *
   :returns: -1 for error, or the number of bytes in the formatted attribute value
-  :rtype: int
+  :rtype: xo_ssize_t
 
   ::
 
@@ -525,7 +525,7 @@ already emitted in other form.
         <login-time seconds="1408336270">00:14</login-time>
 
 
-.. c:function:: int xo_attr_h (xo_handle_t *xop, const char *name, const char *fmt, ...)
+.. c:function:: xo_ssize_t xo_attr_h (xo_handle_t *xop, const char *name, const char *fmt, ...)
 
   :param xop: Handle for modify (or NULL for default handle)
   :type xop: xo_handle_t \*
@@ -533,7 +533,7 @@ already emitted in other form.
   The `xo_attr_h` function follows the conventions of `xo_attr` but
   adds an explicit libxo handle.
 
-.. c:function:: int xo_attr_hv (xo_handle_t *xop, const char *name, const char *fmt, va_list vap)
+.. c:function:: xo_ssize_t xo_attr_hv (xo_handle_t *xop, const char *name, const char *fmt, va_list vap)
 
   The `xo_attr_h` function follows the conventions of `xo_attr_h`
   but replaced the variadic list with a variadic pointer.
@@ -1204,6 +1204,11 @@ message associated with either *errno* or the *code* parameter::
             xo_err(1, "cannot open file '%s'", filename);
 
 .. index:: xo_error
+.. index:: xo_error_h
+.. index:: xo_error_hv
+.. index:: xo_errorn
+.. index:: xo_errorn_h
+.. index:: xo_errorn_hv
 
 xo_error
 ~~~~~~~~
@@ -1212,6 +1217,50 @@ xo_error
 
   :param fmt: Format string
   :type fmt: const char *
+  :returns: void
+
+.. c:function:: void xo_error_h (xo_handle_t *xop, const char *fmt, ...)
+
+  :param xop: libxo handle pointer
+  :type xop: xo_handle_t *
+  :param fmt: Format string
+  :type fmt: const char *
+  :returns: void
+
+.. c:function:: void xo_error_hv (xo_handle_t *xop, const char *fmt, va_list vap)
+
+  :param xop: libxo handle pointer
+  :type xop: xo_handle_t *
+  :param fmt: Format string
+  :type fmt: const char *
+  :param vap: variadic arguments
+  :type xop: va_list
+  :returns: void
+
+.. c:function:: void xo_errorn (const char *fmt, ...)
+
+  :param fmt: Format string
+  :type fmt: const char *
+  :returns: void
+
+.. c:function:: void xo_errorn_h (xo_handle_t *xop, const char *fmt, ...)
+
+  :param xop: libxo handle pointer
+  :type xop: xo_handle_t *
+  :param fmt: Format string
+  :type fmt: const char *
+  :returns: void
+
+.. c:function:: void xo_errorn_hv (xo_handle_t *xop, int need_newline, const char *fmt, va_list vap)
+
+  :param xop: libxo handle pointer
+  :type xop: xo_handle_t *
+  :param need_newline: boolean indicating need for trailing newline
+  :type need_newline: int
+  :param fmt: Format string
+  :type fmt: const char *
+  :param vap: variadic arguments
+  :type xop: va_list
   :returns: void
 
   The `xo_error` function can be used for generic errors that should
@@ -1225,6 +1274,16 @@ xo_error
         <error><message>Does not compute</message></error>
     JSON::
         "error": { "message": "Does not compute" }
+
+  The `xo_error_h` and `xo_error_hv` add a handle object and a
+  variadic-ized parameter to the signature, respectively.
+
+  The `xo_errorn` function supplies a newline at the end the error
+  message if the format string does not include one.  The
+  `xo_errorn_h` and `xo_errorn_hv` functions add a handle object and
+  a variadic-ized parameter to the signature, respectively.  The
+  `xo_errorn_hv` function also adds a boolean to indicate the need for
+  a trailing newline.
 
 .. index:: xo_no_setlocale
 .. index:: Locale
@@ -1308,52 +1367,52 @@ These values are defined in <syslog.h>.
 The priority value indicates the importance and potential impact of
 each message:
 
-============= =======================================================
- Priority      Description
-============= =======================================================
- LOG_EMERG     A panic condition, normally broadcast to all users
- LOG_ALERT     A condition that should be corrected immediately
- LOG_CRIT      Critical conditions
- LOG_ERR       Generic errors
- LOG_WARNING   Warning messages
- LOG_NOTICE    Non-error conditions that might need special handling
- LOG_INFO      Informational messages
- LOG_DEBUG     Developer-oriented messages
-============= =======================================================
+  ============= =======================================================
+   Priority      Description
+  ============= =======================================================
+   LOG_EMERG     A panic condition, normally broadcast to all users
+   LOG_ALERT     A condition that should be corrected immediately
+   LOG_CRIT      Critical conditions
+   LOG_ERR       Generic errors
+   LOG_WARNING   Warning messages
+   LOG_NOTICE    Non-error conditions that might need special handling
+   LOG_INFO      Informational messages
+   LOG_DEBUG     Developer-oriented messages
+  ============= =======================================================
 
 The facility value indicates the source of message, in fairly generic
 terms:
 
-=============== =======================================================
- Facility        Description
-=============== =======================================================
- LOG_AUTH        The authorization system (e.g. :manpage:`login(1)`)
- LOG_AUTHPRIV    As LOG_AUTH, but logged to a privileged file
- LOG_CRON        The cron daemon: :manpage:`cron(8)`
- LOG_DAEMON      System daemons, not otherwise explicitly listed
- LOG_FTP         The file transfer protocol daemons
- LOG_KERN        Messages generated by the kernel
- LOG_LPR         The line printer spooling system
- LOG_MAIL        The mail system
- LOG_NEWS        The network news system
- LOG_SECURITY    Security subsystems, such as :manpage:`ipfw(4)`
- LOG_SYSLOG      Messages generated internally by :manpage:`syslogd(8)`
- LOG_USER        Messages generated by user processes (default)
- LOG_UUCP        The uucp system
- LOG_LOCAL0..7   Reserved for local use
-=============== =======================================================
+  =============== =======================================================
+   Facility        Description
+  =============== =======================================================
+   LOG_AUTH        The authorization system (e.g. :manpage:`login(1)`)
+   LOG_AUTHPRIV    As LOG_AUTH, but logged to a privileged file
+   LOG_CRON        The cron daemon: :manpage:`cron(8)`
+   LOG_DAEMON      System daemons, not otherwise explicitly listed
+   LOG_FTP         The file transfer protocol daemons
+   LOG_KERN        Messages generated by the kernel
+   LOG_LPR         The line printer spooling system
+   LOG_MAIL        The mail system
+   LOG_NEWS        The network news system
+   LOG_SECURITY    Security subsystems, such as :manpage:`ipfw(4)`
+   LOG_SYSLOG      Messages generated internally by :manpage:`syslogd(8)`
+   LOG_USER        Messages generated by user processes (default)
+   LOG_UUCP        The uucp system
+   LOG_LOCAL0..7   Reserved for local use
+  =============== =======================================================
 
 In addition to the values listed above, xo_open_log accepts a set of
 addition flags requesting specific logging behaviors:
 
-============ ====================================================
- Flag         Description
-============ ====================================================
- LOG_CONS     If syslogd fails, attempt to write to /dev/console
- LOG_NDELAY   Open the connection to :manpage:`syslogd(8)` immediately
- LOG_PERROR   Write the message also to standard error output
- LOG_PID      Log the process id with each message
-============ ====================================================
+  ============ ====================================================
+   Flag         Description
+  ============ ====================================================
+   LOG_CONS     If syslogd fails, attempt to write to /dev/console
+   LOG_NDELAY   Open the connection to :manpage:`syslogd(8)` immediately
+   LOG_PERROR   Write the message also to standard error output
+   LOG_PID      Log the process id with each message
+  ============ ====================================================
 
 .. index:: xo_syslog
 
@@ -1588,26 +1647,26 @@ processing model of libxo.  Content is formatted within libxo, and
 callbacks are made to the encoder's handler function when data is
 ready to be processed:
 
-======================= =======================================
- Operation               Meaning  (Base function)
-======================= =======================================
- XO_OP_CREATE            Called when the handle is created
- XO_OP_OPEN_CONTAINER    Container opened (xo_open_container)
- XO_OP_CLOSE_CONTAINER   Container closed (xo_close_container)
- XO_OP_OPEN_LIST         List opened (xo_open_list)
- XO_OP_CLOSE_LIST        List closed (xo_close_list)
- XO_OP_OPEN_LEAF_LIST    Leaf list opened (xo_open_leaf_list)
- XO_OP_CLOSE_LEAF_LIST   Leaf list closed (xo_close_leaf_list)
- XO_OP_OPEN_INSTANCE     Instance opened (xo_open_instance)
- XO_OP_CLOSE_INSTANCE    Instance closed (xo_close_instance)
- XO_OP_STRING            Field with Quoted UTF-8 string
- XO_OP_CONTENT           Field with content
- XO_OP_FINISH            Finish any pending output
- XO_OP_FLUSH             Flush any buffered output
- XO_OP_DESTROY           Clean up resources
- XO_OP_ATTRIBUTE         An attribute name/value pair
- XO_OP_VERSION           A version string
-======================= =======================================
+  ======================= =======================================
+   Operation               Meaning  (Base function)
+  ======================= =======================================
+   XO_OP_CREATE            Called when the handle is created
+   XO_OP_OPEN_CONTAINER    Container opened (xo_open_container)
+   XO_OP_CLOSE_CONTAINER   Container closed (xo_close_container)
+   XO_OP_OPEN_LIST         List opened (xo_open_list)
+   XO_OP_CLOSE_LIST        List closed (xo_close_list)
+   XO_OP_OPEN_LEAF_LIST    Leaf list opened (xo_open_leaf_list)
+   XO_OP_CLOSE_LEAF_LIST   Leaf list closed (xo_close_leaf_list)
+   XO_OP_OPEN_INSTANCE     Instance opened (xo_open_instance)
+   XO_OP_CLOSE_INSTANCE    Instance closed (xo_close_instance)
+   XO_OP_STRING            Field with Quoted UTF-8 string
+   XO_OP_CONTENT           Field with content
+   XO_OP_FINISH            Finish any pending output
+   XO_OP_FLUSH             Flush any buffered output
+   XO_OP_DESTROY           Clean up resources
+   XO_OP_ATTRIBUTE         An attribute name/value pair
+   XO_OP_VERSION           A version string
+  ======================= =======================================
 
 For all the open and close operations, the name parameter holds the
 name of the construct.  For string, content, and attribute operations,

@@ -1680,22 +1680,22 @@ tsec_add_sysctls(struct tsec_softc *sc)
 	ctx = device_get_sysctl_ctx(sc->dev);
 	children = SYSCTL_CHILDREN(device_get_sysctl_tree(sc->dev));
 	tree = SYSCTL_ADD_NODE(ctx, children, OID_AUTO, "int_coal",
-	    CTLFLAG_RD, 0, "TSEC Interrupts coalescing");
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, 0, "TSEC Interrupts coalescing");
 	children = SYSCTL_CHILDREN(tree);
 
 	SYSCTL_ADD_PROC(ctx, children, OID_AUTO, "rx_time",
-	    CTLTYPE_UINT | CTLFLAG_RW, sc, TSEC_IC_RX, tsec_sysctl_ic_time,
-	    "I", "IC RX time threshold (0-65535)");
+	    CTLTYPE_UINT | CTLFLAG_RW | CTLFLAG_MPSAFE, sc, TSEC_IC_RX,
+	    tsec_sysctl_ic_time, "I", "IC RX time threshold (0-65535)");
 	SYSCTL_ADD_PROC(ctx, children, OID_AUTO, "rx_count",
-	    CTLTYPE_UINT | CTLFLAG_RW, sc, TSEC_IC_RX, tsec_sysctl_ic_count,
-	    "I", "IC RX frame count threshold (0-255)");
+	    CTLTYPE_UINT | CTLFLAG_RW | CTLFLAG_MPSAFE, sc, TSEC_IC_RX,
+	    tsec_sysctl_ic_count, "I", "IC RX frame count threshold (0-255)");
 
 	SYSCTL_ADD_PROC(ctx, children, OID_AUTO, "tx_time",
-	    CTLTYPE_UINT | CTLFLAG_RW, sc, TSEC_IC_TX, tsec_sysctl_ic_time,
-	    "I", "IC TX time threshold (0-65535)");
+	    CTLTYPE_UINT | CTLFLAG_RW | CTLFLAG_MPSAFE, sc, TSEC_IC_TX,
+	    tsec_sysctl_ic_time, "I", "IC TX time threshold (0-65535)");
 	SYSCTL_ADD_PROC(ctx, children, OID_AUTO, "tx_count",
-	    CTLTYPE_UINT | CTLFLAG_RW, sc, TSEC_IC_TX, tsec_sysctl_ic_count,
-	    "I", "IC TX frame count threshold (0-255)");
+	    CTLTYPE_UINT | CTLFLAG_RW | CTLFLAG_MPSAFE, sc, TSEC_IC_TX,
+	    tsec_sysctl_ic_count, "I", "IC TX frame count threshold (0-255)");
 }
 
 /*
@@ -1886,13 +1886,22 @@ tsec_offload_process_frame(struct tsec_softc *sc, struct mbuf *m)
 	m_adj(m, sizeof(struct tsec_rx_fcb));
 }
 
+static u_int
+tsec_hash_maddr(void *arg, struct sockaddr_dl *sdl, u_int cnt)
+{
+	uint32_t h, *hashtable = arg;
+
+	h = (ether_crc32_be(LLADDR(sdl), ETHER_ADDR_LEN) >> 24) & 0xFF;
+	hashtable[(h >> 5)] |= 1 << (0x1F - (h & 0x1F));
+
+	return (1);
+}
+
 static void
 tsec_setup_multicast(struct tsec_softc *sc)
 {
 	uint32_t hashtable[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
 	struct ifnet *ifp = sc->tsec_ifp;
-	struct ifmultiaddr *ifma;
-	uint32_t h;
 	int i;
 
 	TSEC_GLOBAL_LOCK_ASSERT(sc);
@@ -1904,18 +1913,7 @@ tsec_setup_multicast(struct tsec_softc *sc)
 		return;
 	}
 
-	if_maddr_rlock(ifp);
-	CK_STAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
-
-		if (ifma->ifma_addr->sa_family != AF_LINK)
-			continue;
-
-		h = (ether_crc32_be(LLADDR((struct sockaddr_dl *)
-		    ifma->ifma_addr), ETHER_ADDR_LEN) >> 24) & 0xFF;
-
-		hashtable[(h >> 5)] |= 1 << (0x1F - (h & 0x1F));
-	}
-	if_maddr_runlock(ifp);
+	if_foreach_llmaddr(ifp, tsec_hash_maddr, &hashtable);
 
 	for (i = 0; i < 8; i++)
 		TSEC_WRITE(sc, TSEC_REG_GADDR(i), hashtable[i]);

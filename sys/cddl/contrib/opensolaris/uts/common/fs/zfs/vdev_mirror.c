@@ -64,7 +64,8 @@ static int vdev_mirror_shift = 21;
 
 #ifdef _KERNEL
 SYSCTL_DECL(_vfs_zfs_vdev);
-static SYSCTL_NODE(_vfs_zfs_vdev, OID_AUTO, mirror, CTLFLAG_RD, 0,
+static SYSCTL_NODE(_vfs_zfs_vdev, OID_AUTO, mirror,
+    CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
     "ZFS VDEV Mirror");
 #endif
 
@@ -169,7 +170,7 @@ vdev_mirror_load(mirror_map_t *mm, vdev_t *vd, uint64_t zio_offset)
 	load = vdev_queue_length(vd);
 	lastoffset = vdev_queue_lastoffset(vd);
 
-	if (vd->vdev_rotation_rate == VDEV_RATE_NON_ROTATING) {
+	if (vd->vdev_nonrot) {
 		/* Non-rotating media. */
 		if (lastoffset == zio_offset)
 			return (load + non_rotating_inc);

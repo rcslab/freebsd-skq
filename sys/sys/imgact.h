@@ -75,20 +75,24 @@ struct image_params {
 	char *interpreter_name;	/* name of the interpreter */
 	void *auxargs;		/* ELF Auxinfo structure pointer */
 	struct sf_buf *firstpage;	/* first page that we mapped */
-	unsigned long ps_strings; /* PS_STRINGS for BSD/OS binaries */
+	void *ps_strings;		/* pointer to ps_string (user space) */
 	struct image_args *args;	/* system call arguments */
 	struct sysentvec *sysent;	/* system entry vector */
+	void *argv;			/* pointer to argv (user space) */
+	void *envv;			/* pointer to envv (user space) */
 	char *execpath;
-	unsigned long execpathp;
+	void *execpathp;
 	char *freepath;
-	unsigned long canary;
+	void *canary;
 	int canarylen;
-	unsigned long pagesizes;
+	void *pagesizes;
 	int pagesizeslen;
 	vm_prot_t stack_prot;
 	u_long stack_sz;
+	u_long eff_stack_sz;
 	struct ucred *newcred;		/* new credentials if changing */
 	bool credential_setid;		/* true if becoming setid */
+	bool textset;
 	u_int map_flags;
 };
 
@@ -108,10 +112,10 @@ int	exec_args_adjust_args(struct image_args *args, size_t consume,
 	    ssize_t extend);
 char	*exec_args_get_begin_envv(struct image_args *args);
 int	exec_check_permissions(struct image_params *);
-register_t *exec_copyout_strings(struct image_params *);
+int	exec_copyout_strings(struct image_params *, uintptr_t *);
 void	exec_free_args(struct image_args *);
 int	exec_new_vmspace(struct image_params *, struct sysentvec *);
-void	exec_setregs(struct thread *, struct image_params *, u_long);
+void	exec_setregs(struct thread *, struct image_params *, uintptr_t);
 int	exec_shell_imgact(struct image_params *);
 int	exec_copyin_args(struct image_args *, const char *, enum uio_seg,
 	char **, char **);

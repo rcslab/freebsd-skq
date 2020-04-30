@@ -1236,9 +1236,6 @@ static ssize_t show_port_ib_mtu(struct device *dev,
 						   port_mtu_attr);
 	struct mlx4_dev *mdev = info->dev;
 
-	if (mdev->caps.port_type[info->port] == MLX4_PORT_TYPE_ETH)
-		mlx4_warn(mdev, "port level mtu is only used for IB ports\n");
-
 	sprintf(buf, "%d\n",
 			ibta_mtu_to_int(mdev->caps.port_ib_mtu[info->port]));
 	return strlen(buf);
@@ -3795,7 +3792,8 @@ static int mlx4_init_one(struct pci_dev *pdev, const struct pci_device_id *id)
 	ctx = &dev->hw_ctx;
 	sysctl_ctx_init(ctx);
 	node = SYSCTL_ADD_NODE(ctx,SYSCTL_CHILDREN(pdev->dev.kobj.oidp),
-	    OID_AUTO, "hw" , CTLFLAG_RD, 0, "mlx4 dev hw information");
+	    OID_AUTO, "hw" , CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
+	    "mlx4 dev hw information");
 	if (node != NULL) {
 		node_list = SYSCTL_CHILDREN(node);
 		SYSCTL_ADD_STRING(ctx, node_list, OID_AUTO,

@@ -728,15 +728,22 @@ ffs_build_dinode2(struct ufs2_dinode *dinp, dirbuf_t *dbufp, fsnode *cur,
 	dinp->di_atime = st->st_atime;
 	dinp->di_mtime = st->st_mtime;
 	dinp->di_ctime = st->st_ctime;
+#if HAVE_STRUCT_STAT_BIRTHTIME
+	dinp->di_birthtime = st->st_birthtime;
+#else
+	dinp->di_birthtime = st->st_ctime;
+#endif
 #if HAVE_STRUCT_STAT_ST_MTIMENSEC
 	dinp->di_atimensec = st->st_atimensec;
 	dinp->di_mtimensec = st->st_mtimensec;
 	dinp->di_ctimensec = st->st_ctimensec;
-#endif
 #if HAVE_STRUCT_STAT_BIRTHTIME
-	dinp->di_birthtime = st->st_birthtime;
 	dinp->di_birthnsec = st->st_birthtimensec;
+#else
+	dinp->di_birthnsec = st->st_ctimensec;
 #endif
+#endif
+
 		/* not set: di_db, di_ib, di_blocks, di_spare */
 
 	membuf = NULL;
@@ -932,8 +939,7 @@ ffs_write_file(union dinode *din, uint32_t ino, void *buf, fsinfo_t *fsopts)
 	if (isfile) {
 		fbuf = emalloc(ffs_opts->bsize);
 		if ((ffd = open((char *)buf, O_RDONLY, 0444)) == -1) {
-			warn("Can't open `%s' for reading", (char *)buf);
-			goto leave_ffs_write_file;
+			err(EXIT_FAILURE, "Can't open `%s' for reading", (char *)buf);
 		}
 	} else {
 		p = buf;
@@ -987,8 +993,6 @@ ffs_write_file(union dinode *din, uint32_t ino, void *buf, fsinfo_t *fsopts)
   
  write_inode_and_leave:
 	ffs_write_inode(&in.i_din, in.i_number, fsopts);
-
- leave_ffs_write_file:
 	if (fbuf)
 		free(fbuf);
 	if (ffd != -1)

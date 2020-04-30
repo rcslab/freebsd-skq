@@ -122,7 +122,7 @@ static void	 ixl_if_vflr_handle(if_ctx_t ctx);
 #endif
 
 /*** Other ***/
-static int	 ixl_mc_filter_apply(void *arg, struct ifmultiaddr *ifma, int);
+static u_int	 ixl_mc_filter_apply(void *, struct sockaddr_dl *, u_int);
 static void	 ixl_save_pf_tunables(struct ixl_pf *);
 static int	 ixl_allocate_pci_resources(struct ixl_pf *);
 
@@ -206,7 +206,7 @@ static driver_t ixl_if_driver = {
 ** TUNEABLE PARAMETERS:
 */
 
-static SYSCTL_NODE(_hw, OID_AUTO, ixl, CTLFLAG_RD, 0,
+static SYSCTL_NODE(_hw, OID_AUTO, ixl, CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
     "ixl driver parameters");
 
 /*
@@ -398,10 +398,10 @@ ixl_if_attach_pre(if_ctx_t ctx)
 	enum i40e_status_code status;
 	int error = 0;
 
-	INIT_DBG_DEV(dev, "begin");
-
 	dev = iflib_get_dev(ctx);
 	pf = iflib_get_softc(ctx);
+
+	INIT_DBG_DEV(dev, "begin");
 
 	vsi = &pf->vsi;
 	vsi->back = pf;
@@ -588,10 +588,11 @@ ixl_if_attach_post(if_ctx_t ctx)
 	int error = 0;
 	enum i40e_status_code status;
 
-	INIT_DBG_DEV(dev, "begin");
-
 	dev = iflib_get_dev(ctx);
 	pf = iflib_get_softc(ctx);
+
+	INIT_DBG_DEV(dev, "begin");
+
 	vsi = &pf->vsi;
 	vsi->ifp = iflib_get_ifp(ctx);
 	hw = &pf->hw;
@@ -1298,12 +1299,12 @@ ixl_if_multi_set(if_ctx_t ctx)
 	struct ixl_pf *pf = iflib_get_softc(ctx);
 	struct ixl_vsi *vsi = &pf->vsi;
 	struct i40e_hw *hw = vsi->hw;
-	int mcnt = 0, flags;
+	int mcnt, flags;
 	int del_mcnt;
 
 	IOCTL_DEBUGOUT("ixl_if_multi_set: begin");
 
-	mcnt = if_multiaddr_count(iflib_get_ifp(ctx), MAX_MULTICAST_ADDR);
+	mcnt = min(if_llmaddr_count(iflib_get_ifp(ctx)), MAX_MULTICAST_ADDR);
 	/* Delete filters for removed multicast addresses */
 	del_mcnt = ixl_del_multi(vsi);
 	vsi->num_macs -= del_mcnt;
@@ -1315,8 +1316,7 @@ ixl_if_multi_set(if_ctx_t ctx)
 	}
 	/* (re-)install filters for all mcast addresses */
 	/* XXX: This bypasses filter count tracking code! */
-	mcnt = if_multi_apply(iflib_get_ifp(ctx), ixl_mc_filter_apply, vsi);
-	
+	mcnt = if_foreach_llmaddr(iflib_get_ifp(ctx), ixl_mc_filter_apply, vsi);
 	if (mcnt > 0) {
 		vsi->num_macs += mcnt;
 		flags = (IXL_FILTER_ADD | IXL_FILTER_USED | IXL_FILTER_MC);
@@ -1504,8 +1504,8 @@ ixl_if_promisc_set(if_ctx_t ctx, int flags)
 
 	if (flags & IFF_PROMISC)
 		uni = multi = TRUE;
-	else if (flags & IFF_ALLMULTI ||
-		if_multiaddr_count(ifp, MAX_MULTICAST_ADDR) == MAX_MULTICAST_ADDR)
+	else if (flags & IFF_ALLMULTI || if_llmaddr_count(ifp) >=
+	    MAX_MULTICAST_ADDR)
 		multi = TRUE;
 
 	err = i40e_aq_set_vsi_unicast_promiscuous(hw,
@@ -1625,24 +1625,39 @@ ixl_if_priv_ioctl(if_ctx_t ctx, u_long command, caddr_t data)
 	struct ifdrv *ifd = (struct ifdrv *)data;
 	int error = 0;
 
-	/* NVM update command */
-	if (ifd->ifd_cmd == I40E_NVM_ACCESS)
-		error = ixl_handle_nvmupd_cmd(pf, ifd);
-	else
-		error = EINVAL;
+	/*
+	 * The iflib_if_ioctl forwards SIOCxDRVSPEC and SIOGPRIVATE_0 without
+	 * performing privilege checks. It is important that this function
+	 * perform the necessary checks for commands which should only be
+	 * executed by privileged threads.
+	 */
+
+	switch(command) {
+	case SIOCGDRVSPEC:
+	case SIOCSDRVSPEC:
+		/* NVM update command */
+		if (ifd->ifd_cmd == I40E_NVM_ACCESS) {
+			error = priv_check(curthread, PRIV_DRIVER);
+			if (error)
+				break;
+			error = ixl_handle_nvmupd_cmd(pf, ifd);
+		} else {
+			error = EINVAL;
+		}
+		break;
+	default:
+		error = EOPNOTSUPP;
+	}
 
 	return (error);
 }
 
-static int
-ixl_mc_filter_apply(void *arg, struct ifmultiaddr *ifma, int count __unused)
+static u_int
+ixl_mc_filter_apply(void *arg, struct sockaddr_dl *sdl, u_int count __unused)
 {
 	struct ixl_vsi *vsi = arg;
 
-	if (ifma->ifma_addr->sa_family != AF_LINK)
-		return (0);
-	ixl_add_mc_filter(vsi, 
-	    (u8*)LLADDR((struct sockaddr_dl *) ifma->ifma_addr));
+	ixl_add_mc_filter(vsi, (u8*)LLADDR(sdl));
 	return (1);
 }
 

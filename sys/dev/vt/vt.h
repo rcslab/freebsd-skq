@@ -158,7 +158,7 @@ struct vt_device {
 #define	VDF_QUIET_BELL	0x80	/* Disable bell. */
 #define	VDF_SUSPENDED	0x100	/* Device has been suspended. */
 #define	VDF_DOWNGRADE	0x8000	/* The driver is being downgraded. */
-	int			 vd_keyboard;	/* (G) Keyboard index. */
+	struct keyboard		*vd_keyboard;	/* (G) Keyboard. */
 	unsigned int		 vd_kbstate;	/* (?) Device unit. */
 	unsigned int		 vd_unit;	/* (c) Device unit. */
 	int			 vd_altbrk;	/* (?) Alt break seq. state */
@@ -192,6 +192,7 @@ void vt_suspend(struct vt_device *vd);
 
 struct vt_buf {
 	struct mtx		 vb_lock;	/* Buffer lock. */
+	struct terminal		*vb_terminal;
 	term_pos_t		 vb_scr_size;	/* (b) Screen dimensions. */
 	int			 vb_flags;	/* (b) Flags. */
 #define	VBF_CURSOR	0x1	/* Cursor visible. */

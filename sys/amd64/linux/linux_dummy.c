@@ -53,26 +53,33 @@ UNIMPLEMENTED(getpmsg);
 UNIMPLEMENTED(nfsservctl);	/* Added in Linux 2.2 removed in 3.1. */
 UNIMPLEMENTED(putpmsg);
 UNIMPLEMENTED(query_module);	/* Added in Linux 2.2 removed in 2.6. */
+UNIMPLEMENTED(tuxcall);
 UNIMPLEMENTED(security);
 UNIMPLEMENTED(set_thread_area);
-UNIMPLEMENTED(tuxcall);
 UNIMPLEMENTED(uselib);
 UNIMPLEMENTED(vserver);
 
-DUMMY(sendfile);
-DUMMY(syslog);
 DUMMY(setfsuid);
 DUMMY(setfsgid);
 DUMMY(sysfs);
 DUMMY(vhangup);
+DUMMY(modify_ldt);
 DUMMY(pivot_root);
 DUMMY(adjtimex);
 DUMMY(swapoff);
 DUMMY(init_module);
+DUMMY(ioperm);
 DUMMY(delete_module);
 DUMMY(quotactl);
+DUMMY(readahead);
+DUMMY(io_setup);
+DUMMY(io_destroy);
+DUMMY(io_getevents);
+DUMMY(io_submit);
+DUMMY(io_cancel);
 DUMMY(lookup_dcookie);
 DUMMY(remap_file_pages);
+DUMMY(restart_syscall);
 DUMMY(semtimedop);
 DUMMY(mbind);
 DUMMY(get_mempolicy);
@@ -100,7 +107,6 @@ DUMMY(unshare);
 /* Linux 2.6.17: */
 DUMMY(splice);
 DUMMY(tee);
-DUMMY(sync_file_range);
 DUMMY(vmsplice);
 /* Linux 2.6.18: */
 DUMMY(move_pages);
@@ -111,7 +117,7 @@ DUMMY(signalfd4);
 DUMMY(inotify_init1);
 /* Linux 2.6.31: */
 DUMMY(perf_event_open);
-/* Linux 2.6.38: */
+/* Linux 2.6.36: */
 DUMMY(fanotify_init);
 DUMMY(fanotify_mark);
 /* Linux 2.6.39: */
@@ -120,7 +126,6 @@ DUMMY(open_by_handle_at);
 DUMMY(clock_adjtime);
 /* Linux 3.0: */
 DUMMY(setns);
-DUMMY(getcpu);
 /* Linux 3.2: */
 DUMMY(process_vm_readv);
 DUMMY(process_vm_writev);
@@ -130,12 +135,11 @@ DUMMY(kcmp);
 DUMMY(finit_module);
 DUMMY(sched_setattr);
 DUMMY(sched_getattr);
-/* Linux 3.14: */
-DUMMY(renameat2);
 /* Linux 3.15: */
-DUMMY(seccomp);
-DUMMY(memfd_create);
 DUMMY(kexec_file_load);
+/* Linux 3.17: */
+DUMMY(memfd_create);
+DUMMY(seccomp);
 /* Linux 3.18: */
 DUMMY(bpf);
 /* Linux 3.19: */
@@ -146,8 +150,6 @@ DUMMY(userfaultfd);
 DUMMY(membarrier);
 /* Linux 4.4: */
 DUMMY(mlock2);
-/* Linux 4.5: */
-DUMMY(copy_file_range);
 /* Linux 4.6: */
 DUMMY(preadv2);
 DUMMY(pwritev2);
@@ -155,6 +157,16 @@ DUMMY(pwritev2);
 DUMMY(pkey_mprotect);
 DUMMY(pkey_alloc);
 DUMMY(pkey_free);
+/* Linux 4.11: */
+DUMMY(statx);
+/* Linux 4.18: */
+DUMMY(io_pgetevents);
+DUMMY(rseq);
+/* Linux 5.0: */
+DUMMY(pidfd_send_signal);
+DUMMY(io_uring_setup);
+DUMMY(io_uring_enter);
+DUMMY(io_uring_register);
 
 #define DUMMY_XATTR(s)						\
 int								\

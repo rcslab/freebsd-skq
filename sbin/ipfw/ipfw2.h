@@ -151,6 +151,7 @@ enum tokens {
 	TOK_TCPOPTS,
 	TOK_TCPSEQ,
 	TOK_TCPACK,
+	TOK_TCPMSS,
 	TOK_TCPWIN,
 	TOK_ICMPTYPES,
 	TOK_MAC,
@@ -219,6 +220,7 @@ enum tokens {
 	TOK_DENY_INC,
 	TOK_SAME_PORTS,
 	TOK_UNREG_ONLY,
+	TOK_UNREG_CGN,
 	TOK_SKIP_GLOBAL,
 	TOK_RESET_ADDR,
 	TOK_ALIAS_REV,
@@ -264,6 +266,8 @@ enum tokens {
 	TOK_UNLOCK,
 	TOK_VLIST,
 	TOK_OLIST,
+	TOK_MISSING,
+	TOK_ORFLUSH,
 
 	/* NAT64 tokens */
 	TOK_NAT64STL,
@@ -278,6 +282,7 @@ enum tokens {
 	TOK_AGG_LEN,
 	TOK_AGG_COUNT,
 	TOK_MAX_PORTS,
+	TOK_STATES_CHUNKS,
 	TOK_JMAXLEN,
 	TOK_PORT_RANGE,
 	TOK_HOST_DEL_AGE,
@@ -288,6 +293,13 @@ enum tokens {
 	TOK_UDP_AGE,
 	TOK_ICMP_AGE,
 	TOK_LOGOFF,
+	TOK_PRIVATE,
+	TOK_PRIVATEOFF,
+
+	/* NAT64 CLAT tokens */
+	TOK_NAT64CLAT,
+	TOK_PLAT_PREFIX,
+	TOK_CLAT_PREFIX,
 
 	/* NPTv6 tokens */
 	TOK_NPTV6,
@@ -375,6 +387,7 @@ extern int resvd_set_number;
 /* first-level command handlers */
 void ipfw_add(char *av[]);
 void ipfw_show_nat(int ac, char **av);
+int ipfw_delete_nat(int i);
 void ipfw_config_pipe(int ac, char **av);
 void ipfw_config_nat(int ac, char **av);
 void ipfw_sets_handler(char *av[]);
@@ -385,6 +398,7 @@ void ipfw_flush(int force);
 void ipfw_zero(int ac, char *av[], int optname);
 void ipfw_list(int ac, char *av[], int show_counters);
 void ipfw_internal_handler(int ac, char *av[]);
+void ipfw_nat64clat_handler(int ac, char *av[]);
 void ipfw_nat64lsn_handler(int ac, char *av[]);
 void ipfw_nat64stl_handler(int ac, char *av[]);
 void ipfw_nptv6_handler(int ac, char *av[]);

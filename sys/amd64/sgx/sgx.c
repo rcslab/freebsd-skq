@@ -220,8 +220,8 @@ sgx_va_slot_init_by_index(struct sgx_softc *sc, vm_object_t object,
 
 		page = PHYS_TO_VM_PAGE(epc->phys);
 
-		vm_page_insert(page, object, idx);
 		page->valid = VM_PAGE_BITS_ALL;
+		vm_page_insert(page, object, idx);
 	}
 
 	return (0);
@@ -357,9 +357,7 @@ sgx_page_remove(struct sgx_softc *sc, vm_page_t p)
 	vm_paddr_t pa;
 	uint64_t offs;
 
-	vm_page_lock(p);
-	vm_page_remove(p);
-	vm_page_unlock(p);
+	(void)vm_page_remove(p);
 
 	dprintf("%s: p->pidx %ld\n", __func__, p->pindex);
 
@@ -391,14 +389,16 @@ sgx_enclave_remove(struct sgx_softc *sc,
 	 * First remove all the pages except SECS,
 	 * then remove SECS page.
 	 */
-	p_secs = NULL;
+restart:
 	TAILQ_FOREACH_SAFE(p, &object->memq, listq, p_next) {
-		if (p->pindex == SGX_SECS_VM_OBJECT_INDEX) {
-			p_secs = p;
+		if (p->pindex == SGX_SECS_VM_OBJECT_INDEX)
 			continue;
-		}
+		if (vm_page_busy_acquire(p, VM_ALLOC_WAITFAIL) == 0)
+			goto restart;
 		sgx_page_remove(sc, p);
 	}
+	p_secs = vm_page_grab(object, SGX_SECS_VM_OBJECT_INDEX,
+	    VM_ALLOC_NOCREAT);
 	/* Now remove SECS page */
 	if (p_secs != NULL)
 		sgx_page_remove(sc, p_secs);
@@ -612,8 +612,8 @@ sgx_insert_epc_page_by_index(vm_page_t page, vm_object_t object,
 
 	VM_OBJECT_ASSERT_WLOCKED(object);
 
-	vm_page_insert(page, object, pidx);
 	page->valid = VM_PAGE_BITS_ALL;
+	vm_page_insert(page, object, pidx);
 }
 
 static void
@@ -725,8 +725,9 @@ sgx_ioctl_create(struct sgx_softc *sc, struct sgx_enclave_create *param)
 	if ((sc->state & SGX_STATE_RUNNING) == 0) {
 		mtx_unlock(&sc->mtx);
 		/* Remove VA page that was just created for SECS page. */
-		p = vm_page_lookup(enclave->object,
-		    - SGX_VA_PAGES_OFFS - SGX_SECS_VM_OBJECT_INDEX);
+		p = vm_page_grab(enclave->object,
+		    - SGX_VA_PAGES_OFFS - SGX_SECS_VM_OBJECT_INDEX,
+		    VM_ALLOC_NOCREAT);
 		sgx_page_remove(sc, p);
 		VM_OBJECT_WUNLOCK(object);
 		goto error;
@@ -738,8 +739,9 @@ sgx_ioctl_create(struct sgx_softc *sc, struct sgx_enclave_create *param)
 		dprintf("%s: gp fault\n", __func__);
 		mtx_unlock(&sc->mtx);
 		/* Remove VA page that was just created for SECS page. */
-		p = vm_page_lookup(enclave->object,
-		    - SGX_VA_PAGES_OFFS - SGX_SECS_VM_OBJECT_INDEX);
+		p = vm_page_grab(enclave->object,
+		    - SGX_VA_PAGES_OFFS - SGX_SECS_VM_OBJECT_INDEX,
+		    VM_ALLOC_NOCREAT);
 		sgx_page_remove(sc, p);
 		VM_OBJECT_WUNLOCK(object);
 		goto error;
@@ -1074,6 +1076,12 @@ sgx_get_epc_area(struct sgx_softc *sc)
 	sc->epc_size = ((uint64_t)(cp[3] & 0xfffff) << 32) +
 	    (cp[2] & 0xfffff000);
 	sc->npages = sc->epc_size / SGX_PAGE_SIZE;
+
+	if (sc->epc_size == 0 || sc->epc_base == 0) {
+		printf("%s: Incorrect EPC data: EPC base %lx, size %lu\n",
+		    __func__, sc->epc_base, sc->epc_size);
+		return (EINVAL);
+	}
 
 	if (cp[3] & 0xffff)
 		sc->enclave_size_max = (1 << ((cp[3] >> 8) & 0xff));

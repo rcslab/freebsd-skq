@@ -259,6 +259,7 @@ struct sctp_base_info {
 	int packet_log_end;
 	uint8_t packet_log_buffer[SCTP_PACKET_LOG_SIZE];
 #endif
+	eventhandler_tag eh_tag;
 };
 
 /*-
@@ -272,11 +273,11 @@ struct sctp_pcb {
 	uint32_t secret_key[SCTP_HOW_MANY_SECRETS][SCTP_NUMBER_OF_SECRETS];
 	unsigned int size_of_a_cookie;
 
-	unsigned int sctp_timeoutticks[SCTP_NUM_TMRS];
-	unsigned int sctp_minrto;
-	unsigned int sctp_maxrto;
-	unsigned int initial_rto;
-	int initial_init_rto_max;
+	uint32_t sctp_timeoutticks[SCTP_NUM_TMRS];
+	uint32_t sctp_minrto;
+	uint32_t sctp_maxrto;
+	uint32_t initial_rto;
+	uint32_t initial_init_rto_max;
 
 	unsigned int sctp_sack_freq;
 	uint32_t sctp_sws_sender;
@@ -319,7 +320,7 @@ struct sctp_pcb {
 
 	uint32_t def_cookie_life;
 	/* defaults to 0 */
-	int auto_close_time;
+	uint32_t auto_close_time;
 	uint32_t initial_sequence_debug;
 	uint32_t adaptation_layer_indicator;
 	uint8_t adaptation_layer_indicator_provided;
@@ -362,7 +363,7 @@ struct sctp_inpcb {
 	 */
 	union {
 		struct inpcb inp;
-		char align[(sizeof(struct in6pcb) + SCTP_ALIGNM1) &
+		char align[(sizeof(struct inpcb) + SCTP_ALIGNM1) &
 		    ~SCTP_ALIGNM1];
 	}     ip_inp;
 
@@ -578,9 +579,13 @@ int sctp_is_address_on_local_host(struct sockaddr *addr, uint32_t vrf_id);
 
 void sctp_inpcb_free(struct sctp_inpcb *, int, int);
 
+#define SCTP_DONT_INITIALIZE_AUTH_PARAMS	0
+#define SCTP_INITIALIZE_AUTH_PARAMS		1
+
 struct sctp_tcb *
 sctp_aloc_assoc(struct sctp_inpcb *, struct sockaddr *,
-    int *, uint32_t, uint32_t, uint16_t, uint16_t, struct thread *);
+    int *, uint32_t, uint32_t, uint16_t, uint16_t, struct thread *,
+    int);
 
 int sctp_free_assoc(struct sctp_inpcb *, struct sctp_tcb *, int, int);
 

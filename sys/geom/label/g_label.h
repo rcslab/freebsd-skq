@@ -50,21 +50,14 @@
 #ifdef _KERNEL
 extern u_int g_label_debug;
 
-#define	G_LABEL_DEBUG(lvl, ...)	do {					\
-	if (g_label_debug >= (lvl)) {					\
-		printf("GEOM_LABEL");					\
-		if (g_label_debug > 0)					\
-			printf("[%u]", lvl);				\
-		printf(": ");						\
-		printf(__VA_ARGS__);					\
-		printf("\n");						\
-	}								\
-} while (0)
+#define G_LABEL_DEBUG(lvl, ...) \
+    _GEOM_DEBUG("GEOM_LABEL", g_label_debug, (lvl), NULL, __VA_ARGS__)
 
 SYSCTL_DECL(_kern_geom_label);
 
 #define	G_LABEL_INIT(kind, label, descr) 				\
-	SYSCTL_NODE(_kern_geom_label, OID_AUTO, kind, CTLFLAG_RD,	\
+	SYSCTL_NODE(_kern_geom_label, OID_AUTO, kind,			\
+	    CTLFLAG_RD | CTLFLAG_MPSAFE,				\
 	    NULL, "");							\
 	SYSCTL_INT(_kern_geom_label_##kind, OID_AUTO, enable, 		\
 	    CTLFLAG_RWTUN, &label.ld_enabled, 1, descr)
@@ -88,6 +81,7 @@ extern struct g_label_desc g_label_ntfs;
 extern struct g_label_desc g_label_gpt;
 extern struct g_label_desc g_label_gpt_uuid;
 extern struct g_label_desc g_label_disk_ident;
+extern struct g_label_desc g_label_flashmap;
 
 extern void g_label_rtrim(char *label, size_t size);
 #endif	/* _KERNEL */

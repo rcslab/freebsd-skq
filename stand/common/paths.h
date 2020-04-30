@@ -1,6 +1,5 @@
 /*-
- * Copyright (c) 2016 M. Warner Losh <imp@freebsd.org>
- * All rights reserved.
+ * Copyright (c) 2016 M. Warner Losh <imp@FreeBSD.org>
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -29,10 +28,14 @@
 #ifndef _PATHS_H_
 #define	_PATHS_H_
 
+#include <sys/boot.h>	/* To get kernel path */
+
 #define PATH_DOTCONFIG	"/boot.config"
 #define PATH_CONFIG	"/boot/config"
 #define PATH_LOADER	"/boot/loader"
 #define PATH_LOADER_EFI	"/boot/loader.efi"
-#define PATH_KERNEL	"/boot/kernel/kernel"
+#define PATH_LOADER_ZFS	"/boot/zfsloader"
+#define PATH_LOADER_CONF "/boot/loader.conf"
+#define PATH_DEFAULTS_LOADER_CONF "/boot/defaults/loader.conf"
 
 #endif /* _PATHS_H_ */

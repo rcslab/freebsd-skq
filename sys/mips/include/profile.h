@@ -46,7 +46,8 @@
 /*XXX This is not MIPS64 safe. */
 
 #define	MCOUNT \
-	__asm(".globl _mcount;"		\
+	__asm(".text;"			\
+	".globl _mcount;"		\
 	".type _mcount,@function;"	\
 	"_mcount:;"			\
 	".set noreorder;"		\
@@ -75,13 +76,6 @@
 	".set at");
 
 #ifdef _KERNEL
-/*
- * The following two macros do splhigh and splx respectively.
- * They have to be defined this way because these are real
- * functions on the MIPS, and we do not want to invoke mcount
- * recursively.
- */
-
 #define	MCOUNT_DECL(s)	u_long s;
 #ifdef SMP
 extern int	mcount_lock;

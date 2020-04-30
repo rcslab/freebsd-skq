@@ -284,7 +284,7 @@ key_addrprotohash(const union sockaddr_union *src,
 #endif
 	default:
 		hval = 0;
-		ipseclog((LOG_DEBUG, "%s: unknown address family %d",
+		ipseclog((LOG_DEBUG, "%s: unknown address family %d\n",
 		    __func__, dst->sa.sa_family));
 	}
 	return (hval);
@@ -508,7 +508,9 @@ SYSCTL_INT(_net_key, KEYCTL_AH_KEYMIN, ah_keymin,
 SYSCTL_INT(_net_key, KEYCTL_PREFERED_OLDSA, preferred_oldsa,
 	CTLFLAG_VNET | CTLFLAG_RW, &VNET_NAME(key_preferred_oldsa), 0, "");
 
-static SYSCTL_NODE(_net_key, OID_AUTO, spdcache, CTLFLAG_RW, 0, "SPD cache");
+static SYSCTL_NODE(_net_key, OID_AUTO, spdcache,
+    CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "SPD cache");
 
 SYSCTL_UINT(_net_key_spdcache, OID_AUTO, maxentries,
 	CTLFLAG_VNET | CTLFLAG_RDTUN, &VNET_NAME(key_spdcache_maxentries), 0,
@@ -2039,8 +2041,8 @@ key_spdadd(struct socket *so, struct mbuf *m, const struct sadb_msghdr *mhp)
 			key_freesp(&newsp);
 		} else {
 			key_freesp(&newsp);
-			ipseclog((LOG_DEBUG, "%s: a SP entry exists already.",
-			    __func__));
+			ipseclog((LOG_DEBUG,
+			    "%s: a SP entry exists already.\n", __func__));
 			return (key_senderror(so, m, EEXIST));
 		}
 	}
@@ -3128,7 +3130,7 @@ key_delsav(struct secasvar *sav)
 	if ((sav->flags & SADB_X_EXT_F_CLONED) == 0) {
 		mtx_destroy(sav->lock);
 		free(sav->lock, M_IPSEC_MISC);
-		uma_zfree(V_key_lft_zone, sav->lft_c);
+		uma_zfree_pcpu(V_key_lft_zone, sav->lft_c);
 	}
 	free(sav, M_IPSEC_SA);
 }
@@ -4760,32 +4762,8 @@ key_random()
 {
 	u_long value;
 
-	key_randomfill(&value, sizeof(value));
+	arc4random_buf(&value, sizeof(value));
 	return value;
-}
-
-void
-key_randomfill(void *p, size_t l)
-{
-	size_t n;
-	u_long v;
-	static int warn = 1;
-
-	n = 0;
-	n = (size_t)read_random(p, (u_int)l);
-	/* last resort */
-	while (n < l) {
-		v = random();
-		bcopy(&v, (u_int8_t *)p + n,
-		    l - n < sizeof(v) ? l - n : sizeof(v));
-		n += sizeof(v);
-
-		if (warn) {
-			printf("WARNING: pseudo-random number generator "
-			    "used for IPsec processing\n");
-			warn = 0;
-		}
-	}
 }
 
 /*
@@ -5433,7 +5411,7 @@ key_update(struct socket *so, struct mbuf *m, const struct sadb_msghdr *mhp)
 	}
 	/* saidx should match with SA. */
 	if (key_cmpsaidx(&sav->sah->saidx, &saidx, CMP_MODE_REQID) == 0) {
-		ipseclog((LOG_DEBUG, "%s: saidx mismatched for SPI %u",
+		ipseclog((LOG_DEBUG, "%s: saidx mismatched for SPI %u\n",
 		    __func__, ntohl(sav->spi)));
 		key_freesav(&sav);
 		return key_senderror(so, m, ESRCH);
@@ -6909,14 +6887,14 @@ key_acqdone(const struct secasindex *saidx, uint32_t seq)
 	if (acq != NULL) {
 		if (key_cmpsaidx(&acq->saidx, saidx, CMP_EXACTLY) == 0) {
 			ipseclog((LOG_DEBUG,
-			    "%s: Mismatched saidx for ACQ %u", __func__, seq));
+			    "%s: Mismatched saidx for ACQ %u\n", __func__, seq));
 			acq = NULL;
 		} else {
 			acq->created = 0;
 		}
 	} else {
 		ipseclog((LOG_DEBUG,
-		    "%s: ACQ %u is not found.", __func__, seq));
+		    "%s: ACQ %u is not found.\n", __func__, seq));
 	}
 	ACQ_UNLOCK();
 	if (acq == NULL)
@@ -7188,7 +7166,7 @@ key_register(struct socket *so, struct mbuf *m, const struct sadb_msghdr *mhp)
 		return key_senderror(so, m, ENOBUFS);
 
 	MGETHDR(n, M_NOWAIT, MT_DATA);
-	if (len > MHLEN) {
+	if (n != NULL && len > MHLEN) {
 		if (!(MCLGET(n, M_NOWAIT))) {
 			m_freem(n);
 			n = NULL;

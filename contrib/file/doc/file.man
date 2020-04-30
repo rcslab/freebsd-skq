@@ -1,5 +1,5 @@
-.\" $File: file.man,v 1.131 2018/07/24 21:33:56 christos Exp $
-.Dd July 25, 2018
+.\" $File: file.man,v 1.138 2019/10/15 18:00:40 christos Exp $
+.Dd July 13, 2019
 .Dt FILE __CSECTION__
 .Os
 .Sh NAME
@@ -159,7 +159,7 @@ two groups, so they are performed last.
 The language test routines also test for some miscellany
 (such as
 .Xr tar 1
-archives).
+archives, JSON files).
 .Pp
 Any file that cannot be identified as having been written
 in any of the character sets listed above is simply said to be
@@ -171,6 +171,8 @@ Causes the file command to output the file type and creator code as
 used by older MacOS versions.
 The code consists of eight letters,
 the first describing the file type, the latter the creator.
+This option works properly only for file formats that have the
+apple-style output defined.
 .It Fl b , Fl Fl brief
 Do not prepend filenames to output lines (brief mode).
 .It Fl C , Fl Fl compile
@@ -210,9 +212,13 @@ Ignored for backwards compatibility.
 Prints details of Compound Document Files.
 .It compress
 Checks for, and looks inside, compressed files.
+.It csv
+Checks Comma Separated Value files.
 .It elf
 Prints ELF file details, provided soft magic tests are enabled and the
 elf magic is found.
+.It json
+Examines JSON (RFC-7159) files by parsing them for compliance.
 .It soft
 Consults magic files.
 .It tar
@@ -285,7 +291,7 @@ The magic pattern with the highest strength (see the
 option) comes first.
 .It Fl l , Fl Fl list
 Shows a list of patterns and their strength sorted descending by
-.Xr magic 4
+.Xr magic __FSECTION__
 strength
 which is used for the matching (see also the
 .Fl k
@@ -359,10 +365,11 @@ On systems where libseccomp
 is available, the
 .Fl S
 flag disables sandboxing which is enabled by default.
-This option is needed for file to execute external descompressing programs,
+This option is needed for file to execute external decompressing programs,
 i.e. when the
 .Fl z
 flag is specified and the built-in decompressors are not available.
+On systems where sandboxing is not available, this option has no effect.
 .It Fl v , Fl Fl version
 Print the version of the program and exit.
 .It Fl z , Fl Fl uncompress
@@ -629,11 +636,11 @@ were written by John Gilmore from his public-domain
 program, and are not covered by the above license.
 .Sh BUGS
 Please report bugs and send patches to the bug tracker at
-.Pa http://bugs.astron.com/
+.Pa https://bugs.astron.com/
 or the mailing list at
 .Aq file@astron.com
 (visit
-.Pa http://mailman.astron.com/mailman/listinfo/file
+.Pa https://mailman.astron.com/mailman/listinfo/file
 first to subscribe).
 .Sh TODO
 Fix output so that tests for MIME and APPLE flags are not needed all

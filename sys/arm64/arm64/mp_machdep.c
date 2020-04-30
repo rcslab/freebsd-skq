@@ -29,6 +29,7 @@
  */
 
 #include "opt_acpi.h"
+#include "opt_ddb.h"
 #include "opt_kstack_pages.h"
 #include "opt_platform.h"
 
@@ -39,10 +40,13 @@ __FBSDID("$FreeBSD$");
 #include <sys/systm.h>
 #include <sys/bus.h>
 #include <sys/cpu.h>
+#include <sys/csan.h>
 #include <sys/kernel.h>
+#include <sys/ktr.h>
 #include <sys/malloc.h>
 #include <sys/module.h>
 #include <sys/mutex.h>
+#include <sys/pcpu.h>
 #include <sys/proc.h>
 #include <sys/sched.h>
 #include <sys/smp.h>
@@ -51,8 +55,10 @@ __FBSDID("$FreeBSD$");
 #include <vm/pmap.h>
 #include <vm/vm_extern.h>
 #include <vm/vm_kern.h>
+#include <vm/vm_map.h>
 
 #include <machine/machdep.h>
+#include <machine/debug_monitor.h>
 #include <machine/intr.h>
 #include <machine/smp.h>
 #ifdef VFP
@@ -111,15 +117,12 @@ static struct intr_ipi *intr_ipi_lookup(u_int);
 static void intr_pic_ipi_setup(u_int, const char *, intr_ipi_handler_t *,
     void *);
 
-extern struct pcpu __pcpu[];
-
 static void ipi_ast(void *);
 static void ipi_hardclock(void *);
 static void ipi_preempt(void *);
 static void ipi_rendezvous(void *);
 static void ipi_stop(void *);
 
-struct mtx ap_boot_mtx;
 struct pcb stoppcbs[MAXCPU];
 
 /*
@@ -132,10 +135,18 @@ static int cpu0 = -1;
 void mpentry(unsigned long cpuid);
 void init_secondary(uint64_t);
 
-uint8_t secondary_stacks[MAXCPU - 1][PAGE_SIZE * KSTACK_PAGES] __aligned(16);
+/* Synchronize AP startup. */
+static struct mtx ap_boot_mtx;
+
+/* Stacks for AP initialization, discarded once idle threads are started. */
+void *bootstack;
+static void *bootstacks[MAXCPU];
+
+/* Count of started APs, used to synchronize access to bootstack. */
+static volatile int aps_started;
 
 /* Set to 1 once we're ready to let the APs out of the pen. */
-volatile int aps_ready = 0;
+static volatile int aps_ready;
 
 /* Temporary variables for init_secondary()  */
 void *dpcpu[MAXCPU - 1];
@@ -190,6 +201,7 @@ void
 init_secondary(uint64_t cpu)
 {
 	struct pcpu *pcpup;
+	pmap_t pmap0;
 
 	pcpup = &__pcpu[cpu];
 	/*
@@ -200,14 +212,20 @@ init_secondary(uint64_t cpu)
 	    "mov x18, %0 \n"
 	    "msr tpidr_el1, %0" :: "r"(pcpup));
 
-	/* Spin until the BSP releases the APs */
-	while (!aps_ready)
+	/* Signal the BSP and spin until it has released all APs. */
+	atomic_add_int(&aps_started, 1);
+	while (!atomic_load_int(&aps_ready))
 		__asm __volatile("wfe");
 
 	/* Initialize curthread */
 	KASSERT(PCPU_GET(idlethread) != NULL, ("no idle thread"));
 	pcpup->pc_curthread = pcpup->pc_idlethread;
-	pcpup->pc_curpcb = pcpup->pc_idlethread->td_pcb;
+
+	/* Initialize curpmap to match TTBR0's current setting. */
+	pmap0 = vmspace_pmap(&vmspace0);
+	KASSERT(pmap_to_ttbr0(pmap0) == READ_SPECIALREG(ttbr0_el1),
+	    ("pmap0 doesn't match cpu %ld's ttbr0", cpu));
+	pcpup->pc_curpmap = pmap0;
 
 	/*
 	 * Identify current CPU. This is necessary to setup
@@ -229,19 +247,20 @@ init_secondary(uint64_t cpu)
 	dbg_init();
 	pan_enable();
 
-	/* Enable interrupts */
-	intr_enable();
-
 	mtx_lock_spin(&ap_boot_mtx);
-
 	atomic_add_rel_32(&smp_cpus, 1);
-
 	if (smp_cpus == mp_ncpus) {
 		/* enable IPI's, tlb shootdown, freezes etc */
 		atomic_store_rel_int(&smp_started, 1);
 	}
-
 	mtx_unlock_spin(&ap_boot_mtx);
+
+	kcsan_cpu_init(cpu);
+
+	/*
+	 * Assert that smp_after_idle_runnable condition is reasonable.
+	 */
+	MPASS(PCPU_GET(curpcb) == NULL);
 
 	/* Enter the scheduler */
 	sched_throw(NULL);
@@ -249,6 +268,24 @@ init_secondary(uint64_t cpu)
 	panic("scheduler returned us to init_secondary");
 	/* NOTREACHED */
 }
+
+static void
+smp_after_idle_runnable(void *arg __unused)
+{
+	struct pcpu *pc;
+	int cpu;
+
+	for (cpu = 1; cpu < mp_ncpus; cpu++) {
+		if (bootstacks[cpu] != NULL) {
+			pc = pcpu_find(cpu);
+			while (atomic_load_ptr(&pc->pc_curpcb) == NULL)
+				cpu_spinwait();
+			kmem_free((vm_offset_t)bootstacks[cpu], PAGE_SIZE);
+		}
+	}
+}
+SYSINIT(smp_after_idle_runnable, SI_SUB_SMP, SI_ORDER_ANY,
+    smp_after_idle_runnable, NULL);
 
 /*
  *  Send IPI thru interrupt controller.
@@ -353,6 +390,10 @@ ipi_stop(void *dummy __unused)
 	while (!CPU_ISSET(cpu, &started_cpus))
 		cpu_spinwait();
 
+#ifdef DDB
+	dbg_register_sync(NULL);
+#endif
+
 	CPU_CLR_ATOMIC(cpu, &started_cpus);
 	CPU_CLR_ATOMIC(cpu, &stopped_cpus);
 	CTR0(KTR_SMP, "IPI_STOP (restart)");
@@ -380,7 +421,7 @@ start_cpu(u_int id, uint64_t target_cpu)
 	struct pcpu *pcpup;
 	vm_paddr_t pa;
 	u_int cpuid;
-	int err;
+	int err, naps;
 
 	/* Check we are able to start this cpu */
 	if (id > mp_maxid)
@@ -394,7 +435,7 @@ start_cpu(u_int id, uint64_t target_cpu)
 
 	/*
 	 * Rotate the CPU IDs to put the boot CPU as CPU 0. We keep the other
-	 * CPUs ordered as the are likely grouped into clusters so it can be
+	 * CPUs ordered as they are likely grouped into clusters so it can be
 	 * useful to keep that property, e.g. for the GICv3 driver to send
 	 * an IPI to all CPUs in the cluster.
 	 */
@@ -409,29 +450,41 @@ start_cpu(u_int id, uint64_t target_cpu)
 	dpcpu[cpuid - 1] = (void *)kmem_malloc(DPCPU_SIZE, M_WAITOK | M_ZERO);
 	dpcpu_init(dpcpu[cpuid - 1], cpuid);
 
+	bootstacks[cpuid] = (void *)kmem_malloc(PAGE_SIZE, M_WAITOK | M_ZERO);
+
+	naps = atomic_load_int(&aps_started);
+	bootstack = (char *)bootstacks[cpuid] + PAGE_SIZE;
+
 	printf("Starting CPU %u (%lx)\n", cpuid, target_cpu);
 	pa = pmap_extract(kernel_pmap, (vm_offset_t)mpentry);
-
 	err = psci_cpu_on(target_cpu, pa, cpuid);
 	if (err != PSCI_RETVAL_SUCCESS) {
 		/*
 		 * Panic here if INVARIANTS are enabled and PSCI failed to
-		 * start the requested CPU. If psci_cpu_on returns PSCI_MISSING
+		 * start the requested CPU.  psci_cpu_on() returns PSCI_MISSING
 		 * to indicate we are unable to use it to start the given CPU.
 		 */
 		KASSERT(err == PSCI_MISSING ||
 		    (mp_quirks & MP_QUIRK_CPULIST) == MP_QUIRK_CPULIST,
-		    ("Failed to start CPU %u (%lx)\n", id, target_cpu));
+		    ("Failed to start CPU %u (%lx), error %d\n",
+		    id, target_cpu, err));
 
 		pcpu_destroy(pcpup);
 		kmem_free((vm_offset_t)dpcpu[cpuid - 1], DPCPU_SIZE);
 		dpcpu[cpuid - 1] = NULL;
+		kmem_free((vm_offset_t)bootstacks[cpuid], PAGE_SIZE);
+		bootstacks[cpuid] = NULL;
 		mp_ncpus--;
 
 		/* Notify the user that the CPU failed to start */
-		printf("Failed to start CPU %u (%lx)\n", id, target_cpu);
-	} else
+		printf("Failed to start CPU %u (%lx), error %d\n",
+		    id, target_cpu, err);
+	} else {
+		/* Wait for the AP to switch to its boot stack. */
+		while (atomic_load_int(&aps_started) < naps + 1)
+			cpu_spinwait();
 		CPU_SET(cpuid, &all_cpus);
+	}
 
 	return (true);
 }
@@ -638,9 +691,10 @@ cpu_find_cpu0_fdt(u_int id, phandle_t node, u_int addr_size, pcell_t *reg)
 void
 cpu_mp_setmaxid(void)
 {
-#if defined(DEV_ACPI) || defined(FDT)
 	int cores;
-#endif
+
+	mp_ncpus = 1;
+	mp_maxid = 0;
 
 	switch(arm64_bus_method) {
 #ifdef DEV_ACPI
@@ -653,7 +707,6 @@ cpu_mp_setmaxid(void)
 				    cores);
 			mp_ncpus = cores;
 			mp_maxid = cores - 1;
-			return;
 		}
 		break;
 #endif
@@ -667,18 +720,21 @@ cpu_mp_setmaxid(void)
 				    cores);
 			mp_ncpus = cores;
 			mp_maxid = cores - 1;
-			return;
 		}
 		break;
 #endif
 	default:
+		if (bootverbose)
+			printf("No CPU data, limiting to 1 core\n");
 		break;
 	}
 
-	if (bootverbose)
-		printf("No CPU data, limiting to 1 core\n");
-	mp_ncpus = 1;
-	mp_maxid = 0;
+	if (TUNABLE_INT_FETCH("hw.ncpu", &cores)) {
+		if (cores > 0 && cores < mp_ncpus) {
+			mp_ncpus = cores;
+			mp_maxid = cores - 1;
+		}
+	}
 }
 
 /*

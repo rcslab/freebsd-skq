@@ -2163,13 +2163,13 @@ relock_DIOCKILLSTATES:
 		struct pfsync_state	*pstore, *p;
 		int i, nr;
 
-		if (ps->ps_len == 0) {
+		if (ps->ps_len <= 0) {
 			nr = uma_zone_get_cur(V_pf_state_z);
 			ps->ps_len = sizeof(struct pfsync_state) * nr;
 			break;
 		}
 
-		p = pstore = malloc(ps->ps_len, M_TEMP, M_WAITOK);
+		p = pstore = malloc(ps->ps_len, M_TEMP, M_WAITOK | M_ZERO);
 		nr = 0;
 
 		for (i = 0; i <= pf_hashmask; i++) {
@@ -2643,6 +2643,10 @@ DIOCGETSTATES_full:
 			error = EINVAL;
 			break;
 		}
+		if (pp->addr.addr.p.dyn != NULL) {
+			error = EINVAL;
+			break;
+		}
 		pa = malloc(sizeof(*pa), M_PFRULE, M_WAITOK);
 		bcopy(&pp->addr, pa, sizeof(struct pf_pooladdr));
 		if (pa->ifname[0])
@@ -2739,6 +2743,10 @@ DIOCGETSTATES_full:
 		if (pca->addr.addr.type != PF_ADDR_ADDRMASK &&
 		    pca->addr.addr.type != PF_ADDR_DYNIFTL &&
 		    pca->addr.addr.type != PF_ADDR_TABLE) {
+			error = EINVAL;
+			break;
+		}
+		if (pca->addr.addr.p.dyn != NULL) {
 			error = EINVAL;
 			break;
 		}
@@ -3000,7 +3008,8 @@ DIOCCHANGEADDR_error:
 	case DIOCRGETTABLES: {
 		struct pfioc_table *io = (struct pfioc_table *)addr;
 		struct pfr_table *pfrts;
-		size_t totlen, n;
+		size_t totlen;
+		int n;
 
 		if (io->pfrio_esize != sizeof(struct pfr_table)) {
 			error = ENODEV;
@@ -3008,6 +3017,11 @@ DIOCCHANGEADDR_error:
 		}
 		PF_RULES_RLOCK();
 		n = pfr_table_count(&io->pfrio_table, io->pfrio_flags);
+		if (n < 0) {
+			PF_RULES_RUNLOCK();
+			error = EINVAL;
+			break;
+		}
 		io->pfrio_size = min(io->pfrio_size, n);
 
 		totlen = io->pfrio_size * sizeof(struct pfr_table);
@@ -3031,7 +3045,8 @@ DIOCCHANGEADDR_error:
 	case DIOCRGETTSTATS: {
 		struct pfioc_table *io = (struct pfioc_table *)addr;
 		struct pfr_tstats *pfrtstats;
-		size_t totlen, n;
+		size_t totlen;
+		int n;
 
 		if (io->pfrio_esize != sizeof(struct pfr_tstats)) {
 			error = ENODEV;
@@ -3039,6 +3054,11 @@ DIOCCHANGEADDR_error:
 		}
 		PF_RULES_WLOCK();
 		n = pfr_table_count(&io->pfrio_table, io->pfrio_flags);
+		if (n < 0) {
+			PF_RULES_WUNLOCK();
+			error = EINVAL;
+			break;
+		}
 		io->pfrio_size = min(io->pfrio_size, n);
 
 		totlen = io->pfrio_size * sizeof(struct pfr_tstats);
@@ -3061,7 +3081,8 @@ DIOCCHANGEADDR_error:
 	case DIOCRCLRTSTATS: {
 		struct pfioc_table *io = (struct pfioc_table *)addr;
 		struct pfr_table *pfrts;
-		size_t totlen, n;
+		size_t totlen;
+		int n;
 
 		if (io->pfrio_esize != sizeof(struct pfr_table)) {
 			error = ENODEV;
@@ -3070,6 +3091,11 @@ DIOCCHANGEADDR_error:
 
 		PF_RULES_WLOCK();
 		n = pfr_table_count(&io->pfrio_table, io->pfrio_flags);
+		if (n < 0) {
+			PF_RULES_WUNLOCK();
+			error = EINVAL;
+			break;
+		}
 		io->pfrio_size = min(io->pfrio_size, n);
 
 		totlen = io->pfrio_size * sizeof(struct pfr_table);
@@ -3096,31 +3122,34 @@ DIOCCHANGEADDR_error:
 	case DIOCRSETTFLAGS: {
 		struct pfioc_table *io = (struct pfioc_table *)addr;
 		struct pfr_table *pfrts;
-		size_t totlen, n;
+		size_t totlen;
+		int n;
 
 		if (io->pfrio_esize != sizeof(struct pfr_table)) {
 			error = ENODEV;
 			break;
 		}
 
-		PF_RULES_WLOCK();
+		PF_RULES_RLOCK();
 		n = pfr_table_count(&io->pfrio_table, io->pfrio_flags);
+		if (n < 0) {
+			PF_RULES_RUNLOCK();
+			error = EINVAL;
+			break;
+		}
+
 		io->pfrio_size = min(io->pfrio_size, n);
+		PF_RULES_RUNLOCK();
 
 		totlen = io->pfrio_size * sizeof(struct pfr_table);
 		pfrts = mallocarray(io->pfrio_size, sizeof(struct pfr_table),
-		    M_TEMP, M_NOWAIT);
-		if (pfrts == NULL) {
-			error = ENOMEM;
-			PF_RULES_WUNLOCK();
-			break;
-		}
+		    M_TEMP, M_WAITOK);
 		error = copyin(io->pfrio_buffer, pfrts, totlen);
 		if (error) {
 			free(pfrts, M_TEMP);
-			PF_RULES_WUNLOCK();
 			break;
 		}
+		PF_RULES_WLOCK();
 		error = pfr_set_tflags(pfrts, io->pfrio_size,
 		    io->pfrio_setflag, io->pfrio_clrflag, &io->pfrio_nchange,
 		    &io->pfrio_ndel, io->pfrio_flags | PFR_FLAG_USERIOCTL);
@@ -3754,7 +3783,9 @@ DIOCCHANGEADDR_error:
 			break;
 		}
 
-		p = pstore = malloc(psn->psn_len, M_TEMP, M_WAITOK);
+		nr = 0;
+
+		p = pstore = malloc(psn->psn_len, M_TEMP, M_WAITOK | M_ZERO);
 		for (i = 0, sh = V_pf_srchash; i <= pf_srchashmask;
 		    i++, sh++) {
 		    PF_HASHROW_LOCK(sh);
@@ -4351,7 +4382,7 @@ pf_load(void)
 
 	pf_mtag_initialize();
 
-	pf_dev = make_dev(&pf_cdevsw, 0, 0, 0, 0600, PF_NAME);
+	pf_dev = make_dev(&pf_cdevsw, 0, UID_ROOT, GID_WHEEL, 0600, PF_NAME);
 	if (pf_dev == NULL)
 		return (ENOMEM);
 

@@ -54,6 +54,7 @@ __FBSDID("$FreeBSD$");
 #include <vm/vm.h>
 #include <vm/vm_kern.h>
 #include <geom/geom.h>
+#include <geom/geom_dbg.h>
 
 #include <geom/journal/g_journal.h>
 
@@ -94,7 +95,8 @@ static u_int g_journal_accept_immediately = 64;
 static u_int g_journal_record_entries = GJ_RECORD_HEADER_NENTRIES;
 static u_int g_journal_do_optimize = 1;
 
-static SYSCTL_NODE(_kern_geom, OID_AUTO, journal, CTLFLAG_RW, 0,
+static SYSCTL_NODE(_kern_geom, OID_AUTO, journal,
+    CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
     "GEOM_JOURNAL stuff");
 SYSCTL_INT(_kern_geom_journal, OID_AUTO, debug, CTLFLAG_RWTUN, &g_journal_debug, 0,
     "Debug level");
@@ -127,7 +129,8 @@ g_journal_record_entries_sysctl(SYSCTL_HANDLER_ARGS)
 	return (0);
 }
 SYSCTL_PROC(_kern_geom_journal, OID_AUTO, record_entries,
-    CTLTYPE_UINT | CTLFLAG_RW, NULL, 0, g_journal_record_entries_sysctl, "I",
+    CTLTYPE_UINT | CTLFLAG_RW | CTLFLAG_NEEDGIANT, NULL, 0,
+    g_journal_record_entries_sysctl, "I",
     "Maximum number of entires in one journal record");
 SYSCTL_UINT(_kern_geom_journal, OID_AUTO, optimize, CTLFLAG_RW,
     &g_journal_do_optimize, 0, "Try to combine bios on flush and copy");
@@ -140,7 +143,8 @@ static u_int g_journal_cache_misses = 0;
 static u_int g_journal_cache_alloc_failures = 0;
 static u_long g_journal_cache_low = 0;
 
-static SYSCTL_NODE(_kern_geom_journal, OID_AUTO, cache, CTLFLAG_RW, 0,
+static SYSCTL_NODE(_kern_geom_journal, OID_AUTO, cache,
+    CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
     "GEOM_JOURNAL cache");
 SYSCTL_ULONG(_kern_geom_journal_cache, OID_AUTO, used, CTLFLAG_RD,
     &g_journal_cache_used, 0, "Number of allocated bytes");
@@ -159,7 +163,8 @@ g_journal_cache_limit_sysctl(SYSCTL_HANDLER_ARGS)
 	return (0);
 }
 SYSCTL_PROC(_kern_geom_journal_cache, OID_AUTO, limit,
-    CTLTYPE_ULONG | CTLFLAG_RWTUN, NULL, 0, g_journal_cache_limit_sysctl, "I",
+    CTLTYPE_ULONG | CTLFLAG_RWTUN | CTLFLAG_NEEDGIANT, NULL, 0,
+    g_journal_cache_limit_sysctl, "I",
     "Maximum number of allocated bytes");
 SYSCTL_UINT(_kern_geom_journal_cache, OID_AUTO, divisor, CTLFLAG_RDTUN,
     &g_journal_cache_divisor, 0,
@@ -181,7 +186,8 @@ g_journal_cache_switch_sysctl(SYSCTL_HANDLER_ARGS)
 	return (0);
 }
 SYSCTL_PROC(_kern_geom_journal_cache, OID_AUTO, switch,
-    CTLTYPE_UINT | CTLFLAG_RW, NULL, 0, g_journal_cache_switch_sysctl, "I",
+    CTLTYPE_UINT | CTLFLAG_RW | CTLFLAG_NEEDGIANT, NULL, 0,
+    g_journal_cache_switch_sysctl, "I",
     "Force switch when we hit this percent of cache use");
 SYSCTL_UINT(_kern_geom_journal_cache, OID_AUTO, misses, CTLFLAG_RW,
     &g_journal_cache_misses, 0, "Number of cache misses");
@@ -195,7 +201,8 @@ static u_long g_journal_stats_wait_for_copy = 0;
 static u_long g_journal_stats_journal_full = 0;
 static u_long g_journal_stats_low_mem = 0;
 
-static SYSCTL_NODE(_kern_geom_journal, OID_AUTO, stats, CTLFLAG_RW, 0,
+static SYSCTL_NODE(_kern_geom_journal, OID_AUTO, stats,
+    CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
     "GEOM_JOURNAL statistics");
 SYSCTL_ULONG(_kern_geom_journal_stats, OID_AUTO, skipped_bytes, CTLFLAG_RW,
     &g_journal_stats_bytes_skipped, 0, "Number of skipped bytes");
@@ -745,6 +752,7 @@ g_journal_start(struct bio *bp)
 			return;
 		}
 		/* FALLTHROUGH */
+	case BIO_SPEEDUP:
 	case BIO_DELETE:
 	default:
 		g_io_deliver(bp, EOPNOTSUPP);
@@ -2623,15 +2631,15 @@ g_journal_dumpconf(struct sbuf *sb, const char *indent, struct g_geom *gp,
 
 		sbuf_printf(sb, "%s<Role>", indent);
 		if (cp == sc->sc_dconsumer) {
-			sbuf_printf(sb, "Data");
+			sbuf_cat(sb, "Data");
 			first = 0;
 		}
 		if (cp == sc->sc_jconsumer) {
 			if (!first)
-				sbuf_printf(sb, ",");
-			sbuf_printf(sb, "Journal");
+				sbuf_cat(sb, ",");
+			sbuf_cat(sb, "Journal");
 		}
-		sbuf_printf(sb, "</Role>\n");
+		sbuf_cat(sb, "</Role>\n");
 		if (cp == sc->sc_jconsumer) {
 			sbuf_printf(sb, "<Jstart>%jd</Jstart>\n",
 			    (intmax_t)sc->sc_jstart);
@@ -2652,7 +2660,7 @@ g_journal_shutdown(void *arg, int howto __unused)
 	struct g_class *mp;
 	struct g_geom *gp, *gp2;
 
-	if (panicstr != NULL)
+	if (KERNEL_PANICKED())
 		return;
 	mp = arg;
 	g_topology_lock();
@@ -2749,7 +2757,8 @@ g_journal_fini(struct g_class *mp)
 	}
 	if (g_journal_event_lowmem != NULL)
 		EVENTHANDLER_DEREGISTER(vm_lowmem, g_journal_event_lowmem);
-	g_journal_stop_switcher();
+	if (g_journal_switcher_proc != NULL)
+		g_journal_stop_switcher();
 }
 
 DECLARE_GEOM_CLASS(g_journal_class, g_journal);
@@ -2873,7 +2882,7 @@ g_journal_do_switch(struct g_class *classp)
 		save = curthread_pflags_set(TDP_SYNCIO);
 
 		GJ_TIMER_START(1, &bt);
-		vfs_msync(mp, MNT_NOWAIT);
+		vfs_periodic(mp, MNT_NOWAIT);
 		GJ_TIMER_STOP(1, &bt, "Msync time of %s", mountpoint);
 
 		GJ_TIMER_START(1, &bt);

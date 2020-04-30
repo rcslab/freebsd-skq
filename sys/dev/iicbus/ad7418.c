@@ -35,17 +35,8 @@ __FBSDID("$FreeBSD$");
 #include <sys/lock.h>
 #include <sys/module.h>
 #include <sys/bus.h>
-#include <sys/resource.h>
-#include <sys/rman.h>
 #include <sys/sysctl.h>
 #include <sys/sx.h>
-
-#include <machine/bus.h>
-#include <machine/cpu.h>
-#include <machine/cpufunc.h>
-#include <machine/frame.h>
-#include <machine/resource.h>
-#include <machine/intr.h>
 
 #include <dev/iicbus/iiconf.h>
 
@@ -127,11 +118,11 @@ ad7418_attach(device_t dev)
 	sx_init(&sc->sc_lock, "ad7418");
 
 	SYSCTL_ADD_PROC(ctx, SYSCTL_CHILDREN(tree), OID_AUTO,
-		"temp", CTLTYPE_INT | CTLFLAG_RD, sc, 0,
-		ad7418_sysctl_temp, "I", "operating temperature");
+	    "temp", CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_NEEDGIANT, sc, 0,
+	    ad7418_sysctl_temp, "I", "operating temperature");
 	SYSCTL_ADD_PROC(ctx, SYSCTL_CHILDREN(tree), OID_AUTO,
-		"volt", CTLTYPE_INT | CTLFLAG_RD, sc, 0,
-		ad7418_sysctl_voltage, "I", "input voltage");
+	    "volt", CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_NEEDGIANT, sc, 0,
+	    ad7418_sysctl_voltage, "I", "input voltage");
 
 	/* enable chip if configured in shutdown mode */
 	conf = ad7418_read_1(dev, AD7418_CONF);

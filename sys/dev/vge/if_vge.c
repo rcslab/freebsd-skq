@@ -529,6 +529,34 @@ vge_setvlan(struct vge_softc *sc)
 	CSR_WRITE_1(sc, VGE_RXCFG, cfg);
 }
 
+static u_int
+vge_set_maddr(void *arg, struct sockaddr_dl *sdl, u_int cnt)
+{
+	struct vge_softc *sc = arg;
+
+        if (sc->vge_camidx == VGE_CAM_MAXADDRS)
+		return (0);
+
+	(void )vge_cam_set(sc, LLADDR(sdl));
+
+	return (1);
+}
+
+static u_int
+vge_hash_maddr(void *arg, struct sockaddr_dl *sdl, u_int cnt)
+{
+	uint32_t h, *hashes = arg;
+
+	h = ether_crc32_be(LLADDR(sdl), ETHER_ADDR_LEN) >> 26;
+	if (h < 32)
+		hashes[0] |= (1 << h);
+	else
+		hashes[1] |= (1 << (h - 32));
+
+	return (1);
+}
+
+
 /*
  * Program the multicast filter. We use the 64-entry CAM filter
  * for perfect filtering. If there's more than 64 multicast addresses,
@@ -538,10 +566,8 @@ static void
 vge_rxfilter(struct vge_softc *sc)
 {
 	struct ifnet *ifp;
-	struct ifmultiaddr *ifma;
-	uint32_t h, hashes[2];
+	uint32_t hashes[2];
 	uint8_t rxcfg;
-	int error = 0;
 
 	VGE_LOCK_ASSERT(sc);
 
@@ -572,33 +598,15 @@ vge_rxfilter(struct vge_softc *sc)
 	}
 
 	vge_cam_clear(sc);
+
 	/* Now program new ones */
-	if_maddr_rlock(ifp);
-	CK_STAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
-		if (ifma->ifma_addr->sa_family != AF_LINK)
-			continue;
-		error = vge_cam_set(sc,
-		    LLADDR((struct sockaddr_dl *)ifma->ifma_addr));
-		if (error)
-			break;
-	}
+	if_foreach_llmaddr(ifp, vge_set_maddr, sc);
 
 	/* If there were too many addresses, use the hash filter. */
-	if (error) {
+        if (sc->vge_camidx == VGE_CAM_MAXADDRS) {
 		vge_cam_clear(sc);
-
-		CK_STAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
-			if (ifma->ifma_addr->sa_family != AF_LINK)
-				continue;
-			h = ether_crc32_be(LLADDR((struct sockaddr_dl *)
-			    ifma->ifma_addr), ETHER_ADDR_LEN) >> 26;
-			if (h < 32)
-				hashes[0] |= (1 << h);
-			else
-				hashes[1] |= (1 << (h - 32));
-		}
+		 if_foreach_llmaddr(ifp, vge_hash_maddr, hashes);
 	}
-	if_maddr_runlock(ifp);
 
 done:
 	if (hashes[0] != 0 || hashes[1] != 0)
@@ -2524,13 +2532,13 @@ vge_sysctl_node(struct vge_softc *sc)
 	resource_int_value(device_get_name(sc->vge_dev),
 	    device_get_unit(sc->vge_dev), "tx_coal_pkt", &sc->vge_tx_coal_pkt);
 
-	tree = SYSCTL_ADD_NODE(ctx, child, OID_AUTO, "stats", CTLFLAG_RD,
-	    NULL, "VGE statistics");
+	tree = SYSCTL_ADD_NODE(ctx, child, OID_AUTO, "stats",
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "VGE statistics");
 	parent = SYSCTL_CHILDREN(tree);
 
 	/* Rx statistics. */
-	tree = SYSCTL_ADD_NODE(ctx, parent, OID_AUTO, "rx", CTLFLAG_RD,
-	    NULL, "RX MAC statistics");
+	tree = SYSCTL_ADD_NODE(ctx, parent, OID_AUTO, "rx",
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "RX MAC statistics");
 	child = SYSCTL_CHILDREN(tree);
 	VGE_SYSCTL_STAT_ADD32(ctx, child, "frames",
 	    &stats->rx_frames, "frames");
@@ -2574,8 +2582,8 @@ vge_sysctl_node(struct vge_softc *sc)
 	    &stats->rx_lenerrs, "Frames with length mismatched");
 
 	/* Tx statistics. */
-	tree = SYSCTL_ADD_NODE(ctx, parent, OID_AUTO, "tx", CTLFLAG_RD,
-	    NULL, "TX MAC statistics");
+	tree = SYSCTL_ADD_NODE(ctx, parent, OID_AUTO, "tx",
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "TX MAC statistics");
 	child = SYSCTL_CHILDREN(tree);
 	VGE_SYSCTL_STAT_ADD32(ctx, child, "good_frames",
 	    &stats->tx_good_frames, "Good frames");

@@ -310,24 +310,19 @@ null_bypass(struct vop_generic_args *ap)
 	 * (Assumes that the lower layer always returns
 	 * a VREF'ed vpp unless it gets an error.)
 	 */
-	if (descp->vdesc_vpp_offset != VDESC_NO_OFFSET &&
-	    !(descp->vdesc_flags & VDESC_NOMAP_VPP) &&
-	    !error) {
+	if (descp->vdesc_vpp_offset != VDESC_NO_OFFSET && !error) {
 		/*
 		 * XXX - even though some ops have vpp returned vp's,
 		 * several ops actually vrele this before returning.
 		 * We must avoid these ops.
 		 * (This should go away when these ops are regularized.)
 		 */
-		if (descp->vdesc_flags & VDESC_VPP_WILLRELE)
-			goto out;
 		vppp = VOPARG_OFFSETTO(struct vnode***,
 				 descp->vdesc_vpp_offset,ap);
 		if (*vppp)
 			error = null_nodeget(old_vps[0]->v_mount, **vppp, *vppp);
 	}
 
- out:
 	return (error);
 }
 
@@ -339,15 +334,15 @@ null_add_writecount(struct vop_add_writecount_args *ap)
 
 	vp = ap->a_vp;
 	lvp = NULLVPTOLOWERVP(vp);
-	KASSERT(vp->v_writecount + ap->a_inc >= 0, ("wrong writecount inc"));
-	if (vp->v_writecount > 0 && vp->v_writecount + ap->a_inc == 0)
-		error = VOP_ADD_WRITECOUNT(lvp, -1);
-	else if (vp->v_writecount == 0 && vp->v_writecount + ap->a_inc > 0)
-		error = VOP_ADD_WRITECOUNT(lvp, 1);
-	else
-		error = 0;
+	VI_LOCK(vp);
+	/* text refs are bypassed to lowervp */
+	VNASSERT(vp->v_writecount >= 0, vp, ("wrong null writecount"));
+	VNASSERT(vp->v_writecount + ap->a_inc >= 0, vp,
+	    ("wrong writecount inc %d", ap->a_inc));
+	error = VOP_ADD_WRITECOUNT(lvp, ap->a_inc);
 	if (error == 0)
 		vp->v_writecount += ap->a_inc;
+	VI_UNLOCK(vp);
 	return (error);
 }
 
@@ -396,7 +391,7 @@ null_lookup(struct vop_lookup_args *ap)
 	 * doomed state and return error.
 	 */
 	if ((error == 0 || error == EJUSTRETURN) &&
-	    (dvp->v_iflag & VI_DOOMED) != 0) {
+	    VN_IS_DOOMED(dvp)) {
 		error = ENOENT;
 		if (lvp != NULL)
 			vput(lvp);
@@ -410,7 +405,7 @@ null_lookup(struct vop_lookup_args *ap)
 		 * ldvp and locking dvp, which is also correct if the
 		 * locks are still shared.
 		 */
-		VOP_UNLOCK(ldvp, 0);
+		VOP_UNLOCK(ldvp);
 		vn_lock(dvp, LK_EXCLUSIVE | LK_RETRY);
 	}
 	vdrop(ldvp);
@@ -638,16 +633,16 @@ static int
 null_lock(struct vop_lock1_args *ap)
 {
 	struct vnode *vp = ap->a_vp;
-	int flags = ap->a_flags;
+	int flags;
 	struct null_node *nn;
 	struct vnode *lvp;
 	int error;
 
-
-	if ((flags & LK_INTERLOCK) == 0) {
+	if ((ap->a_flags & LK_INTERLOCK) == 0)
 		VI_LOCK(vp);
-		ap->a_flags = flags |= LK_INTERLOCK;
-	}
+	else
+		ap->a_flags &= ~LK_INTERLOCK;
+	flags = ap->a_flags;
 	nn = VTONULL(vp);
 	/*
 	 * If we're still active we must ask the lower layer to
@@ -655,8 +650,6 @@ null_lock(struct vop_lock1_args *ap)
 	 * vop lock.
 	 */
 	if (nn != NULL && (lvp = NULLVPTOLOWERVP(vp)) != NULL) {
-		VI_LOCK_FLAGS(lvp, MTX_DUPOK);
-		VI_UNLOCK(vp);
 		/*
 		 * We have to hold the vnode here to solve a potential
 		 * reclaim race.  If we're forcibly vgone'd while we
@@ -668,7 +661,8 @@ null_lock(struct vop_lock1_args *ap)
 		 * We prevent it from being recycled by holding the vnode
 		 * here.
 		 */
-		vholdl(lvp);
+		vholdnz(lvp);
+		VI_UNLOCK(vp);
 		error = VOP_LOCK(lvp, flags);
 
 		/*
@@ -678,7 +672,7 @@ null_lock(struct vop_lock1_args *ap)
 		 * case by reacquiring correct lock in requested mode.
 		 */
 		if (VTONULL(vp) == NULL && error == 0) {
-			ap->a_flags &= ~(LK_TYPE_MASK | LK_INTERLOCK);
+			ap->a_flags &= ~LK_TYPE_MASK;
 			switch (flags & LK_TYPE_MASK) {
 			case LK_SHARED:
 				ap->a_flags |= LK_SHARED;
@@ -691,12 +685,14 @@ null_lock(struct vop_lock1_args *ap)
 				panic("Unsupported lock request %d\n",
 				    ap->a_flags);
 			}
-			VOP_UNLOCK(lvp, 0);
+			VOP_UNLOCK(lvp);
 			error = vop_stdlock(ap);
 		}
 		vdrop(lvp);
-	} else
+	} else {
+		VI_UNLOCK(vp);
 		error = vop_stdlock(ap);
+	}
 
 	return (error);
 }
@@ -710,31 +706,16 @@ static int
 null_unlock(struct vop_unlock_args *ap)
 {
 	struct vnode *vp = ap->a_vp;
-	int flags = ap->a_flags;
-	int mtxlkflag = 0;
 	struct null_node *nn;
 	struct vnode *lvp;
 	int error;
 
-	if ((flags & LK_INTERLOCK) != 0)
-		mtxlkflag = 1;
-	else if (mtx_owned(VI_MTX(vp)) == 0) {
-		VI_LOCK(vp);
-		mtxlkflag = 2;
-	}
 	nn = VTONULL(vp);
 	if (nn != NULL && (lvp = NULLVPTOLOWERVP(vp)) != NULL) {
-		VI_LOCK_FLAGS(lvp, MTX_DUPOK);
-		flags |= LK_INTERLOCK;
-		vholdl(lvp);
-		VI_UNLOCK(vp);
-		error = VOP_UNLOCK(lvp, flags);
+		vholdnz(lvp);
+		error = VOP_UNLOCK(lvp);
 		vdrop(lvp);
-		if (mtxlkflag == 0)
-			VI_LOCK(vp);
 	} else {
-		if (mtxlkflag == 2)
-			VI_UNLOCK(vp);
 		error = vop_stdunlock(ap);
 	}
 
@@ -747,14 +728,13 @@ null_unlock(struct vop_unlock_args *ap)
  * ours.
  */
 static int
-null_inactive(struct vop_inactive_args *ap __unused)
+null_want_recycle(struct vnode *vp)
 {
-	struct vnode *vp, *lvp;
+	struct vnode *lvp;
 	struct null_node *xp;
 	struct mount *mp;
 	struct null_mount *xmp;
 
-	vp = ap->a_vp;
 	xp = VTONULL(vp);
 	lvp = NULLVPTOLOWERVP(vp);
 	mp = vp->v_mount;
@@ -768,10 +748,29 @@ null_inactive(struct vop_inactive_args *ap __unused)
 		 * deleted, then free up the vnode so as not to tie up
 		 * the lower vnodes.
 		 */
+		return (1);
+	}
+	return (0);
+}
+
+static int
+null_inactive(struct vop_inactive_args *ap)
+{
+	struct vnode *vp;
+
+	vp = ap->a_vp;
+	if (null_want_recycle(vp)) {
 		vp->v_object = NULL;
 		vrecycle(vp);
 	}
 	return (0);
+}
+
+static int
+null_need_inactive(struct vop_need_inactive_args *ap)
+{
+
+	return (null_want_recycle(ap->a_vp));
 }
 
 /*
@@ -802,15 +801,19 @@ null_reclaim(struct vop_reclaim_args *ap)
 	vp->v_data = NULL;
 	vp->v_object = NULL;
 	vp->v_vnlock = &vp->v_lock;
-	VI_UNLOCK(vp);
 
 	/*
-	 * If we were opened for write, we leased one write reference
+	 * If we were opened for write, we leased the write reference
 	 * to the lower vnode.  If this is a reclamation due to the
 	 * forced unmount, undo the reference now.
 	 */
 	if (vp->v_writecount > 0)
-		VOP_ADD_WRITECOUNT(lowervp, -1);
+		VOP_ADD_WRITECOUNT(lowervp, -vp->v_writecount);
+	else if (vp->v_writecount < 0)
+		vp->v_writecount = 0;
+
+	VI_UNLOCK(vp);
+
 	if ((xp->null_flags & NULLV_NOUNLOCK) != 0)
 		vunref(lowervp);
 	else
@@ -841,10 +844,8 @@ null_getwritemount(struct vop_getwritemount_args *ap)
 	VI_LOCK(vp);
 	xp = VTONULL(vp);
 	if (xp && (lowervp = xp->null_lowervp)) {
-		VI_LOCK_FLAGS(lowervp, MTX_DUPOK);
+		vholdnz(lowervp);
 		VI_UNLOCK(vp);
-		vholdl(lowervp);
-		VI_UNLOCK(lowervp);
 		VOP_GETWRITEMOUNT(lowervp, ap->a_mpp);
 		vdrop(lowervp);
 	} else {
@@ -878,7 +879,7 @@ null_vptocnp(struct vop_vptocnp_args *ap)
 	vhold(lvp);
 	mp = vp->v_mount;
 	vfs_ref(mp);
-	VOP_UNLOCK(vp, 0); /* vp is held by vn_vptocnp_locked that called us */
+	VOP_UNLOCK(vp); /* vp is held by vn_vptocnp_locked that called us */
 	ldvp = lvp;
 	vref(lvp);
 	error = vn_vptocnp(&ldvp, cred, ap->a_buf, ap->a_buflen);
@@ -889,11 +890,7 @@ null_vptocnp(struct vop_vptocnp_args *ap)
 		return (ENOENT);
 	}
 
-	/*
-	 * Exclusive lock is required by insmntque1 call in
-	 * null_nodeget()
-	 */
-	error = vn_lock(ldvp, LK_EXCLUSIVE);
+	error = vn_lock(ldvp, LK_SHARED);
 	if (error != 0) {
 		vrele(ldvp);
 		vn_lock(vp, locked | LK_RETRY);
@@ -905,7 +902,7 @@ null_vptocnp(struct vop_vptocnp_args *ap)
 #ifdef DIAGNOSTIC
 		NULLVPTOLOWERVP(*dvp);
 #endif
-		VOP_UNLOCK(*dvp, 0); /* keep reference on *dvp */
+		VOP_UNLOCK(*dvp); /* keep reference on *dvp */
 	}
 	vn_lock(vp, locked | LK_RETRY);
 	vfs_rel(mp);
@@ -924,6 +921,7 @@ struct vop_vector null_vnodeops = {
 	.vop_getattr =		null_getattr,
 	.vop_getwritemount =	null_getwritemount,
 	.vop_inactive =		null_inactive,
+	.vop_need_inactive =	null_need_inactive,
 	.vop_islocked =		vop_stdislocked,
 	.vop_lock1 =		null_lock,
 	.vop_lookup =		null_lookup,
@@ -940,3 +938,4 @@ struct vop_vector null_vnodeops = {
 	.vop_vptofh =		null_vptofh,
 	.vop_add_writecount =	null_add_writecount,
 };
+VFS_VOP_VECTOR_REGISTER(null_vnodeops);

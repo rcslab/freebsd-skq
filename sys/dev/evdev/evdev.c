@@ -66,17 +66,25 @@ enum evdev_sparse_result
 
 MALLOC_DEFINE(M_EVDEV, "evdev", "evdev memory");
 
-int evdev_rcpt_mask = EVDEV_RCPT_SYSMOUSE | EVDEV_RCPT_KBDMUX;
+/* adb keyboard driver used on powerpc does not support evdev yet */
+#if defined(__powerpc__) && !defined(__powerpc64__)
+int evdev_rcpt_mask = EVDEV_RCPT_KBDMUX | EVDEV_RCPT_HW_MOUSE;
+#else
+int evdev_rcpt_mask = EVDEV_RCPT_HW_MOUSE | EVDEV_RCPT_HW_KBD;
+#endif
 int evdev_sysmouse_t_axis = 0;
 
+SYSCTL_NODE(_kern, OID_AUTO, evdev, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "Evdev args");
 #ifdef EVDEV_SUPPORT
-SYSCTL_NODE(_kern, OID_AUTO, evdev, CTLFLAG_RW, 0, "Evdev args");
 SYSCTL_INT(_kern_evdev, OID_AUTO, rcpt_mask, CTLFLAG_RW, &evdev_rcpt_mask, 0,
     "Who is receiving events: bit0 - sysmouse, bit1 - kbdmux, "
     "bit2 - mouse hardware, bit3 - keyboard hardware");
 SYSCTL_INT(_kern_evdev, OID_AUTO, sysmouse_t_axis, CTLFLAG_RW,
     &evdev_sysmouse_t_axis, 0, "Extract T-axis from 0-none, 1-ums, 2-psm");
 #endif
+SYSCTL_NODE(_kern_evdev, OID_AUTO, input, CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
+    "Evdev input devices");
 
 static void evdev_start_repeat(struct evdev_dev *, uint16_t);
 static void evdev_stop_repeat(struct evdev_dev *);
@@ -196,6 +204,88 @@ evdev_estimate_report_size(struct evdev_dev *evdev)
 	return (size);
 }
 
+static void
+evdev_sysctl_create(struct evdev_dev *evdev)
+{
+	struct sysctl_oid *ev_sysctl_tree;
+	char ev_unit_str[8];
+
+	snprintf(ev_unit_str, sizeof(ev_unit_str), "%d", evdev->ev_unit);
+	sysctl_ctx_init(&evdev->ev_sysctl_ctx);
+
+	ev_sysctl_tree = SYSCTL_ADD_NODE_WITH_LABEL(&evdev->ev_sysctl_ctx,
+	    SYSCTL_STATIC_CHILDREN(_kern_evdev_input), OID_AUTO,
+	    ev_unit_str, CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "",
+	    "device index");
+
+	SYSCTL_ADD_STRING(&evdev->ev_sysctl_ctx,
+	    SYSCTL_CHILDREN(ev_sysctl_tree), OID_AUTO, "name", CTLFLAG_RD,
+	    evdev->ev_name, 0,
+	    "Input device name");
+
+	SYSCTL_ADD_STRUCT(&evdev->ev_sysctl_ctx,
+	    SYSCTL_CHILDREN(ev_sysctl_tree), OID_AUTO, "id", CTLFLAG_RD,
+	    &evdev->ev_id, input_id,
+	    "Input device identification");
+
+	/* ioctl returns ENOENT if phys is not set. sysctl returns "" here */
+	SYSCTL_ADD_STRING(&evdev->ev_sysctl_ctx,
+	    SYSCTL_CHILDREN(ev_sysctl_tree), OID_AUTO, "phys", CTLFLAG_RD,
+	    evdev->ev_shortname, 0,
+	    "Input device short name");
+
+	/* ioctl returns ENOENT if uniq is not set. sysctl returns "" here */
+	SYSCTL_ADD_STRING(&evdev->ev_sysctl_ctx,
+	    SYSCTL_CHILDREN(ev_sysctl_tree), OID_AUTO, "uniq", CTLFLAG_RD,
+	    evdev->ev_serial, 0,
+	    "Input device unique number");
+
+	SYSCTL_ADD_OPAQUE(&evdev->ev_sysctl_ctx,
+	    SYSCTL_CHILDREN(ev_sysctl_tree), OID_AUTO, "props", CTLFLAG_RD,
+	    evdev->ev_prop_flags, sizeof(evdev->ev_prop_flags), "",
+	    "Input device properties");
+
+	SYSCTL_ADD_OPAQUE(&evdev->ev_sysctl_ctx,
+	    SYSCTL_CHILDREN(ev_sysctl_tree), OID_AUTO, "type_bits", CTLFLAG_RD,
+	    evdev->ev_type_flags, sizeof(evdev->ev_type_flags), "",
+	    "Input device supported events types");
+
+	SYSCTL_ADD_OPAQUE(&evdev->ev_sysctl_ctx,
+	    SYSCTL_CHILDREN(ev_sysctl_tree), OID_AUTO, "key_bits", CTLFLAG_RD,
+	    evdev->ev_key_flags, sizeof(evdev->ev_key_flags),
+	    "", "Input device supported keys");
+
+	SYSCTL_ADD_OPAQUE(&evdev->ev_sysctl_ctx,
+	    SYSCTL_CHILDREN(ev_sysctl_tree), OID_AUTO, "rel_bits", CTLFLAG_RD,
+	    evdev->ev_rel_flags, sizeof(evdev->ev_rel_flags), "",
+	    "Input device supported relative events");
+
+	SYSCTL_ADD_OPAQUE(&evdev->ev_sysctl_ctx,
+	    SYSCTL_CHILDREN(ev_sysctl_tree), OID_AUTO, "abs_bits", CTLFLAG_RD,
+	    evdev->ev_abs_flags, sizeof(evdev->ev_abs_flags), "",
+	    "Input device supported absolute events");
+
+	SYSCTL_ADD_OPAQUE(&evdev->ev_sysctl_ctx,
+	    SYSCTL_CHILDREN(ev_sysctl_tree), OID_AUTO, "msc_bits", CTLFLAG_RD,
+	    evdev->ev_msc_flags, sizeof(evdev->ev_msc_flags), "",
+	    "Input device supported miscellaneous events");
+
+	SYSCTL_ADD_OPAQUE(&evdev->ev_sysctl_ctx,
+	    SYSCTL_CHILDREN(ev_sysctl_tree), OID_AUTO, "led_bits", CTLFLAG_RD,
+	    evdev->ev_led_flags, sizeof(evdev->ev_led_flags), "",
+	    "Input device supported LED events");
+
+	SYSCTL_ADD_OPAQUE(&evdev->ev_sysctl_ctx,
+	    SYSCTL_CHILDREN(ev_sysctl_tree), OID_AUTO, "snd_bits", CTLFLAG_RD,
+	    evdev->ev_snd_flags, sizeof(evdev->ev_snd_flags), "",
+	    "Input device supported sound events");
+
+	SYSCTL_ADD_OPAQUE(&evdev->ev_sysctl_ctx,
+	    SYSCTL_CHILDREN(ev_sysctl_tree), OID_AUTO, "sw_bits", CTLFLAG_RD,
+	    evdev->ev_sw_flags, sizeof(evdev->ev_sw_flags), "",
+	    "Input device supported switch events");
+}
+
 static int
 evdev_register_common(struct evdev_dev *evdev)
 {
@@ -210,7 +300,7 @@ evdev_register_common(struct evdev_dev *evdev)
 	if (evdev_event_supported(evdev, EV_REP) &&
 	    bit_test(evdev->ev_flags, EVDEV_FLAG_SOFTREPEAT)) {
 		/* Initialize callout */
-		callout_init_mtx(&evdev->ev_rep_callout, &evdev->ev_mtx, 0);
+		callout_init_mtx(&evdev->ev_rep_callout, evdev->ev_lock, 0);
 
 		if (evdev->ev_rep[REP_DELAY] == 0 &&
 		    evdev->ev_rep[REP_PERIOD] == 0) {
@@ -235,6 +325,12 @@ evdev_register_common(struct evdev_dev *evdev)
 
 	/* Create char device node */
 	ret = evdev_cdev_create(evdev);
+	if (ret != 0)
+		goto bail_out;
+
+	/* Create sysctls (for device enumeration without /dev/input access rights) */
+	evdev_sysctl_create(evdev);
+
 bail_out:
 	return (ret);
 }
@@ -267,15 +363,17 @@ evdev_register_mtx(struct evdev_dev *evdev, struct mtx *mtx)
 int
 evdev_unregister(struct evdev_dev *evdev)
 {
-	struct evdev_client *client;
+	struct evdev_client *client, *tmp;
 	int ret;
 	debugf(evdev, "%s: unregistered evdev provider: %s\n",
 	    evdev->ev_shortname, evdev->ev_name);
 
+	sysctl_ctx_free(&evdev->ev_sysctl_ctx);
+
 	EVDEV_LOCK(evdev);
 	evdev->ev_cdev->si_drv1 = NULL;
 	/* Wake up sleepers */
-	LIST_FOREACH(client, &evdev->ev_clients, ec_link) {
+	LIST_FOREACH_SAFE(client, &evdev->ev_clients, ec_link, tmp) {
 		evdev_revoke_client(client);
 		evdev_dispose_client(evdev, client);
 		EVDEV_CLIENT_LOCKQ(client);

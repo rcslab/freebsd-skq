@@ -41,6 +41,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/param.h>
 #include <sys/condvar.h>
 #include <sys/conf.h>
+#include <sys/eventhandler.h>
 #include <sys/file.h>
 #include <sys/filedesc.h>
 #include <sys/fcntl.h>
@@ -89,7 +90,7 @@ MALLOC_DEFINE(M_AUDITPATH, "audit_path", "Audit path storage");
 MALLOC_DEFINE(M_AUDITTEXT, "audit_text", "Audit text storage");
 MALLOC_DEFINE(M_AUDITGIDSET, "audit_gidset", "Audit GID set storage");
 
-static SYSCTL_NODE(_security, OID_AUTO, audit, CTLFLAG_RW, 0,
+static SYSCTL_NODE(_security, OID_AUTO, audit, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
     "TrustedBSD audit controls");
 
 /*

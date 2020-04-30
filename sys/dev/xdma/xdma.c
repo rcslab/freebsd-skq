@@ -1,6 +1,7 @@
 /*-
- * Copyright (c) 2016-2018 Ruslan Bukin <br@bsdpad.com>
- * All rights reserved.
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * Copyright (c) 2016-2019 Ruslan Bukin <br@bsdpad.com>
  *
  * This software was developed by SRI International and the University of
  * Cambridge Computer Laboratory under DARPA/AFRL contract FA8750-10-C-0237
@@ -35,15 +36,16 @@ __FBSDID("$FreeBSD$");
 #include <sys/param.h>
 #include <sys/conf.h>
 #include <sys/bus.h>
+#include <sys/epoch.h>
 #include <sys/kernel.h>
 #include <sys/queue.h>
 #include <sys/kobj.h>
 #include <sys/malloc.h>
 #include <sys/limits.h>
 #include <sys/lock.h>
+#include <sys/mutex.h>
 #include <sys/sysctl.h>
 #include <sys/systm.h>
-#include <sys/sx.h>
 
 #include <machine/bus.h>
 
@@ -61,11 +63,46 @@ __FBSDID("$FreeBSD$");
  * Multiple xDMA controllers may work with single DMA device,
  * so we have global lock for physical channel management.
  */
-static struct sx xdma_sx;
+static struct mtx xdma_mtx;
 
-#define	XDMA_LOCK()			sx_xlock(&xdma_sx)
-#define	XDMA_UNLOCK()			sx_xunlock(&xdma_sx)
-#define	XDMA_ASSERT_LOCKED()		sx_xassert(&xdma_sx, MA_OWNED)
+#define	XDMA_LOCK()			mtx_lock(&xdma_mtx)
+#define	XDMA_UNLOCK()			mtx_unlock(&xdma_mtx)
+#define	XDMA_ASSERT_LOCKED()		mtx_assert(&xdma_mtx, MA_OWNED)
+
+#define	FDT_REG_CELLS	4
+
+#ifdef FDT
+static int
+xdma_get_iommu_fdt(xdma_controller_t *xdma, xdma_channel_t *xchan)
+{
+	struct xdma_iommu *xio;
+	phandle_t node;
+	pcell_t prop;
+	size_t len;
+
+	node = ofw_bus_get_node(xdma->dma_dev);
+	if (OF_getproplen(node, "xdma,iommu") <= 0)
+		return (0);
+
+	len = OF_getencprop(node, "xdma,iommu", &prop, sizeof(prop));
+	if (len != sizeof(prop)) {
+		device_printf(xdma->dev,
+		    "%s: Can't get iommu device node\n", __func__);
+		return (0);
+	}
+
+	xio = &xchan->xio;
+	xio->dev = OF_device_from_xref(prop);
+	if (xio->dev == NULL) {
+		device_printf(xdma->dev,
+		    "%s: Can't get iommu device\n", __func__);
+		return (0);
+	}
+
+	/* Found */
+	return (1);
+}
+#endif
 
 /*
  * Allocate virtual xDMA channel.
@@ -78,6 +115,13 @@ xdma_channel_alloc(xdma_controller_t *xdma, uint32_t caps)
 
 	xchan = malloc(sizeof(xdma_channel_t), M_XDMA, M_WAITOK | M_ZERO);
 	xchan->xdma = xdma;
+
+#ifdef FDT
+	/* Check if this DMA controller supports IOMMU. */
+	if (xdma_get_iommu_fdt(xdma, xchan))
+		caps |= XCHAN_CAP_IOMMU | XCHAN_CAP_NOSEG;
+#endif
+
 	xchan->caps = caps;
 
 	XDMA_LOCK();
@@ -95,16 +139,19 @@ xdma_channel_alloc(xdma_controller_t *xdma, uint32_t caps)
 
 	TAILQ_INIT(&xchan->ie_handlers);
 
-	sx_init(&xchan->sx_lock, "xDMA chan");
-	sx_init(&xchan->sx_qin_lock, "xDMA qin");
-	sx_init(&xchan->sx_qout_lock, "xDMA qout");
-	sx_init(&xchan->sx_bank_lock, "xDMA bank");
-	sx_init(&xchan->sx_proc_lock, "xDMA proc");
+	mtx_init(&xchan->mtx_lock, "xDMA chan", NULL, MTX_DEF);
+	mtx_init(&xchan->mtx_qin_lock, "xDMA qin", NULL, MTX_DEF);
+	mtx_init(&xchan->mtx_qout_lock, "xDMA qout", NULL, MTX_DEF);
+	mtx_init(&xchan->mtx_bank_lock, "xDMA bank", NULL, MTX_DEF);
+	mtx_init(&xchan->mtx_proc_lock, "xDMA proc", NULL, MTX_DEF);
 
 	TAILQ_INIT(&xchan->bank);
 	TAILQ_INIT(&xchan->queue_in);
 	TAILQ_INIT(&xchan->queue_out);
 	TAILQ_INIT(&xchan->processing);
+
+	if (xchan->caps & XCHAN_CAP_IOMMU)
+		xdma_iommu_init(&xchan->xio);
 
 	TAILQ_INSERT_TAIL(&xdma->channels, xchan, xchan_next);
 
@@ -136,13 +183,16 @@ xdma_channel_free(xdma_channel_t *xchan)
 	if (xchan->flags & XCHAN_TYPE_SG)
 		xdma_channel_free_sg(xchan);
 
+	if (xchan->caps & XCHAN_CAP_IOMMU)
+		xdma_iommu_release(&xchan->xio);
+
 	xdma_teardown_all_intr(xchan);
 
-	sx_destroy(&xchan->sx_lock);
-	sx_destroy(&xchan->sx_qin_lock);
-	sx_destroy(&xchan->sx_qout_lock);
-	sx_destroy(&xchan->sx_bank_lock);
-	sx_destroy(&xchan->sx_proc_lock);
+	mtx_destroy(&xchan->mtx_lock);
+	mtx_destroy(&xchan->mtx_qin_lock);
+	mtx_destroy(&xchan->mtx_qout_lock);
+	mtx_destroy(&xchan->mtx_bank_lock);
+	mtx_destroy(&xchan->mtx_proc_lock);
 
 	TAILQ_REMOVE(&xdma->channels, xchan, xchan_next);
 
@@ -154,7 +204,7 @@ xdma_channel_free(xdma_channel_t *xchan)
 }
 
 int
-xdma_setup_intr(xdma_channel_t *xchan,
+xdma_setup_intr(xdma_channel_t *xchan, int flags,
     int (*cb)(void *, xdma_transfer_status_t *),
     void *arg, void **ihandler)
 {
@@ -175,6 +225,7 @@ xdma_setup_intr(xdma_channel_t *xchan,
 
 	ih = malloc(sizeof(struct xdma_intr_handler),
 	    M_XDMA, M_WAITOK | M_ZERO);
+	ih->flags = flags;
 	ih->cb = cb;
 	ih->cb_user = arg;
 
@@ -276,13 +327,20 @@ xdma_callback(xdma_channel_t *xchan, xdma_transfer_status_t *status)
 	struct xdma_intr_handler *ih_tmp;
 	struct xdma_intr_handler *ih;
 	xdma_controller_t *xdma;
+	struct epoch_tracker et;
 
 	xdma = xchan->xdma;
 	KASSERT(xdma != NULL, ("xdma is NULL"));
 
-	TAILQ_FOREACH_SAFE(ih, &xchan->ie_handlers, ih_next, ih_tmp)
-		if (ih->cb != NULL)
+	TAILQ_FOREACH_SAFE(ih, &xchan->ie_handlers, ih_next, ih_tmp) {
+		if (ih->cb != NULL) {
+			if (ih->flags & XDMA_INTR_NET)
+				NET_EPOCH_ENTER(et);
 			ih->cb(ih->cb_user, status);
+			if (ih->flags & XDMA_INTR_NET)
+				NET_EPOCH_EXIT(et);
+		}
+	}
 
 	if (xchan->flags & XCHAN_TYPE_SG)
 		xdma_queue_submit(xchan);
@@ -301,6 +359,94 @@ xdma_ofw_md_data(xdma_controller_t *xdma, pcell_t *cells, int ncells)
 	    cells, ncells, (void **)&xdma->data);
 
 	return (ret);
+}
+
+int
+xdma_handle_mem_node(vmem_t *vmem, phandle_t memory)
+{
+	pcell_t reg[FDT_REG_CELLS * FDT_MEM_REGIONS];
+	pcell_t *regp;
+	int addr_cells, size_cells;
+	int i, reg_len, ret, tuple_size, tuples;
+	u_long mem_start, mem_size;
+
+	if ((ret = fdt_addrsize_cells(OF_parent(memory), &addr_cells,
+	    &size_cells)) != 0)
+		return (ret);
+
+	if (addr_cells > 2)
+		return (ERANGE);
+
+	tuple_size = sizeof(pcell_t) * (addr_cells + size_cells);
+	reg_len = OF_getproplen(memory, "reg");
+	if (reg_len <= 0 || reg_len > sizeof(reg))
+		return (ERANGE);
+
+	if (OF_getprop(memory, "reg", reg, reg_len) <= 0)
+		return (ENXIO);
+
+	tuples = reg_len / tuple_size;
+	regp = (pcell_t *)&reg;
+	for (i = 0; i < tuples; i++) {
+		ret = fdt_data_to_res(regp, addr_cells, size_cells,
+		    &mem_start, &mem_size);
+		if (ret != 0)
+			return (ret);
+
+		vmem_add(vmem, mem_start, mem_size, 0);
+		regp += addr_cells + size_cells;
+	}
+
+	return (0);
+}
+
+vmem_t *
+xdma_get_memory(device_t dev)
+{
+	phandle_t mem_node, node;
+	pcell_t mem_handle;
+	vmem_t *vmem;
+
+	node = ofw_bus_get_node(dev);
+	if (node <= 0) {
+		device_printf(dev,
+		    "%s called on not ofw based device.\n", __func__);
+		return (NULL);
+	}
+
+	if (!OF_hasprop(node, "memory-region"))
+		return (NULL);
+
+	if (OF_getencprop(node, "memory-region", (void *)&mem_handle,
+	    sizeof(mem_handle)) <= 0)
+		return (NULL);
+
+	vmem = vmem_create("xDMA vmem", 0, 0, PAGE_SIZE,
+	    PAGE_SIZE, M_BESTFIT | M_WAITOK);
+	if (vmem == NULL)
+		return (NULL);
+
+	mem_node = OF_node_from_xref(mem_handle);
+	if (xdma_handle_mem_node(vmem, mem_node) != 0) {
+		vmem_destroy(vmem);
+		return (NULL);
+	}
+
+	return (vmem);
+}
+
+void
+xdma_put_memory(vmem_t *vmem)
+{
+
+	vmem_destroy(vmem);
+}
+
+void
+xchan_set_memory(xdma_channel_t *xchan, vmem_t *vmem)
+{
+
+	xchan->vmem = vmem;
 }
 
 /*
@@ -374,6 +520,24 @@ xdma_ofw_get(device_t dev, const char *prop)
 #endif
 
 /*
+ * Allocate xdma controller.
+ */
+xdma_controller_t *
+xdma_get(device_t dev, device_t dma_dev)
+{
+	xdma_controller_t *xdma;
+
+	xdma = malloc(sizeof(struct xdma_controller),
+	    M_XDMA, M_WAITOK | M_ZERO);
+	xdma->dev = dev;
+	xdma->dma_dev = dma_dev;
+
+	TAILQ_INIT(&xdma->channels);
+
+	return (xdma);
+}
+
+/*
  * Free xDMA controller object.
  */
 int
@@ -400,7 +564,7 @@ static void
 xdma_init(void)
 {
 
-	sx_init(&xdma_sx, "xDMA");
+	mtx_init(&xdma_mtx, "xDMA", NULL, MTX_DEF);
 }
 
 SYSINIT(xdma, SI_SUB_DRIVERS, SI_ORDER_FIRST, xdma_init, NULL);

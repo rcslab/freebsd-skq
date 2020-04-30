@@ -114,7 +114,7 @@ SYSCTL_ULONG(_vm, OID_AUTO, min_kernel_address, CTLFLAG_RD,
     SYSCTL_NULL_ULONG_PTR, VM_MIN_KERNEL_ADDRESS, "Min kernel address");
 
 SYSCTL_ULONG(_vm, OID_AUTO, max_kernel_address, CTLFLAG_RD,
-#if defined(__arm__) || defined(__sparc64__)
+#if defined(__arm__)
     &vm_max_kernel_address, 0,
 #else
     SYSCTL_NULL_ULONG_PTR, VM_MAX_KERNEL_ADDRESS,
@@ -124,10 +124,12 @@ SYSCTL_ULONG(_vm, OID_AUTO, max_kernel_address, CTLFLAG_RD,
 #if VM_NRESERVLEVEL > 0
 #define	KVA_QUANTUM_SHIFT	(VM_LEVEL_0_ORDER + PAGE_SHIFT)
 #else
-/* On non-superpage architectures want large import sizes. */
-#define	KVA_QUANTUM_SHIFT	(10 + PAGE_SHIFT)
+/* On non-superpage architectures we want large import sizes. */
+#define	KVA_QUANTUM_SHIFT	(8 + PAGE_SHIFT)
 #endif
 #define	KVA_QUANTUM		(1 << KVA_QUANTUM_SHIFT)
+
+extern void     uma_startup2(void);
 
 /*
  *	kva_alloc:
@@ -167,6 +169,35 @@ kva_free(vm_offset_t addr, vm_size_t size)
 	vmem_free(kernel_arena, addr, size);
 }
 
+static vm_page_t
+kmem_alloc_contig_pages(vm_object_t object, vm_pindex_t pindex, int domain,
+    int pflags, u_long npages, vm_paddr_t low, vm_paddr_t high,
+    u_long alignment, vm_paddr_t boundary, vm_memattr_t memattr)
+{
+	vm_page_t m;
+	int tries;
+	bool wait;
+
+	VM_OBJECT_ASSERT_WLOCKED(object);
+
+	wait = (pflags & VM_ALLOC_WAITOK) != 0;
+	pflags &= ~(VM_ALLOC_NOWAIT | VM_ALLOC_WAITOK | VM_ALLOC_WAITFAIL);
+	pflags |= VM_ALLOC_NOWAIT;
+	for (tries = wait ? 3 : 1;; tries--) {
+		m = vm_page_alloc_contig_domain(object, pindex, domain, pflags,
+		    npages, low, high, alignment, boundary, memattr);
+		if (m != NULL || tries == 0)
+			break;
+
+		VM_OBJECT_WUNLOCK(object);
+		if (!vm_page_reclaim_contig_domain(domain, pflags, npages,
+		    low, high, alignment, boundary) && wait)
+			vm_wait_domain(domain);
+		VM_OBJECT_WLOCK(object);
+	}
+	return (m);
+}
+
 /*
  *	Allocates a region from the kernel address map and physical pages
  *	within the specified address range to the kernel object.  Creates a
@@ -180,38 +211,26 @@ kmem_alloc_attr_domain(int domain, vm_size_t size, int flags, vm_paddr_t low,
     vm_paddr_t high, vm_memattr_t memattr)
 {
 	vmem_t *vmem;
-	vm_object_t object = kernel_object;
+	vm_object_t object;
 	vm_offset_t addr, i, offset;
 	vm_page_t m;
-	int pflags, tries;
+	int pflags;
 	vm_prot_t prot;
 
+	object = kernel_object;
 	size = round_page(size);
 	vmem = vm_dom[domain].vmd_kernel_arena;
 	if (vmem_alloc(vmem, size, M_BESTFIT | flags, &addr))
 		return (0);
 	offset = addr - VM_MIN_KERNEL_ADDRESS;
-	pflags = malloc2vm_flags(flags) | VM_ALLOC_NOBUSY | VM_ALLOC_WIRED;
-	pflags &= ~(VM_ALLOC_NOWAIT | VM_ALLOC_WAITOK | VM_ALLOC_WAITFAIL);
-	pflags |= VM_ALLOC_NOWAIT;
+	pflags = malloc2vm_flags(flags) | VM_ALLOC_WIRED;
 	prot = (flags & M_EXEC) != 0 ? VM_PROT_ALL : VM_PROT_RW;
 	VM_OBJECT_WLOCK(object);
 	for (i = 0; i < size; i += PAGE_SIZE) {
-		tries = 0;
-retry:
-		m = vm_page_alloc_contig_domain(object, atop(offset + i),
+		m = kmem_alloc_contig_pages(object, atop(offset + i),
 		    domain, pflags, 1, low, high, PAGE_SIZE, 0, memattr);
 		if (m == NULL) {
 			VM_OBJECT_WUNLOCK(object);
-			if (tries < ((flags & M_NOWAIT) != 0 ? 1 : 3)) {
-				if (!vm_page_reclaim_contig_domain(domain,
-				    pflags, 1, low, high, PAGE_SIZE, 0) &&
-				    (flags & M_WAITOK) != 0)
-					vm_wait_domain(domain);
-				VM_OBJECT_WLOCK(object);
-				tries++;
-				goto retry;
-			}
 			kmem_unback(object, addr, i);
 			vmem_free(vmem, addr, size);
 			return (0);
@@ -221,7 +240,7 @@ retry:
 		    vm_phys_domain(m), domain));
 		if ((flags & M_ZERO) && (m->flags & PG_ZERO) == 0)
 			pmap_zero_page(m);
-		m->valid = VM_PAGE_BITS_ALL;
+		vm_page_valid(m);
 		pmap_enter(kernel_pmap, addr + i, m, prot,
 		    prot | PMAP_ENTER_WIRED, 0);
 	}
@@ -271,37 +290,25 @@ kmem_alloc_contig_domain(int domain, vm_size_t size, int flags, vm_paddr_t low,
     vm_memattr_t memattr)
 {
 	vmem_t *vmem;
-	vm_object_t object = kernel_object;
+	vm_object_t object;
 	vm_offset_t addr, offset, tmp;
 	vm_page_t end_m, m;
 	u_long npages;
-	int pflags, tries;
- 
+	int pflags;
+
+	object = kernel_object;
 	size = round_page(size);
 	vmem = vm_dom[domain].vmd_kernel_arena;
 	if (vmem_alloc(vmem, size, flags | M_BESTFIT, &addr))
 		return (0);
 	offset = addr - VM_MIN_KERNEL_ADDRESS;
-	pflags = malloc2vm_flags(flags) | VM_ALLOC_NOBUSY | VM_ALLOC_WIRED;
-	pflags &= ~(VM_ALLOC_NOWAIT | VM_ALLOC_WAITOK | VM_ALLOC_WAITFAIL);
-	pflags |= VM_ALLOC_NOWAIT;
+	pflags = malloc2vm_flags(flags) | VM_ALLOC_WIRED;
 	npages = atop(size);
 	VM_OBJECT_WLOCK(object);
-	tries = 0;
-retry:
-	m = vm_page_alloc_contig_domain(object, atop(offset), domain, pflags,
-	    npages, low, high, alignment, boundary, memattr);
+	m = kmem_alloc_contig_pages(object, atop(offset), domain,
+	    pflags, npages, low, high, alignment, boundary, memattr);
 	if (m == NULL) {
 		VM_OBJECT_WUNLOCK(object);
-		if (tries < ((flags & M_NOWAIT) != 0 ? 1 : 3)) {
-			if (!vm_page_reclaim_contig_domain(domain, pflags,
-			    npages, low, high, alignment, boundary) &&
-			    (flags & M_WAITOK) != 0)
-				vm_wait_domain(domain);
-			VM_OBJECT_WLOCK(object);
-			tries++;
-			goto retry;
-		}
 		vmem_free(vmem, addr, size);
 		return (0);
 	}
@@ -313,7 +320,7 @@ retry:
 	for (; m < end_m; m++) {
 		if ((flags & M_ZERO) && (m->flags & PG_ZERO) == 0)
 			pmap_zero_page(m);
-		m->valid = VM_PAGE_BITS_ALL;
+		vm_page_valid(m);
 		pmap_enter(kernel_pmap, tmp, m, VM_PROT_RW,
 		    VM_PROT_RW | PMAP_ENTER_WIRED, 0);
 		tmp += PAGE_SIZE;
@@ -400,14 +407,10 @@ kmem_malloc_domain(int domain, vm_size_t size, int flags)
 	vm_offset_t addr;
 	int rv;
 
-#if VM_NRESERVLEVEL > 0
 	if (__predict_true((flags & M_EXEC) == 0))
 		arena = vm_dom[domain].vmd_kernel_arena;
 	else
 		arena = vm_dom[domain].vmd_kernel_rwx_arena;
-#else
-	arena = vm_dom[domain].vmd_kernel_arena;
-#endif
 	size = round_page(size);
 	if (vmem_alloc(arena, size, flags | M_BESTFIT, &addr))
 		return (0);
@@ -463,7 +466,7 @@ kmem_back_domain(int domain, vm_object_t object, vm_offset_t addr,
 	    ("kmem_back_domain: only supports kernel object."));
 
 	offset = addr - VM_MIN_KERNEL_ADDRESS;
-	pflags = malloc2vm_flags(flags) | VM_ALLOC_NOBUSY | VM_ALLOC_WIRED;
+	pflags = malloc2vm_flags(flags) | VM_ALLOC_WIRED;
 	pflags &= ~(VM_ALLOC_NOWAIT | VM_ALLOC_WAITOK | VM_ALLOC_WAITFAIL);
 	if (flags & M_WAITOK)
 		pflags |= VM_ALLOC_WAITFAIL;
@@ -496,13 +499,11 @@ retry:
 			pmap_zero_page(m);
 		KASSERT((m->oflags & VPO_UNMANAGED) != 0,
 		    ("kmem_malloc: page %p is managed", m));
-		m->valid = VM_PAGE_BITS_ALL;
+		vm_page_valid(m);
 		pmap_enter(kernel_pmap, addr + i, m, prot,
 		    prot | PMAP_ENTER_WIRED, 0);
-#if VM_NRESERVLEVEL > 0
 		if (__predict_false((prot & VM_PROT_EXECUTE) != 0))
 			m->oflags |= VPO_KMEM_EXEC;
-#endif
 	}
 	VM_OBJECT_WUNLOCK(object);
 
@@ -576,17 +577,14 @@ _kmem_unback(vm_object_t object, vm_offset_t addr, vm_size_t size)
 	VM_OBJECT_WLOCK(object);
 	m = vm_page_lookup(object, atop(offset)); 
 	domain = vm_phys_domain(m);
-#if VM_NRESERVLEVEL > 0
 	if (__predict_true((m->oflags & VPO_KMEM_EXEC) == 0))
 		arena = vm_dom[domain].vmd_kernel_arena;
 	else
 		arena = vm_dom[domain].vmd_kernel_rwx_arena;
-#else
-	arena = vm_dom[domain].vmd_kernel_arena;
-#endif
 	for (; offset < end; offset += PAGE_SIZE, m = next) {
 		next = vm_page_next(m);
-		vm_page_unwire(m, PQ_NONE);
+		vm_page_xbusy_claim(m);
+		vm_page_unwire_noq(m);
 		vm_page_free(m);
 	}
 	VM_OBJECT_WUNLOCK(object);
@@ -641,7 +639,8 @@ kmap_alloc_wait(vm_map_t map, vm_size_t size)
 		 * to lock out sleepers/wakers.
 		 */
 		vm_map_lock(map);
-		if (vm_map_findspace(map, vm_map_min(map), size, &addr) == 0)
+		addr = vm_map_findspace(map, vm_map_min(map), size);
+		if (addr + size <= vm_map_max(map))
 			break;
 		/* no space now; see if we can ever get space */
 		if (vm_map_max(map) - vm_map_min(map) < size) {
@@ -758,7 +757,7 @@ kmem_init(vm_offset_t start, vm_offset_t end)
 	vm_map_lock(m);
 	/* N.B.: cannot use kgdb to debug, starting with this assignment ... */
 	kernel_map = m;
-	(void) vm_map_insert(m, NULL, (vm_ooffset_t) 0,
+	(void)vm_map_insert(m, NULL, 0,
 #ifdef __amd64__
 	    KERNBASE,
 #else		     
@@ -766,6 +765,18 @@ kmem_init(vm_offset_t start, vm_offset_t end)
 #endif
 	    start, VM_PROT_ALL, VM_PROT_ALL, MAP_NOFAULT);
 	/* ... and ending with the completion of the above `insert' */
+
+#ifdef __amd64__
+	/*
+	 * Mark KVA used for the page array as allocated.  Other platforms
+	 * that handle vm_page_array allocation can simply adjust virtual_avail
+	 * instead.
+	 */
+	(void)vm_map_insert(m, NULL, 0, (vm_offset_t)vm_page_array,
+	    (vm_offset_t)vm_page_array + round_2mpage(vm_page_array_size *
+	    sizeof(struct vm_page)),
+	    VM_PROT_RW, VM_PROT_RW, MAP_NOFAULT);
+#endif
 	vm_map_unlock(m);
 
 	/*
@@ -798,8 +809,18 @@ kmem_init(vm_offset_t start, vm_offset_t end)
 		vmem_set_import(vm_dom[domain].vmd_kernel_rwx_arena,
 		    kva_import_domain, (vmem_release_t *)vmem_xfree,
 		    kernel_arena, KVA_QUANTUM);
+#else
+		vm_dom[domain].vmd_kernel_rwx_arena =
+		    vm_dom[domain].vmd_kernel_arena;
 #endif
 	}
+
+	/*
+	 * This must be the very first call so that the virtual address
+	 * space used for early allocations is properly marked used in
+	 * the map.
+	 */
+	uma_startup2();
 }
 
 /*
@@ -821,6 +842,14 @@ kmem_bootstrap_free(vm_offset_t start, vm_size_t size)
 	end = trunc_page(start + size);
 	start = round_page(start);
 
+#ifdef __amd64__
+	/*
+	 * Preloaded files do not have execute permissions by default on amd64.
+	 * Restore the default permissions to ensure that the direct map alias
+	 * is updated.
+	 */
+	pmap_change_prot(start, end - start, VM_PROT_RW);
+#endif
 	for (va = start; va < end; va += PAGE_SIZE) {
 		pa = pmap_kextract(va);
 		m = PHYS_TO_VM_PAGE(pa);
@@ -838,7 +867,6 @@ kmem_bootstrap_free(vm_offset_t start, vm_size_t size)
 #endif
 }
 
-#ifdef DIAGNOSTIC
 /*
  * Allow userspace to directly trigger the VM drain routine for testing
  * purposes.
@@ -859,6 +887,5 @@ debug_vm_lowmem(SYSCTL_HANDLER_ARGS)
 	return (0);
 }
 
-SYSCTL_PROC(_debug, OID_AUTO, vm_lowmem, CTLTYPE_INT | CTLFLAG_RW, 0, 0,
+SYSCTL_PROC(_debug, OID_AUTO, vm_lowmem, CTLTYPE_INT | CTLFLAG_MPSAFE | CTLFLAG_RW, 0, 0,
     debug_vm_lowmem, "I", "set to trigger vm_lowmem event with given flags");
-#endif

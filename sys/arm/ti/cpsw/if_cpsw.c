@@ -82,6 +82,8 @@ __FBSDID("$FreeBSD$");
 
 #include <dev/ofw/ofw_bus.h>
 #include <dev/ofw/ofw_bus_subr.h>
+
+#include <dev/fdt/fdt_common.h>
  
 #ifdef CPSW_ETHERSWITCH
 #include <dev/etherswitch/etherswitch.h>
@@ -742,7 +744,7 @@ cpsw_get_fdt_data(struct cpsw_softc *sc, int port)
 	phandle_t child;
 	unsigned long mdio_child_addr;
 
-	/* Find any slave with phy_id */
+	/* Find any slave with phy-handle/phy_id */
 	phy = -1;
 	vlan = -1;
 	for (child = OF_child(sc->node); child != 0; child = OF_peer(child)) {
@@ -753,14 +755,20 @@ cpsw_get_fdt_data(struct cpsw_softc *sc, int port)
 			continue;
 		}
 		OF_prop_free(name);
-		if (mdio_child_addr != slave_mdio_addr[port])
+
+		if (mdio_child_addr != slave_mdio_addr[port] &&
+		    mdio_child_addr != (slave_mdio_addr[port] & 0xFFF))
 			continue;
 
-		len = OF_getproplen(child, "phy_id");
-		if (len / sizeof(pcell_t) == 2) {
-			/* Get phy address from fdt */
-			if (OF_getencprop(child, "phy_id", phy_id, len) > 0)
-				phy = phy_id[1];
+		if (fdt_get_phyaddr(child, NULL, &phy, NULL) != 0){
+			/* Users with old DTB will have phy_id instead */
+			phy = -1;
+			len = OF_getproplen(child, "phy_id");
+			if (len / sizeof(pcell_t) == 2) {
+				/* Get phy address from fdt */
+				if (OF_getencprop(child, "phy_id", phy_id, len) > 0)
+					phy = phy_id[1];
+			}
 		}
 
 		len = OF_getproplen(child, "dual_emac_res_vlan");
@@ -2417,12 +2425,27 @@ cpsw_ale_dump_table(struct cpsw_softc *sc) {
 	printf("\n");
 }
 
+static u_int
+cpswp_set_maddr(void *arg, struct sockaddr_dl *sdl, u_int cnt)
+{
+	struct cpswp_softc *sc = arg;
+	uint32_t portmask;
+
+	if (sc->swsc->dualemac)
+		portmask = 1 << (sc->unit + 1) | 1 << 0;
+	else
+		portmask = 7;
+
+	cpsw_ale_mc_entry_set(sc->swsc, portmask, sc->vlan, LLADDR(sdl));
+
+	return (1);
+}
+
 static int
 cpswp_ale_update_addresses(struct cpswp_softc *sc, int purge)
 {
 	uint8_t *mac;
 	uint32_t ale_entry[3], ale_type, portmask;
-	struct ifmultiaddr *ifma;
 
 	if (sc->swsc->dualemac) {
 		ale_type = ALE_TYPE_VLAN_ADDR << 28 | sc->vlan << 16;
@@ -2437,7 +2460,6 @@ cpswp_ale_update_addresses(struct cpswp_softc *sc, int purge)
 	 * For simplicity, keep this entry at table index 0 for port 1 and
 	 * at index 2 for port 2 in the ALE.
 	 */
-        if_addr_rlock(sc->ifp);
 	mac = LLADDR((struct sockaddr_dl *)sc->ifp->if_addr->ifa_addr);
 	ale_entry[0] = mac[2] << 24 | mac[3] << 16 | mac[4] << 8 | mac[5];
 	ale_entry[1] = ale_type | mac[0] << 8 | mac[1]; /* addr entry + mac */
@@ -2449,7 +2471,6 @@ cpswp_ale_update_addresses(struct cpswp_softc *sc, int purge)
 	    mac[3] << 24 | mac[2] << 16 | mac[1] << 8 | mac[0]);
 	cpsw_write_4(sc->swsc, CPSW_PORT_P_SA_LO(sc->unit + 1),
 	    mac[5] << 8 | mac[4]);
-        if_addr_runlock(sc->ifp);
 
 	/* Keep the broadcast address at table entry 1 (or 3). */
 	ale_entry[0] = 0xffffffff; /* Lower 32 bits of MAC */
@@ -2464,14 +2485,7 @@ cpswp_ale_update_addresses(struct cpswp_softc *sc, int purge)
 		cpsw_ale_remove_all_mc_entries(sc->swsc);
 
         /* Set other multicast addrs desired. */
-        if_maddr_rlock(sc->ifp);
-        CK_STAILQ_FOREACH(ifma, &sc->ifp->if_multiaddrs, ifma_link) {
-                if (ifma->ifma_addr->sa_family != AF_LINK)
-                        continue;
-		cpsw_ale_mc_entry_set(sc->swsc, portmask, sc->vlan,
-		    LLADDR((struct sockaddr_dl *)ifma->ifma_addr));
-        }
-        if_maddr_runlock(sc->ifp);
+	if_foreach_llmaddr(sc->ifp, cpswp_set_maddr, sc);
 
 	return (0);
 }
@@ -2711,15 +2725,17 @@ cpsw_add_sysctls(struct cpsw_softc *sc)
 	    CTLFLAG_RW, &sc->debug, 0, "Enable switch debug messages");
 
 	SYSCTL_ADD_PROC(ctx, parent, OID_AUTO, "attachedSecs",
-	    CTLTYPE_UINT | CTLFLAG_RD, sc, 0, cpsw_stat_attached, "IU",
+	    CTLTYPE_UINT | CTLFLAG_RD | CTLFLAG_NEEDGIANT,
+	    sc, 0, cpsw_stat_attached, "IU",
 	    "Time since driver attach");
 
 	SYSCTL_ADD_PROC(ctx, parent, OID_AUTO, "intr_coalesce_us",
-	    CTLTYPE_UINT | CTLFLAG_RW, sc, 0, cpsw_intr_coalesce, "IU",
+	    CTLTYPE_UINT | CTLFLAG_RW | CTLFLAG_NEEDGIANT,
+	    sc, 0, cpsw_intr_coalesce, "IU",
 	    "minimum time between interrupts");
 
 	node = SYSCTL_ADD_NODE(ctx, parent, OID_AUTO, "ports",
-	    CTLFLAG_RD, NULL, "CPSW Ports Statistics");
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "CPSW Ports Statistics");
 	ports_parent = SYSCTL_CHILDREN(node);
 	for (i = 0; i < CPSW_PORTS; i++) {
 		if (!sc->dualemac && i != sc->active_slave)
@@ -2727,38 +2743,39 @@ cpsw_add_sysctls(struct cpsw_softc *sc)
 		port[0] = '0' + i;
 		port[1] = '\0';
 		node = SYSCTL_ADD_NODE(ctx, ports_parent, OID_AUTO,
-		    port, CTLFLAG_RD, NULL, "CPSW Port Statistics");
+		    port, CTLFLAG_RD | CTLFLAG_MPSAFE, NULL,
+		    "CPSW Port Statistics");
 		port_parent = SYSCTL_CHILDREN(node);
 		SYSCTL_ADD_PROC(ctx, port_parent, OID_AUTO, "uptime",
-		    CTLTYPE_UINT | CTLFLAG_RD, sc, i,
+		    CTLTYPE_UINT | CTLFLAG_RD | CTLFLAG_NEEDGIANT, sc, i,
 		    cpsw_stat_uptime, "IU", "Seconds since driver init");
 	}
 
 	stats_node = SYSCTL_ADD_NODE(ctx, parent, OID_AUTO, "stats",
-				     CTLFLAG_RD, NULL, "CPSW Statistics");
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "CPSW Statistics");
 	stats_parent = SYSCTL_CHILDREN(stats_node);
 	for (i = 0; i < CPSW_SYSCTL_COUNT; ++i) {
 		SYSCTL_ADD_PROC(ctx, stats_parent, i,
 				cpsw_stat_sysctls[i].oid,
-				CTLTYPE_U64 | CTLFLAG_RD, sc, 0,
-				cpsw_stats_sysctl, "IU",
+				CTLTYPE_U64 | CTLFLAG_RD | CTLFLAG_NEEDGIANT,
+				sc, 0, cpsw_stats_sysctl, "IU",
 				cpsw_stat_sysctls[i].oid);
 	}
 
 	queue_node = SYSCTL_ADD_NODE(ctx, parent, OID_AUTO, "queue",
-	    CTLFLAG_RD, NULL, "CPSW Queue Statistics");
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "CPSW Queue Statistics");
 	queue_parent = SYSCTL_CHILDREN(queue_node);
 
 	node = SYSCTL_ADD_NODE(ctx, queue_parent, OID_AUTO, "tx",
-	    CTLFLAG_RD, NULL, "TX Queue Statistics");
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "TX Queue Statistics");
 	cpsw_add_queue_sysctls(ctx, node, &sc->tx);
 
 	node = SYSCTL_ADD_NODE(ctx, queue_parent, OID_AUTO, "rx",
-	    CTLFLAG_RD, NULL, "RX Queue Statistics");
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "RX Queue Statistics");
 	cpsw_add_queue_sysctls(ctx, node, &sc->rx);
 
 	node = SYSCTL_ADD_NODE(ctx, parent, OID_AUTO, "watchdog",
-	    CTLFLAG_RD, NULL, "Watchdog Statistics");
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "Watchdog Statistics");
 	cpsw_add_watchdog_sysctls(ctx, node, sc);
 }
 

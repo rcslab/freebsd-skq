@@ -245,7 +245,7 @@ static void		fxp_discard_rfabuf(struct fxp_softc *sc,
 			    struct fxp_rx *rxp);
 static int		fxp_new_rfabuf(struct fxp_softc *sc,
 			    struct fxp_rx *rxp);
-static int		fxp_mc_addrs(struct fxp_softc *sc);
+static void		fxp_mc_addrs(struct fxp_softc *sc);
 static void		fxp_mc_setup(struct fxp_softc *sc);
 static uint16_t		fxp_eeprom_getword(struct fxp_softc *sc, int offset,
 			    int autosize);
@@ -2976,27 +2976,37 @@ fxp_ioctl(if_t ifp, u_long command, caddr_t data)
 	return (error);
 }
 
+static u_int
+fxp_setup_maddr(void *arg, struct sockaddr_dl *sdl, u_int cnt)
+{
+	struct fxp_softc *sc = arg;
+	struct fxp_cb_mcs *mcsp = sc->mcsp;
+
+	if (mcsp->mc_cnt < MAXMCADDR)
+		bcopy(LLADDR(sdl), mcsp->mc_addr[mcsp->mc_cnt * ETHER_ADDR_LEN],
+		    ETHER_ADDR_LEN);
+	mcsp->mc_cnt++;
+	return (1);
+}
+
 /*
  * Fill in the multicast address list and return number of entries.
  */
-static int
+static void
 fxp_mc_addrs(struct fxp_softc *sc)
 {
 	struct fxp_cb_mcs *mcsp = sc->mcsp;
 	if_t ifp = sc->ifp;
-	int nmcasts = 0;
 
 	if ((if_getflags(ifp) & IFF_ALLMULTI) == 0) {
-		if_maddr_rlock(ifp);
-		if_setupmultiaddr(ifp, mcsp->mc_addr, &nmcasts, MAXMCADDR);
-		if (nmcasts >= MAXMCADDR) {
+		mcsp->mc_cnt = 0;
+		if_foreach_llmaddr(sc->ifp, fxp_setup_maddr, sc);
+		if (mcsp->mc_cnt >= MAXMCADDR) {
 			if_setflagbits(ifp, IFF_ALLMULTI, 0);
-			nmcasts = 0;
+			mcsp->mc_cnt = 0;
 		}
-		if_maddr_runlock(ifp);
 	}
-	mcsp->mc_cnt = htole16(nmcasts * ETHER_ADDR_LEN);
-	return (nmcasts);
+	mcsp->mc_cnt = htole16(mcsp->mc_cnt * ETHER_ADDR_LEN);
 }
 
 /*
@@ -3143,12 +3153,12 @@ fxp_sysctl_node(struct fxp_softc *sc)
 	ctx = device_get_sysctl_ctx(sc->dev);
 	child = SYSCTL_CHILDREN(device_get_sysctl_tree(sc->dev));
 
-	SYSCTL_ADD_PROC(ctx, child,
-	    OID_AUTO, "int_delay", CTLTYPE_INT | CTLFLAG_RW,
+	SYSCTL_ADD_PROC(ctx, child, OID_AUTO, "int_delay",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_NEEDGIANT,
 	    &sc->tunable_int_delay, 0, sysctl_hw_fxp_int_delay, "I",
 	    "FXP driver receive interrupt microcode bundling delay");
-	SYSCTL_ADD_PROC(ctx, child,
-	    OID_AUTO, "bundle_max", CTLTYPE_INT | CTLFLAG_RW,
+	SYSCTL_ADD_PROC(ctx, child, OID_AUTO, "bundle_max",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_NEEDGIANT,
 	    &sc->tunable_bundle_max, 0, sysctl_hw_fxp_bundle_max, "I",
 	    "FXP driver receive interrupt microcode bundle size limit");
 	SYSCTL_ADD_INT(ctx, child,OID_AUTO, "rnr", CTLFLAG_RD, &sc->rnr, 0,
@@ -3166,13 +3176,13 @@ fxp_sysctl_node(struct fxp_softc *sc)
 	sc->rnr = 0;
 
 	hsp = &sc->fxp_hwstats;
-	tree = SYSCTL_ADD_NODE(ctx, child, OID_AUTO, "stats", CTLFLAG_RD,
-	    NULL, "FXP statistics");
+	tree = SYSCTL_ADD_NODE(ctx, child, OID_AUTO, "stats",
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "FXP statistics");
 	parent = SYSCTL_CHILDREN(tree);
 
 	/* Rx MAC statistics. */
-	tree = SYSCTL_ADD_NODE(ctx, parent, OID_AUTO, "rx", CTLFLAG_RD,
-	    NULL, "Rx MAC statistics");
+	tree = SYSCTL_ADD_NODE(ctx, parent, OID_AUTO, "rx",
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "Rx MAC statistics");
 	child = SYSCTL_CHILDREN(tree);
 	FXP_SYSCTL_STAT_ADD(ctx, child, "good_frames",
 	    &hsp->rx_good, "Good frames");
@@ -3199,8 +3209,8 @@ fxp_sysctl_node(struct fxp_softc *sc)
 		    &hsp->rx_tco, "TCO frames");
 
 	/* Tx MAC statistics. */
-	tree = SYSCTL_ADD_NODE(ctx, parent, OID_AUTO, "tx", CTLFLAG_RD,
-	    NULL, "Tx MAC statistics");
+	tree = SYSCTL_ADD_NODE(ctx, parent, OID_AUTO, "tx",
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "Tx MAC statistics");
 	child = SYSCTL_CHILDREN(tree);
 	FXP_SYSCTL_STAT_ADD(ctx, child, "good_frames",
 	    &hsp->tx_good, "Good frames");

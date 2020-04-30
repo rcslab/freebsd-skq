@@ -2,7 +2,6 @@
  * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
  *
  * Copyright 2018 Emmanuel Vadot <manu@FreeBSD.org>
- * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -57,8 +56,6 @@ struct rk_clk_armclk_def {
 	struct rk_clk_armclk_rates	*rates;
 	int				nrates;
 };
-
-#define	RK_CLK_ARMCLK_MASK	0xFFFF0000
 
 int rk_clk_armclk_register(struct clkdom *clkdom,
     struct rk_clk_armclk_def *clkdef);

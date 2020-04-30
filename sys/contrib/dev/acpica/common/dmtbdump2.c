@@ -8,7 +8,7 @@
  *
  * 1. Copyright Notice
  *
- * Some or all of this work - Copyright (c) 1999 - 2019, Intel Corp.
+ * Some or all of this work - Copyright (c) 1999 - 2020, Intel Corp.
  * All rights reserved.
  *
  * 2. License
@@ -187,6 +187,7 @@ AcpiDmDumpIort (
     ACPI_DMTABLE_INFO       *InfoTable;
     char                    *String;
     UINT32                  i;
+    UINT32                  MappingByteLength;
 
 
     /* Main table */
@@ -314,6 +315,11 @@ AcpiDmDumpIort (
                     Status = AcpiDmDumpTable (Table->Length, Offset + NodeOffset,
                         ACPI_ADD_PTR (ACPI_IORT_NODE, IortNode, NodeOffset),
                         4, AcpiDmTableInfoIort0a);
+                    if (ACPI_FAILURE (Status))
+                    {
+                        return;
+                    }
+
                     NodeOffset += 4;
                 }
             }
@@ -325,8 +331,10 @@ AcpiDmDumpIort (
 
             if (IortNode->Length > NodeOffset)
             {
+                MappingByteLength =
+                    IortNode->MappingCount * sizeof (ACPI_IORT_ID_MAPPING);
                 Status = AcpiDmDumpTable (Table->Length, Offset + NodeOffset,
-                    Table, IortNode->Length - NodeOffset,
+                    Table, IortNode->Length - NodeOffset - MappingByteLength,
                     AcpiDmTableInfoIort1a);
                 if (ACPI_FAILURE (Status))
                 {
@@ -410,7 +418,6 @@ NextSubtable:
         /* Point to next node subtable */
 
         Offset += IortNode->Length;
-        IortNode = ACPI_ADD_PTR (ACPI_IORT_NODE, IortNode, IortNode->Length);
     }
 }
 
@@ -468,9 +475,14 @@ AcpiDmDumpIvrs (
 
         switch (Subtable->Type)
         {
-        case ACPI_IVRS_TYPE_HARDWARE:
+        case ACPI_IVRS_TYPE_HARDWARE1:
 
             InfoTable = AcpiDmTableInfoIvrs0;
+            break;
+
+        case ACPI_IVRS_TYPE_HARDWARE2:
+
+            InfoTable = AcpiDmTableInfoIvrs01;
             break;
 
         case ACPI_IVRS_TYPE_MEMORY1:
@@ -507,11 +519,21 @@ AcpiDmDumpIvrs (
 
         /* The hardware subtable can contain multiple device entries */
 
-        if (Subtable->Type == ACPI_IVRS_TYPE_HARDWARE)
+        if (Subtable->Type == ACPI_IVRS_TYPE_HARDWARE1 ||
+            Subtable->Type == ACPI_IVRS_TYPE_HARDWARE2)
         {
-            EntryOffset = Offset + sizeof (ACPI_IVRS_HARDWARE);
-            DeviceEntry = ACPI_ADD_PTR (ACPI_IVRS_DE_HEADER, Subtable,
-                sizeof (ACPI_IVRS_HARDWARE));
+            if (Subtable->Type == ACPI_IVRS_TYPE_HARDWARE1)
+            {
+                EntryOffset = Offset + sizeof (ACPI_IVRS_HARDWARE1);
+                DeviceEntry = ACPI_ADD_PTR (ACPI_IVRS_DE_HEADER, Subtable,
+                    sizeof (ACPI_IVRS_HARDWARE1));
+            }
+            else if (Subtable->Type == ACPI_IVRS_TYPE_HARDWARE2)
+            {
+                EntryOffset = Offset + sizeof (ACPI_IVRS_HARDWARE2);
+                DeviceEntry = ACPI_ADD_PTR (ACPI_IVRS_DE_HEADER, Subtable,
+                    sizeof (ACPI_IVRS_HARDWARE2));
+            }
 
             while (EntryOffset < (Offset + Subtable->Length))
             {
@@ -871,7 +893,7 @@ AcpiDmDumpMcfg (
         if (Offset + sizeof (ACPI_MCFG_ALLOCATION) > Table->Length)
         {
             AcpiOsPrintf ("Warning: there are %u invalid trailing bytes\n",
-                sizeof (ACPI_MCFG_ALLOCATION) - (Offset - Table->Length));
+                (UINT32) sizeof (ACPI_MCFG_ALLOCATION) - (Offset - Table->Length));
             return;
         }
 
@@ -1211,7 +1233,6 @@ AcpiDmDumpNfit (
             /* Has a variable number of 32-bit values at the end */
 
             InfoTable = AcpiDmTableInfoNfit2;
-            Interleave = ACPI_CAST_PTR (ACPI_NFIT_INTERLEAVE, Subtable);
             FieldOffset = sizeof (ACPI_NFIT_INTERLEAVE);
             break;
 
@@ -1236,7 +1257,6 @@ AcpiDmDumpNfit (
             /* Has a variable number of 64-bit addresses at the end */
 
             InfoTable = AcpiDmTableInfoNfit6;
-            Hint = ACPI_CAST_PTR (ACPI_NFIT_FLUSH_ADDRESS, Subtable);
             FieldOffset = sizeof (ACPI_NFIT_FLUSH_ADDRESS) - sizeof (UINT64);
             break;
 
@@ -1273,6 +1293,7 @@ AcpiDmDumpNfit (
         {
         case ACPI_NFIT_TYPE_INTERLEAVE:
 
+            Interleave = ACPI_CAST_PTR (ACPI_NFIT_INTERLEAVE, Subtable);
             for (i = 0; i < Interleave->LineCount; i++)
             {
                 Status = AcpiDmDumpTable (Table->Length, Offset + FieldOffset,
@@ -1308,6 +1329,7 @@ AcpiDmDumpNfit (
 
         case ACPI_NFIT_TYPE_FLUSH_ADDRESS:
 
+            Hint = ACPI_CAST_PTR (ACPI_NFIT_FLUSH_ADDRESS, Subtable);
             for (i = 0; i < Hint->HintCount; i++)
             {
                 Status = AcpiDmDumpTable (Table->Length, Offset + FieldOffset,
@@ -1806,6 +1828,11 @@ AcpiDmDumpPptt (
                 Status = AcpiDmDumpTable (Table->Length, Offset + SubtableOffset,
                     ACPI_ADD_PTR (ACPI_SUBTABLE_HEADER, Subtable, SubtableOffset),
                     4, AcpiDmTableInfoPptt0a);
+                if (ACPI_FAILURE (Status))
+                {
+                    return;
+                }
+
                 SubtableOffset += 4;
             }
             break;
@@ -2063,6 +2090,10 @@ AcpiDmDumpSdev (
                 Status = AcpiDmDumpTable (Table->Length, 0,
                     ACPI_ADD_PTR (UINT8, Pcie, VendorDataOffset),
                     VendorDataLength, AcpiDmTableInfoSdev1b);
+                if (ACPI_FAILURE (Status))
+                {
+                    return;
+                }
             }
             break;
 

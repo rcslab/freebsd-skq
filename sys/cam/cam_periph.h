@@ -37,6 +37,8 @@
 #include <cam/cam_sim.h>
 
 #ifdef _KERNEL
+#include <sys/lock.h>
+#include <sys/mutex.h>
 #include <sys/sysctl.h>
 #include <sys/taskqueue.h>
 
@@ -132,6 +134,8 @@ struct cam_periph {
 #define CAM_PERIPH_RUN_TASK		0x40
 #define CAM_PERIPH_FREE			0x80
 #define CAM_PERIPH_ANNOUNCED		0x100
+#define CAM_PERIPH_RECOVERY_WAIT	0x200
+#define CAM_PERIPH_RECOVERY_WAIT_FAILED	0x400
 	uint32_t		 scheduled_priority;
 	uint32_t		 immediate_priority;
 	int			 periph_allocating;
@@ -149,6 +153,7 @@ struct cam_periph {
 
 struct cam_periph_map_info {
 	int		num_bufs_used;
+	void		*orig[CAM_PERIPH_MAXMAPS];
 	struct buf	*bp[CAM_PERIPH_MAXMAPS];
 };
 

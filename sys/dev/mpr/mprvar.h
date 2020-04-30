@@ -34,6 +34,9 @@
 #ifndef _MPRVAR_H
 #define _MPRVAR_H
 
+#include <sys/lock.h>
+#include <sys/mutex.h>
+
 #define MPR_DRIVER_VERSION	"23.00.00.00-fbsd"
 
 #define MPR_DB_MAX_WAIT		2500
@@ -272,11 +275,12 @@ struct mpr_command {
 #define	MPR_CM_FLAGS_ERROR_MASK		MPR_CM_FLAGS_CHAIN_FAILED
 #define	MPR_CM_FLAGS_USE_CCB		(1 << 9)
 #define	MPR_CM_FLAGS_SATA_ID_TIMEOUT	(1 << 10)
+#define MPR_CM_FLAGS_ON_RECOVERY	(1 << 12)
+#define MPR_CM_FLAGS_TIMEDOUT		(1 << 13)
 	u_int				cm_state;
 #define MPR_CM_STATE_FREE		0
 #define MPR_CM_STATE_BUSY		1
-#define MPR_CM_STATE_TIMEDOUT		2
-#define MPR_CM_STATE_INQUEUE		3
+#define MPR_CM_STATE_INQUEUE		2
 	bus_dmamap_t			cm_dmamap;
 	struct scsi_sense_data		*cm_sense;
 	uint64_t			*nvme_error_response;
@@ -368,6 +372,7 @@ struct mpr_softc {
 	struct sysctl_ctx_list		sysctl_ctx;
 	struct sysctl_oid		*sysctl_tree;
 	char                            fw_version[16];
+	char				msg_version[8];
 	struct mpr_command		*commands;
 	struct mpr_chain		*chains;
 	struct mpr_prp_page		*prps;
@@ -904,35 +909,14 @@ int mprsas_send_reset(struct mpr_softc *sc, struct mpr_command *tm,
 SYSCTL_DECL(_hw_mpr);
 
 /* Compatibility shims for different OS versions */
-#if __FreeBSD_version >= 800001
 #define mpr_kproc_create(func, farg, proc_ptr, flags, stackpgs, fmtstr, arg) \
     kproc_create(func, farg, proc_ptr, flags, stackpgs, fmtstr, arg)
 #define mpr_kproc_exit(arg)	kproc_exit(arg)
-#else
-#define mpr_kproc_create(func, farg, proc_ptr, flags, stackpgs, fmtstr, arg) \
-    kthread_create(func, farg, proc_ptr, flags, stackpgs, fmtstr, arg)
-#define mpr_kproc_exit(arg)	kthread_exit(arg)
-#endif
 
 #if defined(CAM_PRIORITY_XPT)
 #define MPR_PRIORITY_XPT	CAM_PRIORITY_XPT
 #else
 #define MPR_PRIORITY_XPT	5
-#endif
-
-#if __FreeBSD_version < 800107
-// Prior to FreeBSD-8.0 scp3_flags was not defined.
-#define spc3_flags reserved
-
-#define SPC3_SID_PROTECT    0x01
-#define SPC3_SID_3PC        0x08
-#define SPC3_SID_TPGS_MASK  0x30
-#define SPC3_SID_TPGS_IMPLICIT  0x10
-#define SPC3_SID_TPGS_EXPLICIT  0x20
-#define SPC3_SID_ACC        0x40
-#define SPC3_SID_SCCS       0x80
-
-#define CAM_PRIORITY_NORMAL CAM_PRIORITY_NONE
 #endif
 
 /* Definitions for SCSI unmap translation to NVMe DSM command */

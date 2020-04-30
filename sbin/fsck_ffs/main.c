@@ -89,7 +89,7 @@ main(int argc, char *argv[])
 	sync();
 	skipclean = 1;
 	inoopt = 0;
-	while ((ch = getopt(argc, argv, "b:Bc:CdEfFm:npRrSyZ")) != -1) {
+	while ((ch = getopt(argc, argv, "b:Bc:CdEfFm:npRrSyZz")) != -1) {
 		switch (ch) {
 		case 'b':
 			skipclean = 0;
@@ -164,6 +164,10 @@ main(int argc, char *argv[])
 
 		case 'Z':
 			Zflag++;
+			break;
+
+		case 'z':
+			zflag++;
 			break;
 
 		default:
@@ -419,13 +423,11 @@ checkfilesys(char *filesys)
 	 */
 	if ((sblock.fs_flags & FS_SUJ) == FS_SUJ) {
 		if ((sblock.fs_flags & FS_NEEDSFSCK) != FS_NEEDSFSCK && skipclean) {
-			if (preen || reply("USE JOURNAL")) {
-				if (suj_check(filesys) == 0) {
-					printf("\n***** FILE SYSTEM MARKED CLEAN *****\n");
-					if (chkdoreload(mntp) == 0)
-						exit(0);
-					exit(4);
-				}
+			if (suj_check(filesys) == 0) {
+				printf("\n***** FILE SYSTEM MARKED CLEAN *****\n");
+				if (chkdoreload(mntp) == 0)
+					exit(0);
+				exit(4);
 			}
 			printf("** Skipping journal, falling through to full fsck\n\n");
 		}

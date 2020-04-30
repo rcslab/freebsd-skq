@@ -63,8 +63,10 @@ __FBSDID("$FreeBSD$");
 #include <sys/imgact.h>
 #include <sys/kdb.h>
 #include <sys/kernel.h>
+#include <sys/ktr.h>
 #include <sys/linker.h>
 #include <sys/msgbuf.h>
+#include <sys/physmem.h>
 #include <sys/reboot.h>
 #include <sys/rwlock.h>
 #include <sys/sched.h>
@@ -82,7 +84,6 @@ __FBSDID("$FreeBSD$");
 #include <machine/machdep.h>
 #include <machine/metadata.h>
 #include <machine/pcb.h>
-#include <machine/physmem.h>
 #include <machine/platform.h>
 #include <machine/sysarch.h>
 #include <machine/undefined.h>
@@ -122,6 +123,9 @@ uint32_t cpu_reset_address = 0;
 int cold = 1;
 vm_offset_t vector_page;
 
+/* The address at which the kernel was loaded.  Set early in initarm(). */
+vm_paddr_t arm_physmem_kernaddr;
+
 int (*_arm_memcpy)(void *, void *, int, int) = NULL;
 int (*_arm_bzero)(void *, int, int) = NULL;
 int _min_memcpy_size = 0;
@@ -159,7 +163,6 @@ static void *delay_arg;
 #endif
 
 struct kva_md_info kmi;
-
 /*
  * arm32_vector_init:
  *
@@ -236,7 +239,7 @@ cpu_startup(void *dummy)
 	    (uintmax_t)arm32_ptob(vm_free_count()),
 	    (uintmax_t)arm32_ptob(vm_free_count()) / mbyte);
 	if (bootverbose) {
-		arm_physmem_print_tables();
+		physmem_print_tables();
 		devmap_print_table();
 	}
 
@@ -388,9 +391,9 @@ spinlock_enter(void)
 		cspr = disable_interrupts(PSR_I | PSR_F);
 		td->td_md.md_spinlock_count = 1;
 		td->td_md.md_saved_cspr = cspr;
+		critical_enter();
 	} else
 		td->td_md.md_spinlock_count++;
-	critical_enter();
 }
 
 void
@@ -400,18 +403,19 @@ spinlock_exit(void)
 	register_t cspr;
 
 	td = curthread;
-	critical_exit();
 	cspr = td->td_md.md_saved_cspr;
 	td->td_md.md_spinlock_count--;
-	if (td->td_md.md_spinlock_count == 0)
+	if (td->td_md.md_spinlock_count == 0) {
+		critical_exit();
 		restore_interrupts(cspr);
+	}
 }
 
 /*
  * Clear registers on exec
  */
 void
-exec_setregs(struct thread *td, struct image_params *imgp, u_long stack)
+exec_setregs(struct thread *td, struct image_params *imgp, uintptr_t stack)
 {
 	struct trapframe *tf = td->td_frame;
 
@@ -770,8 +774,9 @@ init_proc0(vm_offset_t kstack)
 {
 	proc_linkup0(&proc0, &thread0);
 	thread0.td_kstack = kstack;
-	thread0.td_pcb = (struct pcb *)
-		(thread0.td_kstack + kstack_pages * PAGE_SIZE) - 1;
+	thread0.td_kstack_pages = kstack_pages;
+	thread0.td_pcb = (struct pcb *)(thread0.td_kstack +
+	    thread0.td_kstack_pages * PAGE_SIZE) - 1;
 	thread0.td_pcb->pcb_flags = 0;
 	thread0.td_pcb->pcb_vfpcpu = -1;
 	thread0.td_pcb->pcb_vfpstate.fpscr = VFPSCR_DN;
@@ -867,11 +872,11 @@ initarm(struct arm_boot_params *abp)
 	/* Grab physical memory regions information from device tree. */
 	if (fdt_get_mem_regions(mem_regions, &mem_regions_sz, &memsize) != 0)
 		panic("Cannot get physical memory regions");
-	arm_physmem_hardware_regions(mem_regions, mem_regions_sz);
+	physmem_hardware_regions(mem_regions, mem_regions_sz);
 
 	/* Grab reserved memory regions information from device tree. */
 	if (fdt_get_reserved_regions(mem_regions, &mem_regions_sz) == 0)
-		arm_physmem_exclude_regions(mem_regions, mem_regions_sz,
+		physmem_exclude_regions(mem_regions, mem_regions_sz,
 		    EXFLAG_NODUMP | EXFLAG_NOALLOC);
 
 	/* Platform-specific initialisation */
@@ -941,7 +946,7 @@ initarm(struct arm_boot_params *abp)
 	valloc_pages(irqstack, IRQ_STACK_SIZE * MAXCPU);
 	valloc_pages(abtstack, ABT_STACK_SIZE * MAXCPU);
 	valloc_pages(undstack, UND_STACK_SIZE * MAXCPU);
-	valloc_pages(kernelstack, kstack_pages * MAXCPU);
+	valloc_pages(kernelstack, kstack_pages);
 	valloc_pages(msgbufpv, round_page(msgbufsize) / PAGE_SIZE);
 
 	/*
@@ -1078,9 +1083,9 @@ initarm(struct arm_boot_params *abp)
 	 *
 	 * Prepare the list of physical memory available to the vm subsystem.
 	 */
-	arm_physmem_exclude_region(abp->abp_physaddr,
+	physmem_exclude_region(abp->abp_physaddr,
 	    (virtual_avail - KERNVIRTADDR), EXFLAG_NOALLOC);
-	arm_physmem_init_kernel_globals();
+	physmem_init_kernel_globals();
 
 	init_param2(physmem);
 	dbg_monitor_init();
@@ -1146,11 +1151,11 @@ initarm(struct arm_boot_params *abp)
 		if (fdt_get_mem_regions(mem_regions, &mem_regions_sz,NULL) != 0)
 			panic("Cannot get physical memory regions");
 	}
-	arm_physmem_hardware_regions(mem_regions, mem_regions_sz);
+	physmem_hardware_regions(mem_regions, mem_regions_sz);
 
 	/* Grab reserved memory regions information from device tree. */
 	if (fdt_get_reserved_regions(mem_regions, &mem_regions_sz) == 0)
-		arm_physmem_exclude_regions(mem_regions, mem_regions_sz,
+		physmem_exclude_regions(mem_regions, mem_regions_sz,
 		    EXFLAG_NODUMP | EXFLAG_NOALLOC);
 
 	/*
@@ -1206,7 +1211,7 @@ initarm(struct arm_boot_params *abp)
 	irqstack    = pmap_preboot_get_vpages(IRQ_STACK_SIZE * MAXCPU);
 	abtstack    = pmap_preboot_get_vpages(ABT_STACK_SIZE * MAXCPU);
 	undstack    = pmap_preboot_get_vpages(UND_STACK_SIZE * MAXCPU );
-	kernelstack = pmap_preboot_get_vpages(kstack_pages * MAXCPU);
+	kernelstack = pmap_preboot_get_vpages(kstack_pages);
 
 	/* Allocate message buffer. */
 	msgbufp = (void *)pmap_preboot_get_vpages(
@@ -1285,9 +1290,9 @@ initarm(struct arm_boot_params *abp)
 	 *
 	 * Prepare the list of physical memory available to the vm subsystem.
 	 */
-	arm_physmem_exclude_region(abp->abp_physaddr,
+	physmem_exclude_region(abp->abp_physaddr,
 		pmap_preboot_get_pages(0) - abp->abp_physaddr, EXFLAG_NOALLOC);
-	arm_physmem_init_kernel_globals();
+	physmem_init_kernel_globals();
 
 	init_param2(physmem);
 	/* Init message buffer. */

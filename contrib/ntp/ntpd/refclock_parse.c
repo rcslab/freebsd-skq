@@ -3069,6 +3069,7 @@ parse_start(
 
 	parse->generic->fudgetime2 = 0.0;
 	parse->ppsphaseadjust = parse->generic->fudgetime2;
+	parse->generic->fudgeminjitter = 0.0;
 
 	parse->generic->clockdesc  = parse->parse_type->cl_description;
 
@@ -3424,6 +3425,8 @@ parse_ctl(
 #endif
 		    }
 		}
+
+		parse->generic->fudgeminjitter = in->fudgeminjitter;
 	}
 }
 
@@ -4256,8 +4259,7 @@ mk_utcinfo(
 		struct tm *tm;
 		int nc;
 
-		if (wnlsf < GPSWRAP)
-			wnlsf += GPSWEEKS;
+		wnlsf = basedate_expand_gpsweek(wnlsf);
 		/* 'wnt' not used here: would need the same treatment as 'wnlsf */
 
 		t_ls = (time_t) wnlsf * SECSPERWEEK

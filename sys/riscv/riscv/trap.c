@@ -38,9 +38,9 @@ __FBSDID("$FreeBSD$");
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/kernel.h>
+#include <sys/ktr.h>
 #include <sys/lock.h>
 #include <sys/mutex.h>
-#include <sys/pioctl.h>
 #include <sys/bus.h>
 #include <sys/proc.h>
 #include <sys/ptrace.h>
@@ -155,13 +155,12 @@ static void
 svc_handler(struct trapframe *frame)
 {
 	struct thread *td;
-	int error;
 
 	td = curthread;
 	td->td_frame = frame;
 
-	error = syscallenter(td);
-	syscallret(td, error);
+	syscallenter(td);
+	syscallret(td);
 }
 
 static void
@@ -217,36 +216,9 @@ data_abort(struct trapframe *frame, int usermode)
 	if (pmap_fault_fixup(map->pmap, va, ftype))
 		goto done;
 
-	if (map != kernel_map) {
-		/*
-		 * Keep swapout from messing with us during this
-		 *	critical time.
-		 */
-		PROC_LOCK(p);
-		++p->p_lock;
-		PROC_UNLOCK(p);
-
-		/* Fault in the user page: */
-		error = vm_fault(map, va, ftype, VM_FAULT_NORMAL);
-
-		PROC_LOCK(p);
-		--p->p_lock;
-		PROC_UNLOCK(p);
-	} else {
-		/*
-		 * Don't have to worry about process locking or stacks in the
-		 * kernel.
-		 */
-		error = vm_fault(map, va, ftype, VM_FAULT_NORMAL);
-	}
-
+	error = vm_fault_trap(map, va, ftype, VM_FAULT_NORMAL, &sig, &ucode);
 	if (error != KERN_SUCCESS) {
 		if (usermode) {
-			sig = SIGSEGV;
-			if (error == KERN_PROTECTION_FAILURE)
-				ucode = SEGV_ACCERR;
-			else
-				ucode = SEGV_MAPERR;
 			call_trapsignal(td, sig, ucode, (void *)stval);
 		} else {
 			if (pcb->pcb_onfault != 0) {
@@ -272,12 +244,10 @@ void
 do_trap_supervisor(struct trapframe *frame)
 {
 	uint64_t exception;
-	uint64_t sstatus;
 
 	/* Ensure we came from supervisor mode, interrupts disabled */
-	__asm __volatile("csrr %0, sstatus" : "=&r" (sstatus));
-	KASSERT((sstatus & (SSTATUS_SPP | SSTATUS_SIE)) == SSTATUS_SPP,
-			("We must came from S mode with interrupts disabled"));
+	KASSERT((csr_read(sstatus) & (SSTATUS_SPP | SSTATUS_SIE)) ==
+	    SSTATUS_SPP, ("Came from S mode with interrupts enabled"));
 
 	exception = (frame->tf_scause & EXCP_MASK);
 	if (frame->tf_scause & EXCP_INTR) {
@@ -332,7 +302,6 @@ do_trap_user(struct trapframe *frame)
 {
 	uint64_t exception;
 	struct thread *td;
-	uint64_t sstatus;
 	struct pcb *pcb;
 
 	td = curthread;
@@ -340,9 +309,8 @@ do_trap_user(struct trapframe *frame)
 	pcb = td->td_pcb;
 
 	/* Ensure we came from usermode, interrupts disabled */
-	__asm __volatile("csrr %0, sstatus" : "=&r" (sstatus));
-	KASSERT((sstatus & (SSTATUS_SPP | SSTATUS_SIE)) == 0,
-			("We must came from U mode with interrupts disabled"));
+	KASSERT((csr_read(sstatus) & (SSTATUS_SPP | SSTATUS_SIE)) == 0,
+	    ("Came from U mode with interrupts enabled"));
 
 	exception = (frame->tf_scause & EXCP_MASK);
 	if (frame->tf_scause & EXCP_INTR) {

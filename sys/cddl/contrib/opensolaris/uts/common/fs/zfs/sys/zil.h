@@ -20,7 +20,7 @@
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2012, 2017 by Delphix. All rights reserved.
+ * Copyright (c) 2012, 2018 by Delphix. All rights reserved.
  * Copyright (c) 2014 Integros [integros.com]
  */
 
@@ -157,7 +157,7 @@ typedef enum zil_create {
 #define	TX_ACL			13	/* Set ACL */
 #define	TX_CREATE_ACL		14	/* create with ACL */
 #define	TX_CREATE_ATTR		15	/* create + attrs */
-#define	TX_CREATE_ACL_ATTR 	16	/* create with ACL + attrs */
+#define	TX_CREATE_ACL_ATTR	16	/* create with ACL + attrs */
 #define	TX_MKDIR_ACL		17	/* mkdir with ACL */
 #define	TX_MKDIR_ATTR		18	/* mkdir with attr */
 #define	TX_MKDIR_ACL_ATTR	19	/* mkdir with ACL + attrs */
@@ -436,7 +436,7 @@ extern void	zil_commit_impl(zilog_t *zilog, uint64_t oid);
 extern int	zil_reset(const char *osname, void *txarg);
 extern int	zil_claim(struct dsl_pool *dp,
     struct dsl_dataset *ds, void *txarg);
-extern int 	zil_check_log_chain(struct dsl_pool *dp,
+extern int	zil_check_log_chain(struct dsl_pool *dp,
     struct dsl_dataset *ds, void *tx);
 extern void	zil_sync(zilog_t *zilog, dmu_tx_t *tx);
 extern void	zil_clean(zilog_t *zilog, uint64_t synced_txg);
@@ -451,6 +451,9 @@ extern int	zil_bp_tree_add(zilog_t *zilog, const blkptr_t *bp);
 extern void	zil_set_sync(zilog_t *zilog, uint64_t syncval);
 
 extern void	zil_set_logbias(zilog_t *zilog, uint64_t slogval);
+
+extern uint64_t	zil_max_copied_data(zilog_t *zilog);
+extern uint64_t	zil_max_log_data(zilog_t *zilog);
 
 extern int zil_replay_disable;
 

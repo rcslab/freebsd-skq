@@ -58,6 +58,7 @@ __FBSDID("$FreeBSD$");
 #include <x86/include/busdma_impl.h>
 #include <x86/iommu/intel_reg.h>
 #include <x86/iommu/busdma_dmar.h>
+#include <dev/pci/pcireg.h>
 #include <x86/iommu/intel_dmar.h>
 
 static bool
@@ -425,7 +426,7 @@ dmar_fini_qi(struct dmar_unit *unit)
 {
 	struct dmar_qi_genseq gseq;
 
-	if (unit->qi_enabled)
+	if (!unit->qi_enabled)
 		return;
 	taskqueue_drain(unit->qi_taskqueue, &unit->qi_task);
 	taskqueue_free(unit->qi_taskqueue);

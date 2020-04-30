@@ -47,6 +47,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/kernel.h>
+#include <sys/ktr.h>
 #include <sys/namei.h>
 #include <sys/malloc.h>
 #include <sys/fcntl.h>
@@ -270,7 +271,7 @@ ufs_extattr_lookup(struct vnode *start_dvp, int lockparent, char *dirname,
 	    (size_t *) &cnp.cn_namelen);
 	if (error) {
 		if (lockparent == UE_GETDIR_LOCKPARENT_DONT) {
-			VOP_UNLOCK(start_dvp, 0);
+			VOP_UNLOCK(start_dvp);
 		}
 		uma_zfree(namei_zone, cnp.cn_pnbuf);
 		printf("ufs_extattr_lookup: copystr failed\n");
@@ -289,7 +290,7 @@ ufs_extattr_lookup(struct vnode *start_dvp, int lockparent, char *dirname,
 		 * if ufs_lookup() didn't.
 		 */
 		if (lockparent == UE_GETDIR_LOCKPARENT_DONT)
-			VOP_UNLOCK(start_dvp, 0);
+			VOP_UNLOCK(start_dvp);
 
 		/*
 		 * Check that ufs_lookup() didn't release the lock when we
@@ -306,7 +307,7 @@ ufs_extattr_lookup(struct vnode *start_dvp, int lockparent, char *dirname,
 */
 
 	if (target_vp != start_dvp && lockparent == UE_GETDIR_LOCKPARENT_DONT)
-		VOP_UNLOCK(start_dvp, 0);
+		VOP_UNLOCK(start_dvp);
 
 	if (lockparent == UE_GETDIR_LOCKPARENT)
 		ASSERT_VOP_LOCKED(start_dvp, "ufs_extattr_lookup");
@@ -334,17 +335,22 @@ ufs_extattr_enable_with_open(struct ufsmount *ump, struct vnode *vp,
 	if (error) {
 		printf("ufs_extattr_enable_with_open.VOP_OPEN(): failed "
 		    "with %d\n", error);
-		VOP_UNLOCK(vp, 0);
+		VOP_UNLOCK(vp);
 		return (error);
 	}
 
-	VOP_ADD_WRITECOUNT(vp, 1);
+	error = VOP_ADD_WRITECOUNT(vp, 1);
+	if (error != 0) {
+		VOP_CLOSE(vp, FREAD | FWRITE, td->td_ucred, td);
+		VOP_UNLOCK(vp);
+		return (error);
+	}
 	CTR3(KTR_VFS, "%s: vp %p v_writecount increased to %d", __func__, vp,
 	    vp->v_writecount);
 
 	vref(vp);
 
-	VOP_UNLOCK(vp, 0);
+	VOP_UNLOCK(vp);
 
 	error = ufs_extattr_enable(ump, attrnamespace, attrname, vp, td);
 	if (error != 0)
@@ -660,11 +666,11 @@ ufs_extattr_enable(struct ufsmount *ump, int attrnamespace,
 	LIST_INSERT_HEAD(&ump->um_extattr.uepm_list, attribute,
 	    uele_entries);
 
-	VOP_UNLOCK(backing_vnode, 0);
+	VOP_UNLOCK(backing_vnode);
 	return (0);
 
 unlock_free_exit:
-	VOP_UNLOCK(backing_vnode, 0);
+	VOP_UNLOCK(backing_vnode);
 
 free_exit:
 	free(attribute, M_UFS_EXTATTR);
@@ -692,7 +698,7 @@ ufs_extattr_disable(struct ufsmount *ump, int attrnamespace,
 
 	vn_lock(uele->uele_backing_vnode, LK_SHARED | LK_RETRY);
 	ASSERT_VOP_LOCKED(uele->uele_backing_vnode, "ufs_extattr_disable");
-	VOP_UNLOCK(uele->uele_backing_vnode, 0);
+	VOP_UNLOCK(uele->uele_backing_vnode);
 	error = vn_close(uele->uele_backing_vnode, FREAD|FWRITE,
 	    td->td_ucred, td);
 
@@ -721,7 +727,7 @@ ufs_extattrctl(struct mount *mp, int cmd, struct vnode *filename_vp,
 	error = priv_check(td, PRIV_UFS_EXTATTRCTL);
 	if (error) {
 		if (filename_vp != NULL)
-			VOP_UNLOCK(filename_vp, 0);
+			VOP_UNLOCK(filename_vp);
 		return (error);
 	}
 
@@ -731,14 +737,14 @@ ufs_extattrctl(struct mount *mp, int cmd, struct vnode *filename_vp,
 	 */
 	if (ump->um_fstype != UFS1) {
 		if (filename_vp != NULL)
-			VOP_UNLOCK(filename_vp, 0);
+			VOP_UNLOCK(filename_vp);
 		return (EOPNOTSUPP);
 	}
 
 	switch(cmd) {
 	case UFS_EXTATTR_CMD_START:
 		if (filename_vp != NULL) {
-			VOP_UNLOCK(filename_vp, 0);
+			VOP_UNLOCK(filename_vp);
 			return (EINVAL);
 		}
 		if (attrname != NULL)
@@ -750,7 +756,7 @@ ufs_extattrctl(struct mount *mp, int cmd, struct vnode *filename_vp,
 		
 	case UFS_EXTATTR_CMD_STOP:
 		if (filename_vp != NULL) {
-			VOP_UNLOCK(filename_vp, 0);
+			VOP_UNLOCK(filename_vp);
 			return (EINVAL);
 		}
 		if (attrname != NULL)
@@ -765,7 +771,7 @@ ufs_extattrctl(struct mount *mp, int cmd, struct vnode *filename_vp,
 		if (filename_vp == NULL)
 			return (EINVAL);
 		if (attrname == NULL) {
-			VOP_UNLOCK(filename_vp, 0);
+			VOP_UNLOCK(filename_vp);
 			return (EINVAL);
 		}
 
@@ -783,7 +789,7 @@ ufs_extattrctl(struct mount *mp, int cmd, struct vnode *filename_vp,
 	case UFS_EXTATTR_CMD_DISABLE:
 
 		if (filename_vp != NULL) {
-			VOP_UNLOCK(filename_vp, 0);
+			VOP_UNLOCK(filename_vp);
 			return (EINVAL);
 		}
 		if (attrname == NULL)
@@ -968,7 +974,7 @@ vopunlock_exit:
 		uio->uio_offset = 0;
 
 	if (attribute->uele_backing_vnode != vp)
-		VOP_UNLOCK(attribute->uele_backing_vnode, 0);
+		VOP_UNLOCK(attribute->uele_backing_vnode);
 
 	return (error);
 }
@@ -1142,7 +1148,7 @@ vopunlock_exit:
 	uio->uio_offset = 0;
 
 	if (attribute->uele_backing_vnode != vp)
-		VOP_UNLOCK(attribute->uele_backing_vnode, 0);
+		VOP_UNLOCK(attribute->uele_backing_vnode);
 
 	return (error);
 }
@@ -1261,7 +1267,7 @@ ufs_extattr_rm(struct vnode *vp, int attrnamespace, const char *name,
 		error = ENXIO;
 
 vopunlock_exit:
-	VOP_UNLOCK(attribute->uele_backing_vnode, 0);
+	VOP_UNLOCK(attribute->uele_backing_vnode);
 
 	return (error);
 }

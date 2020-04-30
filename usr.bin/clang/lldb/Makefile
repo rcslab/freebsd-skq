@@ -4,12 +4,11 @@
 
 PACKAGE=	lldb
 PROG_CXX=	lldb
-# Man page directory
-.PATH:		${LLDB_SRCS}/docs
 
 CFLAGS+=	-I${LLDB_SRCS}/include
+CFLAGS+=	-I${.OBJDIR}
 
-SRCDIR=		tools/lldb/tools/driver
+SRCDIR=		lldb/tools/driver
 SRCS+=		Driver.cpp
 
 .include "${SRCTOP}/lib/clang/clang.build.mk"
@@ -23,9 +22,24 @@ DPADD+=		${OBJTOP}/lib/clang/lib${lib}/lib${lib}.a
 LDADD+=		${OBJTOP}/lib/clang/lib${lib}/lib${lib}.a
 .endfor
 
+LLVM_TBLGEN?=	llvm-tblgen
+INCFILE=	Options.inc
+TDFILE=		${LLDB_SRCS}/tools/driver/Options.td
+GENOPT=		-gen-opt-parser-defs
+${INCFILE}: ${TDFILE}
+	${LLVM_TBLGEN} ${GENOPT} -I ${LLVM_SRCS}/include -d ${.TARGET:C/$/.d/} \
+	    -o ${.TARGET} ${TDFILE}
+TGHDRS+=	${INCFILE}
+
+DPSRCS+=	${TGHDRS}
+CLEANFILES+=	${TGHDRS} ${TGHDRS:C/$/.d/}
+
 LIBADD+=	edit
-LIBADD+=	panel
+LIBADD+=	execinfo
+LIBADD+=	lua
+LIBADD+=	lzma
 LIBADD+=	ncursesw
+LIBADD+=	panel
 LIBADD+=	pthread
 LIBADD+=	z
 

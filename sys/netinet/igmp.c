@@ -145,6 +145,7 @@ static void	igmp_v3_suppress_group_record(struct in_multi *);
 static int	sysctl_igmp_default_version(SYSCTL_HANDLER_ARGS);
 static int	sysctl_igmp_gsr(SYSCTL_HANDLER_ARGS);
 static int	sysctl_igmp_ifinfo(SYSCTL_HANDLER_ARGS);
+static int	sysctl_igmp_stat(SYSCTL_HANDLER_ARGS);
 
 static const struct netisr_handler igmp_nh = {
 	.nh_name = "igmp",
@@ -260,8 +261,9 @@ VNET_DEFINE_STATIC(int, igmp_default_version) = IGMP_VERSION_3;
 /*
  * Virtualized sysctls.
  */
-SYSCTL_STRUCT(_net_inet_igmp, IGMPCTL_STATS, stats, CTLFLAG_VNET | CTLFLAG_RW,
-    &VNET_NAME(igmpstat), igmpstat, "");
+SYSCTL_PROC(_net_inet_igmp, IGMPCTL_STATS, stats,
+    CTLFLAG_VNET | CTLTYPE_STRUCT | CTLFLAG_RW | CTLFLAG_MPSAFE,
+    &VNET_NAME(igmpstat), 0, sysctl_igmp_stat, "S,igmpstat", "");
 SYSCTL_INT(_net_inet_igmp, OID_AUTO, recvifkludge, CTLFLAG_VNET | CTLFLAG_RW,
     &VNET_NAME(igmp_recvifkludge), 0,
     "Rewrite IGMPv1/v2 reports from 0.0.0.0 to contain subnet address");
@@ -303,6 +305,7 @@ igmp_save_context(struct mbuf *m, struct ifnet *ifp)
 #ifdef VIMAGE
 	m->m_pkthdr.PH_loc.ptr = ifp->if_vnet;
 #endif /* VIMAGE */
+	m->m_pkthdr.rcvif = ifp;
 	m->m_pkthdr.flowid = ifp->if_index;
 }
 
@@ -332,6 +335,59 @@ igmp_restore_context(struct mbuf *m)
 #endif
 #endif
 	return (m->m_pkthdr.flowid);
+}
+
+/*
+ * IGMP statistics.
+ */
+static int
+sysctl_igmp_stat(SYSCTL_HANDLER_ARGS)
+{
+	struct igmpstat igps0;
+	int error;
+	char *p;
+
+	error = sysctl_wire_old_buffer(req, sizeof(V_igmpstat));
+	if (error)
+		return (error);
+
+	if (req->oldptr != NULL) {
+		if (req->oldlen < sizeof(V_igmpstat))
+			error = ENOMEM;
+		else 
+			error = SYSCTL_OUT(req, &V_igmpstat,
+			    sizeof(V_igmpstat));
+	} else
+		req->validlen = sizeof(V_igmpstat);
+	if (error)
+		goto out;
+	if (req->newptr != NULL) {
+		if (req->newlen < sizeof(V_igmpstat))
+			error = ENOMEM;
+		else
+			error = SYSCTL_IN(req, &igps0,
+			    sizeof(igps0));
+		if (error)
+			goto out;
+		/*
+		 * igps0 must be "all zero".
+		 */
+		p = (char *)&igps0;
+		while (*p == '\0' && p < (char *)&igps0 + sizeof(igps0))
+			p++;
+		if (p != (char *)&igps0 + sizeof(igps0)) {
+			error = EINVAL;
+			goto out;
+		}
+		/*
+		 * Avoid overwrite of the version and length field.
+		 */
+		igps0.igps_version = V_igmpstat.igps_version;
+		igps0.igps_len = V_igmpstat.igps_len;
+		bcopy(&igps0, &V_igmpstat, sizeof(V_igmpstat));
+	}
+out:
+	return (error);
 }
 
 /*
@@ -487,8 +543,10 @@ out_locked:
 static void
 igmp_dispatch_queue(struct mbufq *mq, int limit, const int loop)
 {
+	struct epoch_tracker et;
 	struct mbuf *m;
 
+	NET_EPOCH_ENTER(et);
 	while ((m = mbufq_dequeue(mq)) != NULL) {
 		CTR3(KTR_IGMPV3, "%s: dispatch %p from %p", __func__, mq, m);
 		if (loop)
@@ -497,6 +555,7 @@ igmp_dispatch_queue(struct mbufq *mq, int limit, const int loop)
 		if (--limit == 0)
 			break;
 	}
+	NET_EPOCH_EXIT(et);
 }
 
 /*
@@ -692,10 +751,11 @@ static int
 igmp_input_v1_query(struct ifnet *ifp, const struct ip *ip,
     const struct igmp *igmp)
 {
-	struct epoch_tracker	 et;
 	struct ifmultiaddr	*ifma;
 	struct igmp_ifsoftc	*igi;
 	struct in_multi		*inm;
+
+	NET_EPOCH_ASSERT();
 
 	/*
 	 * IGMPv1 Host Mmembership Queries SHOULD always be addressed to
@@ -734,7 +794,6 @@ igmp_input_v1_query(struct ifnet *ifp, const struct ip *ip,
 	 * for the interface on which the query arrived,
 	 * except those which are already running.
 	 */
-	NET_EPOCH_ENTER(et);
 	CK_STAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
 		if (ifma->ifma_addr->sa_family != AF_INET ||
 		    ifma->ifma_protospec == NULL)
@@ -762,7 +821,6 @@ igmp_input_v1_query(struct ifnet *ifp, const struct ip *ip,
 			break;
 		}
 	}
-	NET_EPOCH_EXIT(et);
 
 out_locked:
 	IGMP_UNLOCK();
@@ -778,12 +836,13 @@ static int
 igmp_input_v2_query(struct ifnet *ifp, const struct ip *ip,
     const struct igmp *igmp)
 {
-	struct epoch_tracker	 et;
 	struct ifmultiaddr	*ifma;
 	struct igmp_ifsoftc	*igi;
 	struct in_multi		*inm;
 	int			 is_general_query;
 	uint16_t		 timer;
+
+	NET_EPOCH_ASSERT();
 
 	is_general_query = 0;
 
@@ -836,7 +895,6 @@ igmp_input_v2_query(struct ifnet *ifp, const struct ip *ip,
 		 */
 		CTR2(KTR_IGMPV3, "process v2 general query on ifp %p(%s)",
 		    ifp, ifp->if_xname);
-		NET_EPOCH_ENTER(et);
 		CK_STAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
 			if (ifma->ifma_addr->sa_family != AF_INET ||
 			    ifma->ifma_protospec == NULL)
@@ -844,7 +902,6 @@ igmp_input_v2_query(struct ifnet *ifp, const struct ip *ip,
 			inm = (struct in_multi *)ifma->ifma_protospec;
 			igmp_v2_update_group(inm, timer);
 		}
-		NET_EPOCH_EXIT(et);
 	} else {
 		/*
 		 * Group-specific IGMPv2 query, we need only
@@ -876,7 +933,7 @@ out_locked:
  * We may be updating the group for the first time since we switched
  * to IGMPv3. If we are, then we must clear any recorded source lists,
  * and transition to REPORTING state; the group timer is overloaded
- * for group and group-source query responses. 
+ * for group and group-source query responses.
  *
  * Unlike IGMPv3, the delay per group should be jittered
  * to avoid bursts of IGMPv2 reports.
@@ -1220,13 +1277,9 @@ igmp_input_v1_report(struct ifnet *ifp, /*const*/ struct ip *ip,
 	 * Replace 0.0.0.0 with the subnet address if told to do so.
 	 */
 	if (V_igmp_recvifkludge && in_nullhost(ip->ip_src)) {
-		struct epoch_tracker et;
-
-		NET_EPOCH_ENTER(et);
 		IFP_TO_IA(ifp, ia, &in_ifa_tracker);
 		if (ia != NULL)
 			ip->ip_src.s_addr = htonl(ia->ia_subnet);
-		NET_EPOCH_EXIT(et);
 	}
 
 	CTR3(KTR_IGMPV3, "process v1 report 0x%08x on ifp %p(%s)",
@@ -1311,7 +1364,6 @@ igmp_input_v2_report(struct ifnet *ifp, /*const*/ struct ip *ip,
     /*const*/ struct igmp *igmp)
 {
 	struct rm_priotracker in_ifa_tracker;
-	struct epoch_tracker et;
 	struct in_ifaddr *ia;
 	struct in_multi *inm;
 
@@ -1320,23 +1372,19 @@ igmp_input_v2_report(struct ifnet *ifp, /*const*/ struct ip *ip,
 	 * leave requires knowing that we are the only member of a
 	 * group.
 	 */
-	NET_EPOCH_ENTER(et);
 	IFP_TO_IA(ifp, ia, &in_ifa_tracker);
 	if (ia != NULL && in_hosteq(ip->ip_src, IA_SIN(ia)->sin_addr)) {
-		NET_EPOCH_EXIT(et);
 		return (0);
 	}
 
 	IGMPSTAT_INC(igps_rcv_reports);
 
 	if (ifp->if_flags & IFF_LOOPBACK) {
-		NET_EPOCH_EXIT(et);
 		return (0);
 	}
 
 	if (!IN_MULTICAST(ntohl(igmp->igmp_group.s_addr)) ||
 	    !in_hosteq(igmp->igmp_group, ip->ip_dst)) {
-		NET_EPOCH_EXIT(et);
 		IGMPSTAT_INC(igps_rcv_badreports);
 		return (EINVAL);
 	}
@@ -1352,7 +1400,6 @@ igmp_input_v2_report(struct ifnet *ifp, /*const*/ struct ip *ip,
 		if (ia != NULL)
 			ip->ip_src.s_addr = htonl(ia->ia_subnet);
 	}
-	NET_EPOCH_EXIT(et);
 
 	CTR3(KTR_IGMPV3, "process v2 report 0x%08x on ifp %p(%s)",
 	     ntohl(igmp->igmp_group.s_addr), ifp, ifp->if_xname);
@@ -1990,17 +2037,18 @@ igmp_set_version(struct igmp_ifsoftc *igi, const int version)
 static void
 igmp_v3_cancel_link_timers(struct igmp_ifsoftc *igi)
 {
-	struct ifmultiaddr	*ifma;
+	struct ifmultiaddr	*ifma, *ifmatmp;
 	struct ifnet		*ifp;
 	struct in_multi		*inm;
 	struct in_multi_head inm_free_tmp;
-	struct epoch_tracker et;
 
 	CTR3(KTR_IGMPV3, "%s: cancel v3 timers on ifp %p(%s)", __func__,
 	    igi->igi_ifp, igi->igi_ifp->if_xname);
 
 	IN_MULTI_LIST_LOCK_ASSERT();
 	IGMP_LOCK_ASSERT();
+	NET_EPOCH_ASSERT();
+
 	SLIST_INIT(&inm_free_tmp);
 
 	/*
@@ -2015,8 +2063,8 @@ igmp_v3_cancel_link_timers(struct igmp_ifsoftc *igi)
 	 * for all memberships scoped to this link.
 	 */
 	ifp = igi->igi_ifp;
-	NET_EPOCH_ENTER(et);
-	CK_STAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
+	IF_ADDR_WLOCK(ifp);
+	CK_STAILQ_FOREACH_SAFE(ifma, &ifp->if_multiaddrs, ifma_link, ifmatmp) {
 		if (ifma->ifma_addr->sa_family != AF_INET ||
 		    ifma->ifma_protospec == NULL)
 			continue;
@@ -2060,7 +2108,7 @@ igmp_v3_cancel_link_timers(struct igmp_ifsoftc *igi)
 		inm->inm_timer = 0;
 		mbufq_drain(&inm->inm_scq);
 	}
-	NET_EPOCH_EXIT(et);
+	IF_ADDR_WUNLOCK(ifp);
 
 	inm_release_list_deferred(&inm_free_tmp);
 }
@@ -2184,6 +2232,7 @@ igmp_slowtimo_vnet(void)
 static int
 igmp_v1v2_queue_report(struct in_multi *inm, const int type)
 {
+	struct epoch_tracker 	et;
 	struct ifnet		*ifp;
 	struct igmp		*igmp;
 	struct ip		*ip;
@@ -2233,7 +2282,9 @@ igmp_v1v2_queue_report(struct in_multi *inm, const int type)
 		m->m_flags |= M_IGMP_LOOP;
 
 	CTR2(KTR_IGMPV3, "%s: netisr_dispatch(NETISR_IGMP, %p)", __func__, m);
+	NET_EPOCH_ENTER(et);
 	netisr_dispatch(NETISR_IGMP, m);
+	NET_EPOCH_EXIT(et);
 
 	return (0);
 }
@@ -2329,7 +2380,7 @@ igmp_initial_join(struct in_multi *inm, struct igmp_ifsoftc *igi)
 	struct ifnet		*ifp;
 	struct mbufq		*mq;
 	int			 error, retval, syncstates;
- 
+
 	CTR4(KTR_IGMPV3, "%s: initial join 0x%08x on ifp %p(%s)", __func__,
 	    ntohl(inm->inm_addr.s_addr), inm->inm_ifp, inm->inm_ifp->if_xname);
 
@@ -3303,7 +3354,6 @@ igmp_v3_merge_state_changes(struct in_multi *inm, struct mbufq *scq)
 static void
 igmp_v3_dispatch_general_query(struct igmp_ifsoftc *igi)
 {
-	struct epoch_tracker	 et;
 	struct ifmultiaddr	*ifma;
 	struct ifnet		*ifp;
 	struct in_multi		*inm;
@@ -3311,6 +3361,7 @@ igmp_v3_dispatch_general_query(struct igmp_ifsoftc *igi)
 
 	IN_MULTI_LIST_LOCK_ASSERT();
 	IGMP_LOCK_ASSERT();
+	NET_EPOCH_ASSERT();
 
 	KASSERT(igi->igi_version == IGMP_VERSION_3,
 	    ("%s: called when version %d", __func__, igi->igi_version));
@@ -3326,7 +3377,6 @@ igmp_v3_dispatch_general_query(struct igmp_ifsoftc *igi)
 
 	ifp = igi->igi_ifp;
 
-	NET_EPOCH_ENTER(et);
 	CK_STAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
 		if (ifma->ifma_addr->sa_family != AF_INET ||
 		    ifma->ifma_protospec == NULL)
@@ -3357,7 +3407,6 @@ igmp_v3_dispatch_general_query(struct igmp_ifsoftc *igi)
 			break;
 		}
 	}
-	NET_EPOCH_EXIT(et);
 
 send:
 	loop = (igi->igi_flags & IGIF_LOOPBACK) ? 1 : 0;
@@ -3529,14 +3578,11 @@ igmp_v3_encap_report(struct ifnet *ifp, struct mbuf *m)
 	ip->ip_src.s_addr = INADDR_ANY;
 
 	if (m->m_flags & M_IGMP_LOOP) {
-		struct epoch_tracker et;
 		struct in_ifaddr *ia;
 
-		NET_EPOCH_ENTER(et);
 		IFP_TO_IA(ifp, ia, &in_ifa_tracker);
 		if (ia != NULL)
 			ip->ip_src = ia->ia_addr.sin_addr;
-		NET_EPOCH_EXIT(et);
 	}
 
 	ip->ip_dst.s_addr = htonl(INADDR_ALLRPTS_GROUP);

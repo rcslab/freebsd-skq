@@ -24,7 +24,7 @@
 .\"
 .\" $FreeBSD$
 .\"
-.Dd August 7, 2003
+.Dd April 1, 2020
 .Dt BIG5 5
 .Os
 .Sh NAME
@@ -37,11 +37,10 @@ encoding for Traditional Chinese text
 .Qq BIG5
 .Sh DESCRIPTION
 .Dq Big Five
-is the de facto standard for encoding Traditional Chinese text.
+is a standard for encoding Traditional Chinese text.
 Each character is represented by either one or two bytes.
-Characters from the
-.Tn ASCII
-character set are represented as single bytes in the range 0x00 - 0x7F.
+Characters from the ASCII character set are represented as
+single bytes in the range 0x00 - 0x7F.
 Traditional Chinese characters are represented by two bytes:
 the first in the range 0xA1 - 0xFE, the second in the range
 0x40 - 0xFE.
@@ -49,3 +48,14 @@ the first in the range 0xA1 - 0xFE, the second in the range
 .Xr euc 5 ,
 .Xr gb18030 5 ,
 .Xr utf8 5
+.Sh BUGS
+The range of the second byte overlaps some ASCII characters, including
+0x5C
+.Pq Ql \e
+and 0x7C
+.Pq Ql |
+which may cause problems in program execution or
+display.
+Big5 is considered a legacy standard and only preserved for backward
+compatibility reason.
+New documents and systems are suggested using UTF-8 directly.

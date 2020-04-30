@@ -3,15 +3,18 @@
 
 KMOD=mlx5en
 SRCS= \
+mlx5_en_dim.c \
 mlx5_en_ethtool.c \
 mlx5_en_main.c \
 mlx5_en_tx.c \
 mlx5_en_flow_table.c \
+mlx5_en_hw_tls.c \
 mlx5_en_rx.c \
 mlx5_en_rl.c \
 mlx5_en_txrx.c \
-device_if.h bus_if.h vnode_if.h pci_if.h \
-opt_inet.h opt_inet6.h opt_rss.h opt_ratelimit.h
+mlx5_en_port_buffer.c
+SRCS+=	${LINUXKPI_GENSRCS}
+SRCS+=	opt_inet.h opt_inet6.h opt_rss.h opt_ratelimit.h opt_kern_tls.h
 
 .if defined(HAVE_PER_CQ_EVENT_PACKET)
 CFLAGS+= -DHAVE_PER_CQ_EVENT_PACKET

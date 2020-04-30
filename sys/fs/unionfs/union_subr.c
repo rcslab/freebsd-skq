@@ -41,6 +41,7 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/kernel.h>
+#include <sys/ktr.h>
 #include <sys/lock.h>
 #include <sys/mutex.h>
 #include <sys/malloc.h>
@@ -126,7 +127,8 @@ unionfs_get_cached_vnode(struct vnode *uvp, struct vnode *lvp,
 			VI_LOCK_FLAGS(vp, MTX_DUPOK);
 			VI_UNLOCK(dvp);
 			vp->v_iflag &= ~VI_OWEINACT;
-			if ((vp->v_iflag & (VI_DOOMED | VI_DOINGINACT)) != 0) {
+			if (VN_IS_DOOMED(vp) ||
+			    ((vp->v_iflag & VI_DOINGINACT) != 0)) {
 				VI_UNLOCK(vp);
 				vp = NULLVP;
 			} else
@@ -162,7 +164,8 @@ unionfs_ins_cached_vnode(struct unionfs_node *uncp,
 			vp = UNIONFSTOV(unp);
 			VI_LOCK_FLAGS(vp, MTX_DUPOK);
 			vp->v_iflag &= ~VI_OWEINACT;
-			if ((vp->v_iflag & (VI_DOOMED | VI_DOINGINACT)) != 0) {
+			if (VN_IS_DOOMED(vp) ||
+			    ((vp->v_iflag & VI_DOINGINACT) != 0)) {
 				LIST_INSERT_HEAD(hd, uncp, un_hash);
 				VI_UNLOCK(vp);
 				vp = NULLVP;
@@ -348,12 +351,19 @@ unionfs_noderem(struct vnode *vp, struct thread *td)
 	vp->v_vnlock = &(vp->v_lock);
 	vp->v_data = NULL;
 	vp->v_object = NULL;
+	if (vp->v_writecount > 0) {
+		if (uvp != NULL)
+			VOP_ADD_WRITECOUNT(uvp, -vp->v_writecount);
+		else if (lvp != NULL)
+			VOP_ADD_WRITECOUNT(lvp, -vp->v_writecount);
+	} else if (vp->v_writecount < 0)
+		vp->v_writecount = 0;
 	VI_UNLOCK(vp);
 
 	if (lvp != NULLVP)
-		VOP_UNLOCK(lvp, LK_RELEASE);
+		VOP_UNLOCK(lvp);
 	if (uvp != NULLVP)
-		VOP_UNLOCK(uvp, LK_RELEASE);
+		VOP_UNLOCK(uvp);
 
 	if (dvp != NULLVP && unp->un_hash.le_prev != NULL)
 		unionfs_rem_cached_vnode(unp, dvp);
@@ -541,7 +551,7 @@ unionfs_relookup(struct vnode *dvp, struct vnode **vpp,
 		cn->cn_flags |= NOCACHE;
 
 	vref(dvp);
-	VOP_UNLOCK(dvp, LK_RELEASE);
+	VOP_UNLOCK(dvp);
 
 	if ((error = relookup(dvp, vpp, cn))) {
 		uma_zfree(namei_zone, cn->cn_pnbuf);
@@ -941,13 +951,17 @@ unionfs_vn_create_on_upper(struct vnode **vpp, struct vnode *udvp,
 		vput(vp);
 		goto unionfs_vn_create_on_upper_free_out1;
 	}
-	VOP_ADD_WRITECOUNT(vp, 1);
+	error = VOP_ADD_WRITECOUNT(vp, 1);
 	CTR3(KTR_VFS, "%s: vp %p v_writecount increased to %d",  __func__, vp,
 	    vp->v_writecount);
-	*vpp = vp;
+	if (error == 0) {
+		*vpp = vp;
+	} else {
+		VOP_CLOSE(vp, fmode, cred, td);
+	}
 
 unionfs_vn_create_on_upper_free_out1:
-	VOP_UNLOCK(udvp, LK_RELEASE);
+	VOP_UNLOCK(udvp);
 
 unionfs_vn_create_on_upper_free_out2:
 	if (cn.cn_flags & HASBUF) {
@@ -1078,7 +1092,7 @@ unionfs_copyfile(struct unionfs_node *unp, int docopy, struct ucred *cred,
 		}
 	}
 	VOP_CLOSE(uvp, FWRITE, cred, td);
-	VOP_ADD_WRITECOUNT(uvp, -1);
+	VOP_ADD_WRITECOUNT_CHECKED(uvp, -1);
 	CTR3(KTR_VFS, "%s: vp %p v_writecount decreased to %d", __func__, uvp,
 	    uvp->v_writecount);
 

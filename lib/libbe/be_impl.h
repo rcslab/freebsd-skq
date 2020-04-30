@@ -2,7 +2,6 @@
  * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
  *
  * Copyright (c) 2017 Kyle J. Kneitinger <kyle@kneit.in>
- * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -50,7 +49,8 @@ struct libbe_deep_clone {
 	libbe_handle_t *lbh;
 	const char *bename;
 	const char *snapname;
-	const char *be_root;
+	int depth;
+	int depth_limit;
 };
 
 struct libbe_dccb {

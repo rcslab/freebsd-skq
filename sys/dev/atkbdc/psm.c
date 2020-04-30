@@ -72,6 +72,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/bus.h>
 #include <sys/conf.h>
 #include <sys/filio.h>
+#include <sys/mutex.h>
 #include <sys/poll.h>
 #include <sys/sigio.h>
 #include <sys/signalvar.h>
@@ -178,6 +179,22 @@ typedef struct packetbuf {
 #define	PSM_PACKETQUEUE	128
 #endif
 
+/*
+ * Synaptics command definitions.
+ */
+#define	SYNAPTICS_READ_IDENTITY			0x00
+#define	SYNAPTICS_READ_MODES			0x01
+#define	SYNAPTICS_READ_CAPABILITIES		0x02
+#define	SYNAPTICS_READ_MODEL_ID			0x03
+#define	SYNAPTICS_READ_SERIAL_PREFIX		0x06
+#define	SYNAPTICS_READ_SERIAL_SUFFIX		0x07
+#define	SYNAPTICS_READ_RESOLUTIONS		0x08
+#define	SYNAPTICS_READ_EXTENDED			0x09
+#define	SYNAPTICS_READ_CAPABILITIES_CONT	0x0c
+#define	SYNAPTICS_READ_MAX_COORDS		0x0d
+#define	SYNAPTICS_READ_DELUXE_LED		0x0e
+#define	SYNAPTICS_READ_MIN_COORDS		0x0f
+
 typedef struct synapticsinfo {
 	struct sysctl_ctx_list	 sysctl_ctx;
 	struct sysctl_oid	*sysctl_tree;
@@ -219,6 +236,8 @@ typedef struct synapticsinfo {
 	int			 softbutton3_x;
 	int			 max_x;
 	int			 max_y;
+	int			 three_finger_drag;
+	int			 natural_scroll;
 } synapticsinfo_t;
 
 typedef struct synapticspacket {
@@ -495,9 +514,9 @@ static devclass_t psm_devclass;
 /* Tunables */
 static int tap_enabled = -1;
 static int verbose = PSM_DEBUG;
-static int synaptics_support = 0;
-static int trackpoint_support = 0;
-static int elantech_support = 0;
+static int synaptics_support = 1;
+static int trackpoint_support = 1;
+static int elantech_support = 1;
 
 /* for backward compatibility */
 #define	OLD_MOUSE_GETHWINFO	_IOR('M', 1, old_mousehw_t)
@@ -554,6 +573,9 @@ enum {
 	SYNAPTICS_SYSCTL_SOFTBUTTONS_Y =	SYN_OFFSET(softbuttons_y),
 	SYNAPTICS_SYSCTL_SOFTBUTTON2_X =	SYN_OFFSET(softbutton2_x),
 	SYNAPTICS_SYSCTL_SOFTBUTTON3_X =	SYN_OFFSET(softbutton3_x),
+	SYNAPTICS_SYSCTL_THREE_FINGER_DRAG = 	SYN_OFFSET(three_finger_drag),
+	SYNAPTICS_SYSCTL_NATURAL_SCROLL =	SYN_OFFSET(natural_scroll),
+#define	SYNAPTICS_SYSCTL_LAST	SYNAPTICS_SYSCTL_NATURAL_SCROLL
 };
 
 /* packet formatting function */
@@ -1119,7 +1141,7 @@ doopen(struct psm_softc *sc, int command_byte)
 				    "active multiplexing mode.\n",
 				    sc->unit);
 		}
-		mouse_ext_command(sc->kbdc, 1);
+		mouse_ext_command(sc->kbdc, SYNAPTICS_READ_MODES);
 		get_mouse_status(sc->kbdc, stat, 0, 3);
 		if ((SYNAPTICS_VERSION_GE(sc->synhw, 7, 5) ||
 		     stat[1] == 0x47) &&
@@ -1368,6 +1390,8 @@ psmprobe(device_t dev)
 
 	sc->unit = unit;
 	sc->kbdc = atkbdc_open(device_get_unit(device_get_parent(dev)));
+	if (sc->kbdc == NULL)
+		return (ENXIO);
 	sc->config = device_get_flags(dev) & PSM_CONFIG_FLAGS;
 	/* XXX: for backward compatibility */
 #if defined(PSM_HOOKRESUME) || defined(PSM_HOOKAPM)
@@ -1830,7 +1854,7 @@ psm_register_synaptics(device_t dev)
 	if (sc->synhw.capClickPad && sc->synhw.topButtonPad)
 		evdev_support_prop(evdev_a, INPUT_PROP_TOPBUTTONPAD);
 	evdev_support_key(evdev_a, BTN_TOUCH);
-	evdev_support_nfingers(evdev_a, 3);
+	evdev_support_nfingers(evdev_a, sc->synhw.capReportsV ? 5 : 3);
 	psm_support_abs_bulk(evdev_a, synaptics_absinfo_st);
 	if (sc->synhw.capAdvancedGestures || sc->synhw.capReportsV)
 		psm_support_abs_bulk(evdev_a, synaptics_absinfo_mt);
@@ -1924,6 +1948,7 @@ psm_register_elantech(device_t dev)
 static int
 psmattach(device_t dev)
 {
+	struct make_dev_args mda;
 	int unit = device_get_unit(dev);
 	struct psm_softc *sc = device_get_softc(dev);
 	int error;
@@ -1941,16 +1966,19 @@ psmattach(device_t dev)
 		return (ENXIO);
 	error = bus_setup_intr(dev, sc->intr, INTR_TYPE_TTY, NULL, psmintr, sc,
 	    &sc->ih);
-	if (error) {
-		bus_release_resource(dev, SYS_RES_IRQ, rid, sc->intr);
-		return (error);
-	}
+	if (error)
+		goto out;
 
 	/* Done */
-	sc->dev = make_dev(&psm_cdevsw, 0, 0, 0, 0666, "psm%d", unit);
-	sc->dev->si_drv1 = sc;
-	sc->bdev = make_dev(&psm_cdevsw, 0, 0, 0, 0666, "bpsm%d", unit);
-	sc->bdev->si_drv1 = sc;
+	make_dev_args_init(&mda);
+	mda.mda_devsw = &psm_cdevsw;
+	mda.mda_mode = 0666;
+	mda.mda_si_drv1 = sc;
+
+	if ((error = make_dev_s(&mda, &sc->dev, "psm%d", unit)) != 0)
+		goto out;
+	if ((error = make_dev_s(&mda, &sc->bdev, "bpsm%d", unit)) != 0)
+		goto out;
 
 #ifdef EVDEV_SUPPORT
 	switch (sc->hw.model) {
@@ -1967,7 +1995,7 @@ psmattach(device_t dev)
 	}
 
 	if (error)
-		return (error);
+		goto out;
 #endif
 
 	/* Some touchpad devices need full reinitialization after suspend. */
@@ -2008,7 +2036,15 @@ psmattach(device_t dev)
 	if (bootverbose)
 		--verbose;
 
-	return (0);
+out:
+	if (error != 0) {
+		bus_release_resource(dev, SYS_RES_IRQ, rid, sc->intr);
+		if (sc->dev != NULL)
+			destroy_dev(sc->dev);
+		if (sc->bdev != NULL)
+			destroy_dev(sc->bdev);
+	}
+	return (error);
 }
 
 static int
@@ -2907,8 +2943,10 @@ psmtimeout(void *arg)
 }
 
 /* Add all sysctls under the debug.psm and hw.psm nodes */
-static SYSCTL_NODE(_debug, OID_AUTO, psm, CTLFLAG_RD, 0, "ps/2 mouse");
-static SYSCTL_NODE(_hw, OID_AUTO, psm, CTLFLAG_RD, 0, "ps/2 mouse");
+static SYSCTL_NODE(_debug, OID_AUTO, psm, CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
+    "ps/2 mouse");
+static SYSCTL_NODE(_hw, OID_AUTO, psm, CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
+    "ps/2 mouse");
 
 SYSCTL_INT(_debug_psm, OID_AUTO, loglevel, CTLFLAG_RWTUN, &verbose, 0,
     "Verbosity level");
@@ -3212,8 +3250,9 @@ proc_synaptics(struct psm_softc *sc, packetbuf_t *pb, mousestatus_t *ms,
 {
 	static int touchpad_buttons;
 	static int guest_buttons;
+	static int ew_finger_count;
 	static finger_t f[PSM_FINGERS];
-	int w, id, nfingers, ewcode, extended_buttons, clickpad_pressed;
+	int w, id, nfingers, palm, ewcode, extended_buttons, clickpad_pressed;
 
 	extended_buttons = 0;
 
@@ -3332,7 +3371,7 @@ proc_synaptics(struct psm_softc *sc, packetbuf_t *pb, mousestatus_t *ms,
 				evdev_push_rel(sc->evdev_r, REL_X, *x);
 				evdev_push_rel(sc->evdev_r, REL_Y, -*y);
 				evdev_push_mouse_btn(sc->evdev_r,
-				    guest_buttons);
+				    guest_buttons | sc->extended_buttons);
 				evdev_sync(sc->evdev_r);
 			}
 #endif
@@ -3372,6 +3411,9 @@ proc_synaptics(struct psm_softc *sc, packetbuf_t *pb, mousestatus_t *ms,
 					    (pb->ipacket[1] & 0x01)) + 8,
 					.flags = PSM_FINGER_FUZZY,
 				};
+			break;
+		case 2:
+			ew_finger_count = pb->ipacket[1] & 0x0f;
 		default:
 			break;
 		}
@@ -3379,6 +3421,11 @@ proc_synaptics(struct psm_softc *sc, packetbuf_t *pb, mousestatus_t *ms,
 		goto SYNAPTICS_END;
 
 	case 1:
+		if (sc->synhw.capReportsV && ew_finger_count > 3) {
+			nfingers = ew_finger_count;
+			break;
+		}
+		/* FALLTHROUGH */
 	case 0:
 		nfingers = w + 2;
 		break;
@@ -3568,12 +3615,16 @@ proc_synaptics(struct psm_softc *sc, packetbuf_t *pb, mousestatus_t *ms,
 
 	ms->button = touchpad_buttons;
 
-	psmgestures(sc, &f[0], nfingers, ms);
+	palm = psmpalmdetect(sc, &f[0], nfingers);
+
+	/* Palm detection doesn't terminate the current action. */
+	if (!palm)
+		psmgestures(sc, &f[0], nfingers, ms);
+
 	for (id = 0; id < PSM_FINGERS; id++)
 		psmsmoother(sc, &f[id], id, ms, x, y);
 
-	/* Palm detection doesn't terminate the current action. */
-	if (psmpalmdetect(sc, &f[0], nfingers)) {
+	if (palm) {
 		*x = *y = *z = 0;
 		ms->button = ms->obutton;
 		return (0);
@@ -3752,6 +3803,7 @@ psmgestures(struct psm_softc *sc, finger_t *fingers, int nfingers,
 		int vscroll_hor_area, vscroll_ver_area;
 		int two_finger_scroll;
 		int max_x, max_y;
+		int three_finger_drag;
 
 		/* Read sysctl. */
 		/* XXX Verify values? */
@@ -3766,7 +3818,7 @@ psmgestures(struct psm_softc *sc, finger_t *fingers, int nfingers,
 		two_finger_scroll = sc->syninfo.two_finger_scroll;
 		max_x = sc->syninfo.max_x;
 		max_y = sc->syninfo.max_y;
-
+		three_finger_drag = sc->syninfo.three_finger_drag;
 		/* Read current absolute position. */
 		x0 = f->x;
 		y0 = f->y;
@@ -3807,9 +3859,15 @@ psmgestures(struct psm_softc *sc, finger_t *fingers, int nfingers,
 			gest->in_vscroll = 0;
 
 			/* Compute tap timeout. */
-			gest->taptimeout.tv_sec  = tap_timeout / 1000000;
-			gest->taptimeout.tv_usec = tap_timeout % 1000000;
-			timevaladd(&gest->taptimeout, &sc->lastsoftintr);
+			if (tap_enabled != 0) {
+				gest->taptimeout = (struct timeval) {
+					.tv_sec  = tap_timeout / 1000000,
+					.tv_usec = tap_timeout % 1000000,
+				};
+				timevaladd(
+				    &gest->taptimeout, &sc->lastsoftintr);
+			} else
+				timevalclear(&gest->taptimeout);
 
 			sc->flags |= PSM_FLAGS_FINGERDOWN;
 
@@ -3849,8 +3907,8 @@ psmgestures(struct psm_softc *sc, finger_t *fingers, int nfingers,
 				    ~MOUSE_BUTTON1DOWN) | center_button;
 		}
 
-		/* If in tap-hold, add the recorded button. */
-		if (gest->in_taphold)
+		/* If in tap-hold or three fingers, add the recorded button. */
+		if (gest->in_taphold || (nfingers == 3 && three_finger_drag))
 			ms->button |= gest->tap_button;
 
 		/*
@@ -4098,6 +4156,7 @@ psmsmoother(struct psm_softc *sc, finger_t *f, int smoother_id,
 		int len, weight_prev_x, weight_prev_y;
 		int div_max_x, div_max_y, div_x, div_y;
 		int is_fuzzy;
+		int natural_scroll;
 
 		/* Read sysctl. */
 		/* XXX Verify values? */
@@ -4125,6 +4184,7 @@ psmsmoother(struct psm_softc *sc, finger_t *f, int smoother_id,
 		two_finger_scroll = sc->syninfo.two_finger_scroll;
 		max_x = sc->syninfo.max_x;
 		max_y = sc->syninfo.max_y;
+		natural_scroll = sc->syninfo.natural_scroll;
 
 		is_fuzzy = (f->flags & PSM_FINGER_FUZZY) != 0;
 
@@ -4286,14 +4346,24 @@ psmsmoother(struct psm_softc *sc, finger_t *f, int smoother_id,
 			    smoother_id, dx, dy, dxp, dyp));
 			break;
 		case 1: /* Vertical scrolling. */
-			if (dyp != 0)
-				ms->button |= (dyp > 0) ?
-				    MOUSE_BUTTON4DOWN : MOUSE_BUTTON5DOWN;
+			if (dyp != 0) {
+				if (two_finger_scroll && natural_scroll)
+					ms->button |= (dyp > 0) ?
+					    MOUSE_BUTTON5DOWN : MOUSE_BUTTON4DOWN;
+				else
+					ms->button |= (dyp > 0) ?
+					    MOUSE_BUTTON4DOWN : MOUSE_BUTTON5DOWN;
+			}
 			break;
 		case 2: /* Horizontal scrolling. */
-			if (dxp != 0)
-				ms->button |= (dxp > 0) ?
-				    MOUSE_BUTTON7DOWN : MOUSE_BUTTON6DOWN;
+			if (dxp != 0) {
+				if (two_finger_scroll && natural_scroll)
+					ms->button |= (dxp > 0) ?
+					    MOUSE_BUTTON6DOWN : MOUSE_BUTTON7DOWN;
+				else
+					ms->button |= (dxp > 0) ?
+					    MOUSE_BUTTON7DOWN : MOUSE_BUTTON6DOWN;
+			}
 			break;
 		}
 
@@ -4315,7 +4385,7 @@ proc_elantech(struct psm_softc *sc, packetbuf_t *pb, mousestatus_t *ms,
 {
 	static int touchpad_button, trackpoint_button;
 	finger_t fn, f[ELANTECH_MAX_FINGERS];
-	int pkt, id, scale, i, nfingers, mask;
+	int pkt, id, scale, i, nfingers, mask, palm;
 
 	if (!elantech_support)
 		return (0);
@@ -4625,7 +4695,7 @@ proc_elantech(struct psm_softc *sc, packetbuf_t *pb, mousestatus_t *ms,
 	case ELANTECH_PKT_TRACKPOINT:
 		/*               7   6   5   4   3   2   1   0 (LSB)
 		 * -------------------------------------------
-		 * ipacket[0]:   0   0  SX  SY   0   M   R   L
+		 * ipacket[0]:   0   0  SY  SX   0   M   R   L
 		 * ipacket[1]: ~SX   0   0   0   0   0   0   0
 		 * ipacket[2]: ~SY   0   0   0   0   0   0   0
 		 * ipacket[3]:   0   0 ~SY ~SX   0   1   1   0
@@ -4636,22 +4706,32 @@ proc_elantech(struct psm_softc *sc, packetbuf_t *pb, mousestatus_t *ms,
 		 * over 9 bits with SX/SY the relative top bit and
 		 * X7..X0 and Y7..Y0 the lower bits.
 		 */
-		*x = (pb->ipacket[0] & 0x20) ?
-		    pb->ipacket[4] - 256 : pb->ipacket[4];
-		*y = (pb->ipacket[0] & 0x10) ?
-		    pb->ipacket[5] - 256 : pb->ipacket[5];
+		if (!(pb->ipacket[0] & 0xC8) && !(pb->ipacket[1] & 0x7F) &&
+		    !(pb->ipacket[2] & 0x7F) && !(pb->ipacket[3] & 0xC9) &&
+		    !(pb->ipacket[0] & 0x10) != !(pb->ipacket[1] & 0x80) &&
+		    !(pb->ipacket[0] & 0x10) != !(pb->ipacket[3] & 0x10) &&
+		    !(pb->ipacket[0] & 0x20) != !(pb->ipacket[2] & 0x80) &&
+		    !(pb->ipacket[0] & 0x20) != !(pb->ipacket[3] & 0x20)) {
 
-		trackpoint_button =
-		    ((pb->ipacket[0] & 0x01) ? MOUSE_BUTTON1DOWN : 0) |
-		    ((pb->ipacket[0] & 0x02) ? MOUSE_BUTTON3DOWN : 0) |
-		    ((pb->ipacket[0] & 0x04) ? MOUSE_BUTTON2DOWN : 0);
+			*x = (pb->ipacket[0] & MOUSE_PS2_XNEG) ?
+			    pb->ipacket[4] - 256 : pb->ipacket[4];
+			*y = (pb->ipacket[0] & MOUSE_PS2_YNEG) ?
+			    pb->ipacket[5] - 256 : pb->ipacket[5];
+
+			trackpoint_button =
+			    ((pb->ipacket[0] & 0x01) ? MOUSE_BUTTON1DOWN : 0) |
+			    ((pb->ipacket[0] & 0x02) ? MOUSE_BUTTON3DOWN : 0) |
+			    ((pb->ipacket[0] & 0x04) ? MOUSE_BUTTON2DOWN : 0);
 #ifdef EVDEV_SUPPORT
-		evdev_push_rel(sc->evdev_r, REL_X, *x);
-		evdev_push_rel(sc->evdev_r, REL_Y, -*y);
-		evdev_push_mouse_btn(sc->evdev_r, trackpoint_button);
-		evdev_sync(sc->evdev_r);
+			evdev_push_rel(sc->evdev_r, REL_X, *x);
+			evdev_push_rel(sc->evdev_r, REL_Y, -*y);
+			evdev_push_mouse_btn(sc->evdev_r, trackpoint_button);
+			evdev_sync(sc->evdev_r);
 #endif
-		ms->button = touchpad_button | trackpoint_button;
+			ms->button = touchpad_button | trackpoint_button;
+		} else
+			VLOG(3, (LOG_DEBUG, "elantech: "
+			    "unexpected trackpoint packet skipped\n"));
 		return (0);
 
 	case ELANTECH_PKT_NOP:
@@ -4704,10 +4784,14 @@ proc_elantech(struct psm_softc *sc, packetbuf_t *pb, mousestatus_t *ms,
 
 	ms->button = touchpad_button | trackpoint_button;
 
+	/* Palm detection doesn't terminate the current action. */
+	palm = psmpalmdetect(sc, &f[0], nfingers);
+
 	/* Send finger 1 position to gesture processor */
-	if (PSM_FINGER_IS_SET(f[0]) || PSM_FINGER_IS_SET(f[1]) ||
-	    nfingers == 0)
+	if ((PSM_FINGER_IS_SET(f[0]) || PSM_FINGER_IS_SET(f[1]) ||
+	    nfingers == 0) && !palm)
 		psmgestures(sc, &f[0], imin(nfingers, 3), ms);
+
 	/* Send fingers positions to movement smoothers */
 	for (id = 0; id < PSM_FINGERS; id++)
 		if (PSM_FINGER_IS_SET(f[id]) || !(mask & (1 << id)))
@@ -4722,8 +4806,7 @@ proc_elantech(struct psm_softc *sc, packetbuf_t *pb, mousestatus_t *ms,
 	}
 	sc->elanaction.mask = mask;
 
-	/* Palm detection doesn't terminate the current action. */
-	if (psmpalmdetect(sc, &f[0], nfingers)) {
+	if (palm) {
 		*x = *y = *z = 0;
 		ms->button = ms->obutton;
 		return (0);
@@ -5602,7 +5685,7 @@ synaptics_sysctl(SYSCTL_HANDLER_ARGS)
 	int error, arg;
 
 	if (oidp->oid_arg1 == NULL || oidp->oid_arg2 < 0 ||
-	    oidp->oid_arg2 > SYNAPTICS_SYSCTL_SOFTBUTTON3_X)
+	    oidp->oid_arg2 > SYNAPTICS_SYSCTL_LAST)
 		return (EINVAL);
 
 	sc = oidp->oid_arg1;
@@ -5691,6 +5774,8 @@ synaptics_sysctl(SYSCTL_HANDLER_ARGS)
 			return (EINVAL);
 		break;
         case SYNAPTICS_SYSCTL_TOUCHPAD_OFF:
+	case SYNAPTICS_SYSCTL_THREE_FINGER_DRAG:
+	case SYNAPTICS_SYSCTL_NATURAL_SCROLL:
 		if (arg < 0 || arg > 1)
 			return (EINVAL);
 		break;
@@ -5717,7 +5802,8 @@ synaptics_sysctl_create_softbuttons_tree(struct psm_softc *sc)
 	sc->syninfo.softbuttons_y = sc->synhw.topButtonPad ? -1700 : 1700;
 	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
-	    "softbuttons_y", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "softbuttons_y",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, SYNAPTICS_SYSCTL_SOFTBUTTONS_Y,
 	    synaptics_sysctl, "I",
 	    "Vertical size of softbuttons area");
@@ -5726,7 +5812,8 @@ synaptics_sysctl_create_softbuttons_tree(struct psm_softc *sc)
 	sc->syninfo.softbutton2_x = 3100;
 	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
-	    "softbutton2_x", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "softbutton2_x",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, SYNAPTICS_SYSCTL_SOFTBUTTON2_X,
 	    synaptics_sysctl, "I",
 	    "Horisontal position of 2-nd softbutton left edge (0-disable)");
@@ -5735,7 +5822,8 @@ synaptics_sysctl_create_softbuttons_tree(struct psm_softc *sc)
 	sc->syninfo.softbutton3_x = 3900;
 	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
-	    "softbutton3_x", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "softbutton3_x",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, SYNAPTICS_SYSCTL_SOFTBUTTON3_X,
 	    synaptics_sysctl, "I",
 	    "Horisontal position of 3-rd softbutton left edge (0-disable)");
@@ -5752,8 +5840,8 @@ synaptics_sysctl_create_tree(struct psm_softc *sc, const char *name,
 	/* Attach extra synaptics sysctl nodes under hw.psm.synaptics */
 	sysctl_ctx_init(&sc->syninfo.sysctl_ctx);
 	sc->syninfo.sysctl_tree = SYSCTL_ADD_NODE(&sc->syninfo.sysctl_ctx,
-	    SYSCTL_STATIC_CHILDREN(_hw_psm), OID_AUTO, name, CTLFLAG_RD,
-	    0, descr);
+	    SYSCTL_STATIC_CHILDREN(_hw_psm), OID_AUTO, name,
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, 0, descr);
 
 	/* hw.psm.synaptics.directional_scrolls. */
 	sc->syninfo.directional_scrolls = 0;
@@ -5801,7 +5889,8 @@ synaptics_sysctl_create_tree(struct psm_softc *sc, const char *name,
 	sc->syninfo.min_pressure = 32;
 	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
-	    "min_pressure", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "min_pressure",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, SYNAPTICS_SYSCTL_MIN_PRESSURE,
 	    synaptics_sysctl, "I",
 	    "Minimum pressure required to start an action");
@@ -5810,7 +5899,8 @@ synaptics_sysctl_create_tree(struct psm_softc *sc, const char *name,
 	sc->syninfo.max_pressure = 220;
 	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
-	    "max_pressure", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "max_pressure",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, SYNAPTICS_SYSCTL_MAX_PRESSURE,
 	    synaptics_sysctl, "I",
 	    "Maximum pressure to detect palm");
@@ -5819,7 +5909,8 @@ synaptics_sysctl_create_tree(struct psm_softc *sc, const char *name,
 	sc->syninfo.max_width = 10;
 	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
-	    "max_width", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "max_width",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, SYNAPTICS_SYSCTL_MAX_WIDTH,
 	    synaptics_sysctl, "I",
 	    "Maximum finger width to detect palm");
@@ -5828,7 +5919,8 @@ synaptics_sysctl_create_tree(struct psm_softc *sc, const char *name,
 	sc->syninfo.margin_top = 200;
 	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
-	    "margin_top", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "margin_top",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, SYNAPTICS_SYSCTL_MARGIN_TOP,
 	    synaptics_sysctl, "I",
 	    "Top margin");
@@ -5837,7 +5929,8 @@ synaptics_sysctl_create_tree(struct psm_softc *sc, const char *name,
 	sc->syninfo.margin_right = 200;
 	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
-	    "margin_right", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "margin_right",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, SYNAPTICS_SYSCTL_MARGIN_RIGHT,
 	    synaptics_sysctl, "I",
 	    "Right margin");
@@ -5846,7 +5939,8 @@ synaptics_sysctl_create_tree(struct psm_softc *sc, const char *name,
 	sc->syninfo.margin_bottom = 200;
 	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
-	    "margin_bottom", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "margin_bottom",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, SYNAPTICS_SYSCTL_MARGIN_BOTTOM,
 	    synaptics_sysctl, "I",
 	    "Bottom margin");
@@ -5855,7 +5949,8 @@ synaptics_sysctl_create_tree(struct psm_softc *sc, const char *name,
 	sc->syninfo.margin_left = 200;
 	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
-	    "margin_left", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "margin_left",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, SYNAPTICS_SYSCTL_MARGIN_LEFT,
 	    synaptics_sysctl, "I",
 	    "Left margin");
@@ -5864,7 +5959,8 @@ synaptics_sysctl_create_tree(struct psm_softc *sc, const char *name,
 	sc->syninfo.na_top = 1783;
 	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
-	    "na_top", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "na_top",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, SYNAPTICS_SYSCTL_NA_TOP,
 	    synaptics_sysctl, "I",
 	    "Top noisy area, where weight_previous_na is used instead "
@@ -5874,7 +5970,8 @@ synaptics_sysctl_create_tree(struct psm_softc *sc, const char *name,
 	sc->syninfo.na_right = 563;
 	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
-	    "na_right", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "na_right",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, SYNAPTICS_SYSCTL_NA_RIGHT,
 	    synaptics_sysctl, "I",
 	    "Right noisy area, where weight_previous_na is used instead "
@@ -5884,7 +5981,8 @@ synaptics_sysctl_create_tree(struct psm_softc *sc, const char *name,
 	sc->syninfo.na_bottom = 1408;
 	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
-	    "na_bottom", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "na_bottom",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, SYNAPTICS_SYSCTL_NA_BOTTOM,
 	    synaptics_sysctl, "I",
 	    "Bottom noisy area, where weight_previous_na is used instead "
@@ -5894,7 +5992,8 @@ synaptics_sysctl_create_tree(struct psm_softc *sc, const char *name,
 	sc->syninfo.na_left = 1600;
 	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
-	    "na_left", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "na_left",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, SYNAPTICS_SYSCTL_NA_LEFT,
 	    synaptics_sysctl, "I",
 	    "Left noisy area, where weight_previous_na is used instead "
@@ -5904,7 +6003,8 @@ synaptics_sysctl_create_tree(struct psm_softc *sc, const char *name,
 	sc->syninfo.window_min = 4;
 	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
-	    "window_min", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "window_min",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, SYNAPTICS_SYSCTL_WINDOW_MIN,
 	    synaptics_sysctl, "I",
 	    "Minimum window size to start an action");
@@ -5913,7 +6013,8 @@ synaptics_sysctl_create_tree(struct psm_softc *sc, const char *name,
 	sc->syninfo.window_max = 10;
 	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
-	    "window_max", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "window_max",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, SYNAPTICS_SYSCTL_WINDOW_MAX,
 	    synaptics_sysctl, "I",
 	    "Maximum window size");
@@ -5922,7 +6023,8 @@ synaptics_sysctl_create_tree(struct psm_softc *sc, const char *name,
 	sc->syninfo.multiplicator = 10000;
 	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
-	    "multiplicator", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "multiplicator",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, SYNAPTICS_SYSCTL_MULTIPLICATOR,
 	    synaptics_sysctl, "I",
 	    "Multiplicator to increase precision in averages and divisions");
@@ -5931,7 +6033,8 @@ synaptics_sysctl_create_tree(struct psm_softc *sc, const char *name,
 	sc->syninfo.weight_current = 3;
 	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
-	    "weight_current", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "weight_current",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, SYNAPTICS_SYSCTL_WEIGHT_CURRENT,
 	    synaptics_sysctl, "I",
 	    "Weight of the current movement in the new average");
@@ -5940,7 +6043,8 @@ synaptics_sysctl_create_tree(struct psm_softc *sc, const char *name,
 	sc->syninfo.weight_previous = 6;
 	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
-	    "weight_previous", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "weight_previous",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, SYNAPTICS_SYSCTL_WEIGHT_PREVIOUS,
 	    synaptics_sysctl, "I",
 	    "Weight of the previous average");
@@ -5949,7 +6053,8 @@ synaptics_sysctl_create_tree(struct psm_softc *sc, const char *name,
 	sc->syninfo.weight_previous_na = 20;
 	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
-	    "weight_previous_na", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "weight_previous_na",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, SYNAPTICS_SYSCTL_WEIGHT_PREVIOUS_NA,
 	    synaptics_sysctl, "I",
 	    "Weight of the previous average (inside the noisy area)");
@@ -5958,7 +6063,8 @@ synaptics_sysctl_create_tree(struct psm_softc *sc, const char *name,
 	sc->syninfo.weight_len_squared = 2000;
 	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
-	    "weight_len_squared", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "weight_len_squared",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, SYNAPTICS_SYSCTL_WEIGHT_LEN_SQUARED,
 	    synaptics_sysctl, "I",
 	    "Length (squared) of segments where weight_previous "
@@ -5968,7 +6074,8 @@ synaptics_sysctl_create_tree(struct psm_softc *sc, const char *name,
 	sc->syninfo.div_min = 9;
 	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
-	    "div_min", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "div_min",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, SYNAPTICS_SYSCTL_DIV_MIN,
 	    synaptics_sysctl, "I",
 	    "Divisor for fast movements");
@@ -5977,7 +6084,8 @@ synaptics_sysctl_create_tree(struct psm_softc *sc, const char *name,
 	sc->syninfo.div_max = 17;
 	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
-	    "div_max", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "div_max",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, SYNAPTICS_SYSCTL_DIV_MAX,
 	    synaptics_sysctl, "I",
 	    "Divisor for slow movements");
@@ -5986,7 +6094,8 @@ synaptics_sysctl_create_tree(struct psm_softc *sc, const char *name,
 	sc->syninfo.div_max_na = 30;
 	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
-	    "div_max_na", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "div_max_na",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, SYNAPTICS_SYSCTL_DIV_MAX_NA,
 	    synaptics_sysctl, "I",
 	    "Divisor with slow movements (inside the noisy area)");
@@ -5995,7 +6104,8 @@ synaptics_sysctl_create_tree(struct psm_softc *sc, const char *name,
 	sc->syninfo.div_len = 100;
 	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
-	    "div_len", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "div_len",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, SYNAPTICS_SYSCTL_DIV_LEN,
 	    synaptics_sysctl, "I",
 	    "Length of segments where div_max starts to decrease");
@@ -6004,7 +6114,8 @@ synaptics_sysctl_create_tree(struct psm_softc *sc, const char *name,
 	sc->syninfo.tap_max_delta = 80;
 	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
-	    "tap_max_delta", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "tap_max_delta",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, SYNAPTICS_SYSCTL_TAP_MAX_DELTA,
 	    synaptics_sysctl, "I",
 	    "Length of segments above which a tap is ignored");
@@ -6013,7 +6124,8 @@ synaptics_sysctl_create_tree(struct psm_softc *sc, const char *name,
 	sc->syninfo.tap_min_queue = 2;
 	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
-	    "tap_min_queue", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "tap_min_queue",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, SYNAPTICS_SYSCTL_TAP_MIN_QUEUE,
 	    synaptics_sysctl, "I",
 	    "Number of packets required to consider a tap");
@@ -6023,7 +6135,8 @@ synaptics_sysctl_create_tree(struct psm_softc *sc, const char *name,
 	sc->syninfo.taphold_timeout = tap_timeout;
 	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
-	    "taphold_timeout", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "taphold_timeout",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, SYNAPTICS_SYSCTL_TAPHOLD_TIMEOUT,
 	    synaptics_sysctl, "I",
 	    "Maximum elapsed time between two taps to consider a tap-hold "
@@ -6033,7 +6146,8 @@ synaptics_sysctl_create_tree(struct psm_softc *sc, const char *name,
 	sc->syninfo.vscroll_hor_area = 0; /* 1300 */
 	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
-	    "vscroll_hor_area", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "vscroll_hor_area",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, SYNAPTICS_SYSCTL_VSCROLL_HOR_AREA,
 	    synaptics_sysctl, "I",
 	    "Area reserved for horizontal virtual scrolling");
@@ -6042,7 +6156,8 @@ synaptics_sysctl_create_tree(struct psm_softc *sc, const char *name,
 	sc->syninfo.vscroll_ver_area = -400 - sc->syninfo.margin_right;
 	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
-	    "vscroll_ver_area", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "vscroll_ver_area",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, SYNAPTICS_SYSCTL_VSCROLL_VER_AREA,
 	    synaptics_sysctl, "I",
 	    "Area reserved for vertical virtual scrolling");
@@ -6051,7 +6166,8 @@ synaptics_sysctl_create_tree(struct psm_softc *sc, const char *name,
 	sc->syninfo.vscroll_min_delta = 50;
 	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
-	    "vscroll_min_delta", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "vscroll_min_delta",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, SYNAPTICS_SYSCTL_VSCROLL_MIN_DELTA,
 	    synaptics_sysctl, "I",
 	    "Minimum movement to consider virtual scrolling");
@@ -6060,7 +6176,8 @@ synaptics_sysctl_create_tree(struct psm_softc *sc, const char *name,
 	sc->syninfo.vscroll_div_min = 100;
 	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
-	    "vscroll_div_min", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "vscroll_div_min",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, SYNAPTICS_SYSCTL_VSCROLL_DIV_MIN,
 	    synaptics_sysctl, "I",
 	    "Divisor for fast scrolling");
@@ -6069,7 +6186,8 @@ synaptics_sysctl_create_tree(struct psm_softc *sc, const char *name,
 	sc->syninfo.vscroll_div_max = 150;
 	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
-	    "vscroll_div_max", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "vscroll_div_max",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, SYNAPTICS_SYSCTL_VSCROLL_DIV_MAX,
 	    synaptics_sysctl, "I",
 	    "Divisor for slow scrolling");
@@ -6078,10 +6196,30 @@ synaptics_sysctl_create_tree(struct psm_softc *sc, const char *name,
 	sc->syninfo.touchpad_off = 0;
 	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
-	    "touchpad_off", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "touchpad_off",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, SYNAPTICS_SYSCTL_TOUCHPAD_OFF,
 	    synaptics_sysctl, "I",
 	    "Turn off touchpad");
+
+	sc->syninfo.three_finger_drag = 0;
+	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
+	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
+	    "three_finger_drag",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
+	    sc, SYNAPTICS_SYSCTL_THREE_FINGER_DRAG,
+	    synaptics_sysctl, "I",
+	    "Enable dragging with three fingers");
+
+	/* hw.psm.synaptics.natural_scroll. */
+	sc->syninfo.natural_scroll = 0;
+	SYSCTL_ADD_PROC(&sc->syninfo.sysctl_ctx,
+	    SYSCTL_CHILDREN(sc->syninfo.sysctl_tree), OID_AUTO,
+	    "natural_scroll",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
+	    sc, SYNAPTICS_SYSCTL_NATURAL_SCROLL,
+	    synaptics_sysctl, "I",
+	    "Enable natural scrolling");
 
 	sc->syninfo.softbuttons_y = 0;
 	sc->syninfo.softbutton2_x = 0;
@@ -6136,7 +6274,7 @@ synaptics_set_mode(struct psm_softc *sc, int mode_byte) {
 	 */
 	if ((sc->synhw.capAdvancedGestures || sc->synhw.capReportsV) &&
 	    sc->hw.model == MOUSE_MODEL_SYNAPTICS && !(mode_byte & (1 << 5))) {
-		mouse_ext_command(sc->kbdc, 3);
+		mouse_ext_command(sc->kbdc, SYNAPTICS_READ_MODEL_ID);
 		set_mouse_sampling_rate(sc->kbdc, 0xc8);
 	}
 }
@@ -6216,7 +6354,7 @@ enable_synaptics(struct psm_softc *sc, enum probearg arg)
 	set_mouse_scaling(kbdc, 1);
 
 	/* Identify the Touchpad version. */
-	if (mouse_ext_command(kbdc, 0) == 0)
+	if (mouse_ext_command(kbdc, SYNAPTICS_READ_IDENTITY) == 0)
 		return (FALSE);
 	if (get_mouse_status(kbdc, status, 0, 3) != 3)
 		return (FALSE);
@@ -6237,7 +6375,7 @@ enable_synaptics(struct psm_softc *sc, enum probearg arg)
 	}
 
 	/* Get the Touchpad model information. */
-	if (mouse_ext_command(kbdc, 3) == 0)
+	if (mouse_ext_command(kbdc, SYNAPTICS_READ_MODEL_ID) == 0)
 		return (FALSE);
 	if (get_mouse_status(kbdc, status, 0, 3) != 3)
 		return (FALSE);
@@ -6268,7 +6406,7 @@ enable_synaptics(struct psm_softc *sc, enum probearg arg)
 	}
 
 	/* Read the extended capability bits. */
-	if (mouse_ext_command(kbdc, 2) == 0)
+	if (mouse_ext_command(kbdc, SYNAPTICS_READ_CAPABILITIES) == 0)
 		return (FALSE);
 	if (get_mouse_status(kbdc, status, 0, 3) != 3)
 		return (FALSE);
@@ -6299,7 +6437,7 @@ enable_synaptics(struct psm_softc *sc, enum probearg arg)
 
 		if (!set_mouse_scaling(kbdc, 1))
 			return (FALSE);
-		if (mouse_ext_command(kbdc, 0x08) == 0)
+		if (mouse_ext_command(kbdc, SYNAPTICS_READ_RESOLUTIONS) == 0)
 			return (FALSE);
 		if (get_mouse_status(kbdc, status, 0, 3) != 3)
 			return (FALSE);
@@ -6336,7 +6474,8 @@ enable_synaptics(struct psm_softc *sc, enum probearg arg)
 		if (synhw.nExtendedQueries >= 1) {
 			if (!set_mouse_scaling(kbdc, 1))
 				return (FALSE);
-			if (mouse_ext_command(kbdc, 0x09) == 0)
+			if (mouse_ext_command(kbdc,
+			    SYNAPTICS_READ_EXTENDED) == 0)
 				return (FALSE);
 			if (get_mouse_status(kbdc, status, 0, 3) != 3)
 				return (FALSE);
@@ -6375,7 +6514,8 @@ enable_synaptics(struct psm_softc *sc, enum probearg arg)
 		if (synhw.nExtendedQueries >= 4) {
 			if (!set_mouse_scaling(kbdc, 1))
 				return (FALSE);
-			if (mouse_ext_command(kbdc, 0x0c) == 0)
+			if (mouse_ext_command(kbdc,
+			    SYNAPTICS_READ_CAPABILITIES_CONT) == 0)
 				return (FALSE);
 			if (get_mouse_status(kbdc, status, 0, 3) != 3)
 				return (FALSE);
@@ -6396,7 +6536,8 @@ enable_synaptics(struct psm_softc *sc, enum probearg arg)
 			if (synhw.capReportsMax) {
 				if (!set_mouse_scaling(kbdc, 1))
 					return (FALSE);
-				if (mouse_ext_command(kbdc, 0x0d) == 0)
+				if (mouse_ext_command(kbdc,
+				    SYNAPTICS_READ_MAX_COORDS) == 0)
 					return (FALSE);
 				if (get_mouse_status(kbdc, status, 0, 3) != 3)
 					return (FALSE);
@@ -6417,7 +6558,8 @@ enable_synaptics(struct psm_softc *sc, enum probearg arg)
 			if (synhw.capReportsMin) {
 				if (!set_mouse_scaling(kbdc, 1))
 					return (FALSE);
-				if (mouse_ext_command(kbdc, 0x0f) == 0)
+				if (mouse_ext_command(kbdc,
+				    SYNAPTICS_READ_MIN_COORDS) == 0)
 					return (FALSE);
 				if (get_mouse_status(kbdc, status, 0, 3) != 3)
 					return (FALSE);
@@ -6520,7 +6662,7 @@ enable_synaptics(struct psm_softc *sc, enum probearg arg)
 	 * byte of the response to this query to be a constant 0x3b, this
 	 * does not appear to be true for Touchpads with guest devices.
 	 */
-	if (mouse_ext_command(kbdc, 1) == 0)
+	if (mouse_ext_command(kbdc, SYNAPTICS_READ_MODES) == 0)
 		return (FALSE);
 	if (get_mouse_status(kbdc, status, 0, 3) != 3)
 		return (FALSE);
@@ -6659,14 +6801,15 @@ trackpoint_sysctl_create_tree(struct psm_softc *sc)
 	/* Attach extra trackpoint sysctl nodes under hw.psm.trackpoint */
 	sysctl_ctx_init(&sc->tpinfo.sysctl_ctx);
 	sc->tpinfo.sysctl_tree = SYSCTL_ADD_NODE(&sc->tpinfo.sysctl_ctx,
-	    SYSCTL_STATIC_CHILDREN(_hw_psm), OID_AUTO, "trackpoint", CTLFLAG_RD,
-	    0, "IBM/Lenovo TrackPoint");
+	    SYSCTL_STATIC_CHILDREN(_hw_psm), OID_AUTO, "trackpoint",
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, 0, "IBM/Lenovo TrackPoint");
 
 	/* hw.psm.trackpoint.sensitivity */
 	sc->tpinfo.sensitivity = 0x80;
 	SYSCTL_ADD_PROC(&sc->tpinfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->tpinfo.sysctl_tree), OID_AUTO,
-	    "sensitivity", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "sensitivity",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, TRACKPOINT_SYSCTL_SENSITIVITY,
 	    trackpoint_sysctl, "I",
 	    "Sensitivity");
@@ -6675,7 +6818,8 @@ trackpoint_sysctl_create_tree(struct psm_softc *sc)
 	sc->tpinfo.inertia = 0x06;
 	SYSCTL_ADD_PROC(&sc->tpinfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->tpinfo.sysctl_tree), OID_AUTO,
-	    "negative_inertia", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "negative_inertia",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, TRACKPOINT_SYSCTL_NEGATIVE_INERTIA,
 	    trackpoint_sysctl, "I",
 	    "Negative inertia factor");
@@ -6684,7 +6828,8 @@ trackpoint_sysctl_create_tree(struct psm_softc *sc)
 	sc->tpinfo.uplateau = 0x61;
 	SYSCTL_ADD_PROC(&sc->tpinfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->tpinfo.sysctl_tree), OID_AUTO,
-	    "upper_plateau", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "upper_plateau",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, TRACKPOINT_SYSCTL_UPPER_PLATEAU,
 	    trackpoint_sysctl, "I",
 	    "Transfer function upper plateau speed");
@@ -6693,7 +6838,8 @@ trackpoint_sysctl_create_tree(struct psm_softc *sc)
 	sc->tpinfo.reach = 0x0a;
 	SYSCTL_ADD_PROC(&sc->tpinfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->tpinfo.sysctl_tree), OID_AUTO,
-	    "backup_range", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "backup_range",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, TRACKPOINT_SYSCTL_BACKUP_RANGE,
 	    trackpoint_sysctl, "I",
 	    "Backup range");
@@ -6702,7 +6848,8 @@ trackpoint_sysctl_create_tree(struct psm_softc *sc)
 	sc->tpinfo.draghys = 0xff;
 	SYSCTL_ADD_PROC(&sc->tpinfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->tpinfo.sysctl_tree), OID_AUTO,
-	    "drag_hysteresis", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "drag_hysteresis",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, TRACKPOINT_SYSCTL_DRAG_HYSTERESIS,
 	    trackpoint_sysctl, "I",
 	    "Drag hysteresis");
@@ -6711,7 +6858,8 @@ trackpoint_sysctl_create_tree(struct psm_softc *sc)
 	sc->tpinfo.mindrag = 0x14;
 	SYSCTL_ADD_PROC(&sc->tpinfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->tpinfo.sysctl_tree), OID_AUTO,
-	    "minimum_drag", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "minimum_drag",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, TRACKPOINT_SYSCTL_MINIMUM_DRAG,
 	    trackpoint_sysctl, "I",
 	    "Minimum drag");
@@ -6720,7 +6868,8 @@ trackpoint_sysctl_create_tree(struct psm_softc *sc)
 	sc->tpinfo.upthresh = 0xff;
 	SYSCTL_ADD_PROC(&sc->tpinfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->tpinfo.sysctl_tree), OID_AUTO,
-	    "up_threshold", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "up_threshold",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, TRACKPOINT_SYSCTL_UP_THRESHOLD,
 	    trackpoint_sysctl, "I",
 	    "Up threshold for release");
@@ -6729,7 +6878,8 @@ trackpoint_sysctl_create_tree(struct psm_softc *sc)
 	sc->tpinfo.threshold = 0x08;
 	SYSCTL_ADD_PROC(&sc->tpinfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->tpinfo.sysctl_tree), OID_AUTO,
-	    "threshold", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "threshold",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, TRACKPOINT_SYSCTL_THRESHOLD,
 	    trackpoint_sysctl, "I",
 	    "Threshold");
@@ -6738,7 +6888,8 @@ trackpoint_sysctl_create_tree(struct psm_softc *sc)
 	sc->tpinfo.jenks = 0x87;
 	SYSCTL_ADD_PROC(&sc->tpinfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->tpinfo.sysctl_tree), OID_AUTO,
-	    "jenks_curvature", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "jenks_curvature",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, TRACKPOINT_SYSCTL_JENKS_CURVATURE,
 	    trackpoint_sysctl, "I",
 	    "Jenks curvature");
@@ -6747,7 +6898,8 @@ trackpoint_sysctl_create_tree(struct psm_softc *sc)
 	sc->tpinfo.ztime = 0x26;
 	SYSCTL_ADD_PROC(&sc->tpinfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->tpinfo.sysctl_tree), OID_AUTO,
-	    "z_time", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "z_time",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, TRACKPOINT_SYSCTL_Z_TIME,
 	    trackpoint_sysctl, "I",
 	    "Z time constant");
@@ -6756,7 +6908,8 @@ trackpoint_sysctl_create_tree(struct psm_softc *sc)
 	sc->tpinfo.pts = 0x00;
 	SYSCTL_ADD_PROC(&sc->tpinfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->tpinfo.sysctl_tree), OID_AUTO,
-	    "press_to_select", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "press_to_select",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, TRACKPOINT_SYSCTL_PRESS_TO_SELECT,
 	    trackpoint_sysctl, "I",
 	    "Press to Select");
@@ -6765,7 +6918,8 @@ trackpoint_sysctl_create_tree(struct psm_softc *sc)
 	sc->tpinfo.skipback = 0x00;
 	SYSCTL_ADD_PROC(&sc->tpinfo.sysctl_ctx,
 	    SYSCTL_CHILDREN(sc->tpinfo.sysctl_tree), OID_AUTO,
-	    "skip_backups", CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
+	    "skip_backups",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_NEEDGIANT,
 	    sc, TRACKPOINT_SYSCTL_SKIP_BACKUPS,
 	    trackpoint_sysctl, "I",
 	    "Skip backups from drags");
@@ -7071,7 +7225,7 @@ enable_elantech(struct psm_softc *sc, enum probearg arg)
 {
 	static const int ic2hw[] =
 	/*IC: 0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f */
-	    { 0, 0, 2, 0, 2, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 0 };
+	    { 0, 0, 2, 0, 2, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4 };
 	static const int fw_sizes[][3] = {
 		/* FW.vers  MaxX  MaxY */
 		{ 0x020030, 1152,  768 },

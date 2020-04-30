@@ -157,12 +157,7 @@ virtio_describe(device_t dev, const char *msg,
 	if (n > 0)
 		sbuf_cat(&sb, ">");
 
-#if __FreeBSD_version < 900020
-	sbuf_finish(&sb);
-	if (sbuf_overflowed(&sb) == 0)
-#else
 	if (sbuf_finish(&sb) == 0)
-#endif
 		device_printf(dev, "%s\n", sbuf_data(&sb));
 
 	sbuf_delete(&sb);
@@ -261,6 +256,30 @@ virtio_write_device_config(device_t dev, bus_size_t offset, void *dst, int len)
 
 	VIRTIO_BUS_WRITE_DEVICE_CONFIG(device_get_parent(dev),
 	    offset, dst, len);
+}
+
+int
+virtio_child_pnpinfo_str(device_t busdev __unused, device_t child, char *buf,
+    size_t buflen)
+{
+
+	/*
+	 * All of these PCI fields will be only 16 bits, but on the vtmmio bus
+	 * the corresponding fields (only "vendor" and "device_type") are 32
+	 * bits.  Many virtio drivers can attach below either bus.
+	 * Gratuitously expand these two fields to 32-bits to allow sharing PNP
+	 * match table data between the mostly-similar buses.
+	 *
+	 * Subdevice and device_type are redundant in both buses, so I don't
+	 * see a lot of PNP utility in exposing the same value under a
+	 * different name.
+	 */
+	snprintf(buf, buflen, "vendor=0x%08x device=0x%04x subvendor=0x%04x "
+	    "device_type=0x%08x", (unsigned)virtio_get_vendor(child),
+	    (unsigned)virtio_get_device(child),
+	    (unsigned)virtio_get_subvendor(child),
+	    (unsigned)virtio_get_device_type(child));
+	return (0);
 }
 
 static int

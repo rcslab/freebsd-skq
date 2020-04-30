@@ -30,7 +30,15 @@
 #ifndef _POWERPC_AIM_MMU_OEA64_H
 #define _POWERPC_AIM_MMU_OEA64_H
 
+#include "opt_pmap.h"
+
 #include <machine/mmuvar.h>
+
+struct dump_context {
+	u_long ptex;
+	u_long ptex_end;
+	size_t blksz;
+};
 
 extern mmu_def_t oea64_mmu;
 
@@ -68,12 +76,24 @@ void		moea64_mid_bootstrap(mmu_t mmup, vm_offset_t kernelstart,
 void		moea64_late_bootstrap(mmu_t mmup, vm_offset_t kernelstart,
 		    vm_offset_t kernelend);
 
+static inline uint64_t
+moea64_pte_vpn_from_pvo_vpn(const struct pvo_entry *pvo)
+{
+	return ((pvo->pvo_vpn >> (ADDR_API_SHFT64 - ADDR_PIDX_SHFT)) &
+	    LPTE_AVPN_MASK);
+}
+
 /*
  * Statistics
  */
 
+#ifdef MOEA64_STATS
 extern u_int	moea64_pte_valid;
 extern u_int	moea64_pte_overflow;
+#define STAT_MOEA64(x)	x
+#else
+#define	STAT_MOEA64(x) ((void)0)
+#endif
 
 /*
  * State variables
@@ -81,6 +101,7 @@ extern u_int	moea64_pte_overflow;
 
 extern int		moea64_large_page_shift;
 extern uint64_t		moea64_large_page_size;
+extern uint64_t		moea64_large_page_mask;
 extern u_long		moea64_pteg_count;
 extern u_long		moea64_pteg_mask;
 extern int		n_slbs;

@@ -40,6 +40,9 @@ __FBSDID("$FreeBSD$");
 #include <sys/msgbuf.h>
 #include <sys/watchdog.h>
 #include <vm/vm.h>
+#include <vm/vm_param.h>
+#include <vm/vm_page.h>
+#include <vm/vm_phys.h>
 #include <vm/pmap.h>
 #include <machine/atomic.h>
 #include <machine/elf.h>
@@ -318,7 +321,6 @@ minidumpsys(struct dumperinfo *di)
 	}
 
 	/* Dump memory chunks */
-	/* XXX cluster it up and use blk_dump() */
 	for (i = 0; i < vm_page_dump_size / sizeof(*vm_page_dump); i++) {
 		bits = vm_page_dump[i];
 		while (bits) {
@@ -348,9 +350,10 @@ minidumpsys(struct dumperinfo *di)
 
 	if (error == ECANCELED)
 		printf("\nDump aborted\n");
-	else if (error == E2BIG || error == ENOSPC)
-		printf("\nDump failed. Partition too small.\n");
-	else
+	else if (error == E2BIG || error == ENOSPC) {
+		printf("\nDump failed. Partition too small (about %lluMB were "
+		    "needed this time).\n", (long long)dumpsize >> 20);
+	} else
 		printf("\n** DUMP FAILED (ERROR %d) **\n", error);
 	return (error);
 }

@@ -34,6 +34,7 @@ __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
 #include <sys/conf.h>
+#include <sys/domainset.h>
 #include <sys/eventhandler.h>
 #include <sys/filio.h>
 #include <sys/lock.h>
@@ -71,8 +72,10 @@ __FBSDID("$FreeBSD$");
 
 #include <ddb/ddb.h>
 
-SYSCTL_NODE(_hw, OID_AUTO, bus, CTLFLAG_RW, NULL, NULL);
-SYSCTL_ROOT_NODE(OID_AUTO, dev, CTLFLAG_RW, NULL, NULL);
+SYSCTL_NODE(_hw, OID_AUTO, bus, CTLFLAG_RW | CTLFLAG_MPSAFE, NULL,
+    NULL);
+SYSCTL_ROOT_NODE(OID_AUTO, dev, CTLFLAG_RW | CTLFLAG_MPSAFE, NULL,
+    NULL);
 
 /*
  * Used to attach drivers to devclasses.
@@ -237,9 +240,10 @@ devclass_sysctl_init(devclass_t dc)
 	sysctl_ctx_init(&dc->sysctl_ctx);
 	dc->sysctl_tree = SYSCTL_ADD_NODE(&dc->sysctl_ctx,
 	    SYSCTL_STATIC_CHILDREN(_dev), OID_AUTO, dc->name,
-	    CTLFLAG_RD, NULL, "");
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "");
 	SYSCTL_ADD_PROC(&dc->sysctl_ctx, SYSCTL_CHILDREN(dc->sysctl_tree),
-	    OID_AUTO, "%parent", CTLTYPE_STRING | CTLFLAG_RD,
+	    OID_AUTO, "%parent",
+	    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_NEEDGIANT,
 	    dc, DEVCLASS_SYSCTL_PARENT, devclass_sysctl_handler, "A",
 	    "parent class");
 }
@@ -301,25 +305,29 @@ device_sysctl_init(device_t dev)
 	dev->sysctl_tree = SYSCTL_ADD_NODE_WITH_LABEL(&dev->sysctl_ctx,
 	    SYSCTL_CHILDREN(dc->sysctl_tree), OID_AUTO,
 	    dev->nameunit + strlen(dc->name),
-	    CTLFLAG_RD, NULL, "", "device_index");
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "", "device_index");
 	SYSCTL_ADD_PROC(&dev->sysctl_ctx, SYSCTL_CHILDREN(dev->sysctl_tree),
-	    OID_AUTO, "%desc", CTLTYPE_STRING | CTLFLAG_RD,
+	    OID_AUTO, "%desc", CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_NEEDGIANT,
 	    dev, DEVICE_SYSCTL_DESC, device_sysctl_handler, "A",
 	    "device description");
 	SYSCTL_ADD_PROC(&dev->sysctl_ctx, SYSCTL_CHILDREN(dev->sysctl_tree),
-	    OID_AUTO, "%driver", CTLTYPE_STRING | CTLFLAG_RD,
+	    OID_AUTO, "%driver",
+	    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_NEEDGIANT,
 	    dev, DEVICE_SYSCTL_DRIVER, device_sysctl_handler, "A",
 	    "device driver name");
 	SYSCTL_ADD_PROC(&dev->sysctl_ctx, SYSCTL_CHILDREN(dev->sysctl_tree),
-	    OID_AUTO, "%location", CTLTYPE_STRING | CTLFLAG_RD,
+	    OID_AUTO, "%location",
+	    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_NEEDGIANT,
 	    dev, DEVICE_SYSCTL_LOCATION, device_sysctl_handler, "A",
 	    "device location relative to parent");
 	SYSCTL_ADD_PROC(&dev->sysctl_ctx, SYSCTL_CHILDREN(dev->sysctl_tree),
-	    OID_AUTO, "%pnpinfo", CTLTYPE_STRING | CTLFLAG_RD,
+	    OID_AUTO, "%pnpinfo",
+	    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_NEEDGIANT,
 	    dev, DEVICE_SYSCTL_PNPINFO, device_sysctl_handler, "A",
 	    "device identification");
 	SYSCTL_ADD_PROC(&dev->sysctl_ctx, SYSCTL_CHILDREN(dev->sysctl_tree),
-	    OID_AUTO, "%parent", CTLTYPE_STRING | CTLFLAG_RD,
+	    OID_AUTO, "%parent",
+	    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_NEEDGIANT,
 	    dev, DEVICE_SYSCTL_PARENT, device_sysctl_handler, "A",
 	    "parent device");
 	if (bus_get_domain(dev, &domain) == 0)
@@ -1685,7 +1693,8 @@ devclass_alloc_unit(devclass_t dc, device_t dev, int *unitp)
 		int newsize;
 
 		oldlist = dc->devices;
-		newsize = roundup((unit + 1), MINALLOCSIZE / sizeof(device_t));
+		newsize = roundup((unit + 1),
+		    MAX(1, MINALLOCSIZE / sizeof(device_t)));
 		newlist = malloc(sizeof(device_t) * newsize, M_BUS, M_NOWAIT);
 		if (!newlist)
 			return (ENOMEM);
@@ -2431,13 +2440,31 @@ device_print_prettyname(device_t dev)
 int
 device_printf(device_t dev, const char * fmt, ...)
 {
+	char buf[128];
+	struct sbuf sb;
+	const char *name;
 	va_list ap;
-	int retval;
+	size_t retval;
 
-	retval = device_print_prettyname(dev);
+	retval = 0;
+
+	sbuf_new(&sb, buf, sizeof(buf), SBUF_FIXEDLEN);
+	sbuf_set_drain(&sb, sbuf_printf_drain, &retval);
+
+	name = device_get_name(dev);
+
+	if (name == NULL)
+		sbuf_cat(&sb, "unknown: ");
+	else
+		sbuf_printf(&sb, "%s%d: ", name, device_get_unit(dev));
+
 	va_start(ap, fmt);
-	retval += vprintf(fmt, ap);
+	sbuf_vprintf(&sb, fmt, ap);
 	va_end(ap);
+
+	sbuf_finish(&sb);
+	sbuf_delete(&sb);
+
 	return (retval);
 }
 
@@ -2523,7 +2550,7 @@ void
 device_set_softc(device_t dev, void *softc)
 {
 	if (dev->softc && !(dev->flags & DF_EXTERNALSOFTC))
-		free(dev->softc, M_BUS_SC);
+		free_domain(dev->softc, M_BUS_SC);
 	dev->softc = softc;
 	if (dev->softc)
 		dev->flags |= DF_EXTERNALSOFTC;
@@ -2540,7 +2567,7 @@ device_set_softc(device_t dev, void *softc)
 void
 device_free_softc(void *softc)
 {
-	free(softc, M_BUS_SC);
+	free_domain(softc, M_BUS_SC);
 }
 
 /**
@@ -2799,6 +2826,9 @@ device_is_devclass_fixed(device_t dev)
 int
 device_set_driver(device_t dev, driver_t *driver)
 {
+	int domain;
+	struct domainset *policy;
+
 	if (dev->state >= DS_ATTACHED)
 		return (EBUSY);
 
@@ -2806,7 +2836,7 @@ device_set_driver(device_t dev, driver_t *driver)
 		return (0);
 
 	if (dev->softc && !(dev->flags & DF_EXTERNALSOFTC)) {
-		free(dev->softc, M_BUS_SC);
+		free_domain(dev->softc, M_BUS_SC);
 		dev->softc = NULL;
 	}
 	device_set_desc(dev, NULL);
@@ -2815,8 +2845,12 @@ device_set_driver(device_t dev, driver_t *driver)
 	if (driver) {
 		kobj_init((kobj_t) dev, (kobj_class_t) driver);
 		if (!(dev->flags & DF_EXTERNALSOFTC) && driver->size > 0) {
-			dev->softc = malloc(driver->size, M_BUS_SC,
-			    M_NOWAIT | M_ZERO);
+			if (bus_get_domain(dev, &domain) == 0)
+				policy = DOMAINSET_PREF(domain);
+			else
+				policy = DOMAINSET_RR();
+			dev->softc = malloc_domainset(driver->size, M_BUS_SC,
+			    policy, M_NOWAIT | M_ZERO);
 			if (!dev->softc) {
 				kobj_delete((kobj_t) dev, NULL);
 				kobj_init((kobj_t) dev, &null_class);
@@ -3004,6 +3038,10 @@ device_detach(device_t dev)
 	PDEBUG(("%s", DEVICENAME(dev)));
 	if (dev->state == DS_BUSY)
 		return (EBUSY);
+	if (dev->state == DS_ATTACHING) {
+		device_printf(dev, "device in attaching state! Deferring detach.\n");
+		return (EBUSY);
+	}
 	if (dev->state != DS_ATTACHED)
 		return (0);
 
@@ -3560,7 +3598,6 @@ resource_list_release_active(struct resource_list *rl, device_t bus,
 	return (retval);
 }
 
-
 /**
  * @brief Fully release a reserved resource
  *
@@ -3723,6 +3760,22 @@ bus_generic_attach(device_t dev)
 }
 
 /**
+ * @brief Helper function for delaying attaching children
+ *
+ * Many buses can't run transactions on the bus which children need to probe and
+ * attach until after interrupts and/or timers are running.  This function
+ * delays their attach until interrupts and timers are enabled.
+ */
+int
+bus_delayed_attach_children(device_t dev)
+{
+	/* Probe and attach the bus children when interrupts are available */
+	config_intrhook_oneshot((ich_func_t)bus_generic_attach, dev);
+
+	return (0);
+}
+
+/**
  * @brief Helper function for implementing DEVICE_DETACH()
  *
  * This function can be used to help implement the DEVICE_DETACH() for
@@ -3856,6 +3909,94 @@ bus_generic_resume(device_t dev)
 	TAILQ_FOREACH(child, &dev->children, link) {
 		BUS_RESUME_CHILD(dev, child);
 		/* if resume fails, there's nothing we can usefully do... */
+	}
+	return (0);
+}
+
+/**
+ * @brief Helper function for implementing BUS_RESET_POST
+ *
+ * Bus can use this function to implement common operations of
+ * re-attaching or resuming the children after the bus itself was
+ * reset, and after restoring bus-unique state of children.
+ *
+ * @param dev	The bus
+ * #param flags	DEVF_RESET_*
+ */
+int
+bus_helper_reset_post(device_t dev, int flags)
+{
+	device_t child;
+	int error, error1;
+
+	error = 0;
+	TAILQ_FOREACH(child, &dev->children,link) {
+		BUS_RESET_POST(dev, child);
+		error1 = (flags & DEVF_RESET_DETACH) != 0 ?
+		    device_probe_and_attach(child) :
+		    BUS_RESUME_CHILD(dev, child);
+		if (error == 0 && error1 != 0)
+			error = error1;
+	}
+	return (error);
+}
+
+static void
+bus_helper_reset_prepare_rollback(device_t dev, device_t child, int flags)
+{
+
+	child = TAILQ_NEXT(child, link);
+	if (child == NULL)
+		return;
+	TAILQ_FOREACH_FROM(child, &dev->children,link) {
+		BUS_RESET_POST(dev, child);
+		if ((flags & DEVF_RESET_DETACH) != 0)
+			device_probe_and_attach(child);
+		else
+			BUS_RESUME_CHILD(dev, child);
+	}
+}
+
+/**
+ * @brief Helper function for implementing BUS_RESET_PREPARE
+ *
+ * Bus can use this function to implement common operations of
+ * detaching or suspending the children before the bus itself is
+ * reset, and then save bus-unique state of children that must
+ * persists around reset.
+ *
+ * @param dev	The bus
+ * #param flags	DEVF_RESET_*
+ */
+int
+bus_helper_reset_prepare(device_t dev, int flags)
+{
+	device_t child;
+	int error;
+
+	if (dev->state != DS_ATTACHED)
+		return (EBUSY);
+
+	TAILQ_FOREACH_REVERSE(child, &dev->children, device_list, link) {
+		if ((flags & DEVF_RESET_DETACH) != 0) {
+			error = device_get_state(child) == DS_ATTACHED ?
+			    device_detach(child) : 0;
+		} else {
+			error = BUS_SUSPEND_CHILD(dev, child);
+		}
+		if (error == 0) {
+			error = BUS_RESET_PREPARE(dev, child);
+			if (error != 0) {
+				if ((flags & DEVF_RESET_DETACH) != 0)
+					device_probe_and_attach(child);
+				else
+					BUS_RESUME_CHILD(dev, child);
+			}
+		}
+		if (error != 0) {
+			bus_helper_reset_prepare_rollback(dev, child, flags);
+			return (error);
+		}
 	}
 	return (0);
 }
@@ -5322,7 +5463,7 @@ sysctl_bus(SYSCTL_HANDLER_ARGS)
 
 	return (SYSCTL_OUT(req, &ubus, sizeof(ubus)));
 }
-SYSCTL_NODE(_hw_bus, OID_AUTO, info, CTLFLAG_RW, sysctl_bus,
+SYSCTL_NODE(_hw_bus, OID_AUTO, info, CTLFLAG_RW | CTLFLAG_NEEDGIANT, sysctl_bus,
     "bus-related data");
 
 static int
@@ -5397,7 +5538,8 @@ sysctl_devices(SYSCTL_HANDLER_ARGS)
 	return (error);
 }
 
-SYSCTL_NODE(_hw_bus, OID_AUTO, devices, CTLFLAG_RD, sysctl_devices,
+SYSCTL_NODE(_hw_bus, OID_AUTO, devices,
+    CTLFLAG_RD | CTLFLAG_NEEDGIANT, sysctl_devices,
     "system device tree");
 
 int
@@ -5552,6 +5694,7 @@ devctl2_ioctl(struct cdev *cdev, u_long cmd, caddr_t data, int fflag,
 	case DEV_CLEAR_DRIVER:
 	case DEV_RESCAN:
 	case DEV_DELETE:
+	case DEV_RESET:
 		error = priv_check(td, PRIV_DRIVER);
 		if (error == 0)
 			error = find_device(req, &dev);
@@ -5777,6 +5920,14 @@ devctl2_ioctl(struct cdev *cdev, u_long cmd, caddr_t data, int fflag,
 			device_frozen = false;
 		}
 		break;
+	case DEV_RESET:
+		if ((req->dr_flags & ~(DEVF_RESET_DETACH)) != 0) {
+			error = EINVAL;
+			break;
+		}
+		error = BUS_RESET_CHILD(device_get_parent(dev), dev,
+		    req->dr_flags);
+		break;
 	}
 	mtx_unlock(&Giant);
 	return (error);
@@ -5801,8 +5952,9 @@ devctl2_init(void)
  */
 static int obsolete_panic = 0;
 SYSCTL_INT(_debug, OID_AUTO, obsolete_panic, CTLFLAG_RWTUN, &obsolete_panic, 0,
-    "Bus debug level");
-/* 0 - don't panic, 1 - panic if already obsolete, 2 - panic if deprecated */
+    "Panic when obsolete features are used (0 = never, 1 = if osbolete, "
+    "2 = if deprecated)");
+
 static void
 gone_panic(int major, int running, const char *msg)
 {
@@ -5826,8 +5978,8 @@ _gone_in(int major, const char *msg)
 
 	gone_panic(major, P_OSREL_MAJOR(__FreeBSD_version), msg);
 	if (P_OSREL_MAJOR(__FreeBSD_version) >= major)
-		printf("Obsolete code will removed soon: %s\n", msg);
-	else if (P_OSREL_MAJOR(__FreeBSD_version) + 1 == major)
+		printf("Obsolete code will be removed soon: %s\n", msg);
+	else
 		printf("Deprecated code (to be removed in FreeBSD %d): %s\n",
 		    major, msg);
 }
@@ -5839,8 +5991,8 @@ _gone_in_dev(device_t dev, int major, const char *msg)
 	gone_panic(major, P_OSREL_MAJOR(__FreeBSD_version), msg);
 	if (P_OSREL_MAJOR(__FreeBSD_version) >= major)
 		device_printf(dev,
-		    "Obsolete code will removed soon: %s\n", msg);
-	else if (P_OSREL_MAJOR(__FreeBSD_version) + 1 == major)
+		    "Obsolete code will be removed soon: %s\n", msg);
+	else
 		device_printf(dev,
 		    "Deprecated code (to be removed in FreeBSD %d): %s\n",
 		    major, msg);

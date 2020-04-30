@@ -427,12 +427,14 @@ atse_stop_locked(struct atse_softc *sc)
 	return (0);
 }
 
-static uint8_t
-atse_mchash(struct atse_softc *sc __unused, const uint8_t *addr)
+static u_int
+atse_hash_maddr(void *arg, struct sockaddr_dl *sdl, u_int cnt)
 {
-	uint8_t x, y;
+	uint64_t *h = arg;
+	uint8_t *addr, x, y;
 	int i, j;
 
+	addr = LLADDR(sdl);
 	x = 0;
 	for (i = 0; i < ETHER_ADDR_LEN; i++) {
 		y = addr[i] & 0x01;
@@ -440,14 +442,14 @@ atse_mchash(struct atse_softc *sc __unused, const uint8_t *addr)
 			y ^= (addr[i] >> j) & 0x01;
 		x |= (y << i);
 	}
+	*h |= (1 << x);
 
-	return (x);
+	return (1);
 }
 
 static int
 atse_rxfilter_locked(struct atse_softc *sc)
 {
-	struct ifmultiaddr *ifma;
 	struct ifnet *ifp;
 	uint32_t val4;
 	int i;
@@ -478,22 +480,13 @@ atse_rxfilter_locked(struct atse_softc *sc)
 		 */
 		uint64_t h;
 
-		h = 0;
 		/*
 		 * Re-build and re-program hash table.  First build the
 		 * bit-field "yes" or "no" for each slot per address, then
 		 * do all the programming afterwards.
 		 */
-		if_maddr_rlock(ifp);
-		CK_STAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
-			if (ifma->ifma_addr->sa_family != AF_LINK) {
-				continue;
-			}
-
-			h |= (1 << atse_mchash(sc,
-			    LLADDR((struct sockaddr_dl *)ifma->ifma_addr)));
-		}
-		if_maddr_runlock(ifp);
+		h = 0;
+		(void)if_foreach_llmaddr(ifp, atse_hash_maddr, &h);
 		for (i = 0; i <= MHASH_LEN; i++) {
 			CSR_WRITE_4(sc, MHASH_START + i,
 			    (h & (1 << i)) ? 0x01 : 0x00);
@@ -1244,7 +1237,8 @@ atse_sysctl_stats_attach(device_t dev)
 		}
 
 		SYSCTL_ADD_PROC(sctx, SYSCTL_CHILDREN(soid), OID_AUTO,
-		    atse_mac_stats_regs[i].name, CTLTYPE_UINT|CTLFLAG_RD,
+		    atse_mac_stats_regs[i].name,
+		    CTLTYPE_UINT | CTLFLAG_RD | CTLFLAG_NEEDGIANT,
 		    sc, i, sysctl_atse_mac_stats_proc, "IU",
 		    atse_mac_stats_regs[i].descr);
 	}
@@ -1257,7 +1251,8 @@ atse_sysctl_stats_attach(device_t dev)
 		}
 
 		SYSCTL_ADD_PROC(sctx, SYSCTL_CHILDREN(soid), OID_AUTO,
-		    atse_rx_err_stats_regs[i].name, CTLTYPE_UINT|CTLFLAG_RD,
+		    atse_rx_err_stats_regs[i].name,
+		    CTLTYPE_UINT | CTLFLAG_RD | CTLFLAG_NEEDGIANT,
 		    sc, i, sysctl_atse_rx_err_stats_proc, "IU",
 		    atse_rx_err_stats_regs[i].descr);
 	}
@@ -1290,7 +1285,7 @@ atse_attach(device_t dev)
 	 * Chapter 15. On-Chip FIFO Memory Core.
 	 * Embedded Peripherals IP User Guide.
 	 */
-	caps = XCHAN_CAP_BUSDMA_NOSEG;
+	caps = XCHAN_CAP_NOSEG;
 
 	/* Alloc xDMA virtual channel. */
 	sc->xchan_tx = xdma_channel_alloc(sc->xdma_tx, caps);
@@ -1300,7 +1295,8 @@ atse_attach(device_t dev)
 	}
 
 	/* Setup interrupt handler. */
-	error = xdma_setup_intr(sc->xchan_tx, atse_xdma_tx_intr, sc, &sc->ih_tx);
+	error = xdma_setup_intr(sc->xchan_tx, 0,
+	    atse_xdma_tx_intr, sc, &sc->ih_tx);
 	if (error) {
 		device_printf(sc->dev,
 		    "Can't setup xDMA interrupt handler.\n");
@@ -1331,7 +1327,8 @@ atse_attach(device_t dev)
 	}
 
 	/* Setup interrupt handler. */
-	error = xdma_setup_intr(sc->xchan_rx, atse_xdma_rx_intr, sc, &sc->ih_rx);
+	error = xdma_setup_intr(sc->xchan_rx, XDMA_INTR_NET,
+	    atse_xdma_rx_intr, sc, &sc->ih_rx);
 	if (error) {
 		device_printf(sc->dev,
 		    "Can't setup xDMA interrupt handler.\n");
@@ -1456,6 +1453,11 @@ atse_detach(device_t dev)
 	}
 
 	mtx_destroy(&sc->atse_mtx);
+
+	xdma_channel_free(sc->xchan_tx);
+	xdma_channel_free(sc->xchan_rx);
+	xdma_put(sc->xdma_tx);
+	xdma_put(sc->xdma_rx);
 
 	return (0);
 }

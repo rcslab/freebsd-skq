@@ -8,7 +8,7 @@
  *
  * 1. Copyright Notice
  *
- * Some or all of this work - Copyright (c) 1999 - 2019, Intel Corp.
+ * Some or all of this work - Copyright (c) 1999 - 2020, Intel Corp.
  * All rights reserved.
  *
  * 2. License
@@ -283,7 +283,7 @@ const char                      *AslCompilerMsgs [] =
 /*    ASL_MSG_NO_RETVAL */                  "Called method returns no value",
 /*    ASL_MSG_NO_WHILE */                   "No enclosing While statement",
 /*    ASL_MSG_NON_ASCII */                  "Invalid characters found in file",
-/*    ASL_MSG_NON_ZERO */                   "Operand evaluates to zero",
+/*    ASL_MSG_BUFFER_FIELD_LENGTH */        "Field length must be non-zero",
 /*    ASL_MSG_NOT_EXIST */                  "Object does not exist",
 /*    ASL_MSG_NOT_FOUND */                  "Object not found or not accessible from current scope",
 /*    ASL_MSG_NOT_METHOD */                 "Not a control method, cannot invoke",
@@ -320,7 +320,7 @@ const char                      *AslCompilerMsgs [] =
 /*    ASL_MSG_SCOPE_TYPE */                 "Existing object has invalid type for Scope operator",
 /*    ASL_MSG_SEEK */                       "Could not seek file",
 /*    ASL_MSG_SERIALIZED */                 "Control Method marked Serialized",
-/*    ASL_MSG_SERIALIZED_REQUIRED */        "Control Method should be made Serialized",
+/*    ASL_MSG_SERIALIZED_REQUIRED */        "Control Method should be made Serialized due to creation of named objects within",
 /*    ASL_MSG_SINGLE_NAME_OPTIMIZATION */   "NamePath optimized to NameSeg (uses run-time search path)",
 /*    ASL_MSG_SOME_NO_RETVAL */             "Called method may not always return a value",
 /*    ASL_MSG_STRING_LENGTH */              "String literal too long",
@@ -353,8 +353,8 @@ const char                      *AslCompilerMsgs [] =
 /*    ASL_MSG_NULL_RESOURCE_TEMPLATE */     "Empty Resource Template (END_TAG only)",
 /*    ASL_MSG_FOUND_HERE */                 "Original name creation/declaration below: ",
 /*    ASL_MSG_ILLEGAL_RECURSION */          "Illegal recursive call to method that creates named objects",
-/*    ASL_MSG_PLACE_HOLDER_00 */            "", /* TODO: fill in this slot with a new error message */
-/*    ASL_MSG_PLACE_HOLDER_01 */            "", /* TODO: fill in this slot with a new error message */
+/*    ASL_MSG_DUPLICATE_INPUT_FILE */       "Duplicate input files detected:",
+/*    ASL_MSG_WARNING_AS_ERROR */           "Warnings detected during compilation",
 /*    ASL_MSG_OEM_TABLE_ID */               "Invalid OEM Table ID",
 /*    ASL_MSG_OEM_ID */                     "Invalid OEM ID",
 /*    ASL_MSG_UNLOAD */                     "Unload is not supported by all operating systems",
@@ -363,7 +363,23 @@ const char                      *AslCompilerMsgs [] =
 /*    ASL_MSG_PREFIX_NOT_EXIST */           "One or more prefix Scopes do not exist",
 /*    ASL_MSG_NAMEPATH_NOT_EXIST */         "One or more objects within the Pathname do not exist",
 /*    ASL_MSG_REGION_LENGTH */              "Operation Region declared with zero length",
-/*    ASL_MSG_TEMPORARY_OBJECT */           "Object is created temporarily in another method and cannot be accessed"
+/*    ASL_MSG_TEMPORARY_OBJECT */           "Object is created temporarily in another method and cannot be accessed",
+/*    ASL_MSG_UNDEFINED_EXTERNAL */         "Named object was declared external but the actual definition does not exist",
+/*    ASL_MSG_BUFFER_FIELD_OVERFLOW */      "Buffer field extends beyond end of target buffer",
+/*    ASL_MSG_INVALID_SPECIAL_NAME */       "declaration of this named object outside root scope is illegal",
+/*    ASL_MSG_INVALID_PROCESSOR_UID */      "_UID inside processor declaration must be an integer",
+/*    ASL_MSG_LEGACY_PROCESSOR_OP */        "Legacy Processor() keyword detected. Use Device() keyword instead.",
+/*    ASL_MSG_NAMESTRING_LENGTH */          "NameString contains too many NameSegs (>255)",
+/*    ASL_MSG_CASE_FOUND_HERE */            "Original Case value below:",
+/*    ASL_MSG_EXTERN_INVALID_RET_TYPE */    "Return type is only allowed for Externals declared as MethodObj",
+/*    ASL_MSG_EXTERN_INVALID_PARAM_TYPE */  "Parameter type is only allowed for Externals declared as MethodObj",
+/*    ASL_MSG_NAMED_OBJECT_CREATION */      "Creation of named objects within a method is highly inefficient, use globals or method local variables instead",
+/*    ASL_MSG_ARG_COUNT_MISMATCH */         "Method NumArgs count does not match length of ParameterTypes list",
+/*    ASL_MSG_STATIC_OPREGION_IN_METHOD */  "Static OperationRegion should be declared outside control method",
+/*    ASL_MSG_DECLARATION_TYPE_MISMATCH */  "Type mismatch between external declaration and actual object declaration detected",
+/*    ASL_MSG_TYPE_MISMATCH_FOUND_HERE */   "Actual object declaration:",
+/*    ASL_MSG_DUPLICATE_EXTERN_MISMATCH */  "Type mismatch between multiple external declarations detected",
+/*    ASL_MSG_DUPLICATE_EXTERN_FOUND_HERE */"Duplicate external declaration:",
 };
 
 /* Table compiler */
@@ -382,7 +398,10 @@ const char                      *AslTableCompilerMsgs [] =
 /*    ASL_MSG_UNKNOWN_LABEL */              "Label is undefined",
 /*    ASL_MSG_UNKNOWN_SUBTABLE */           "Unknown subtable type",
 /*    ASL_MSG_UNKNOWN_TABLE */              "Unknown ACPI table signature",
-/*    ASL_MSG_ZERO_VALUE */                 "Value must be non-zero"
+/*    ASL_MSG_ZERO_VALUE */                 "Value must be non-zero",
+/*    ASL_MSG_INVALID_LABEL */              "Invalid field label detected",
+/*    ASL_MSG_BUFFER_LIST */                "Invalid buffer initializer list",
+/*    ASL_MSG_ENTRY_LIST */                 "Invalid entry initializer list"
 };
 
 /* Preprocessor */

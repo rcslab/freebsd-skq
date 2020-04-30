@@ -88,10 +88,10 @@ vdev_geom_set_rotation_rate(vdev_t *vd, struct g_consumer *cp)
 	uint16_t rate;
 
 	error = g_getattr("GEOM::rotation_rate", cp, &rate);
-	if (error == 0)
-		vd->vdev_rotation_rate = rate;
+	if (error == 0 && rate == 1)
+		vd->vdev_nonrot = B_TRUE;
 	else
-		vd->vdev_rotation_rate = VDEV_RATE_UNKNOWN;
+		vd->vdev_nonrot = B_FALSE;
 }
 
 static void
@@ -154,6 +154,29 @@ vdev_geom_attrchanged(struct g_consumer *cp, const char *attr)
 			vdev_geom_set_physpath(vd, cp, /*null_update*/B_TRUE);
 			return;
 		}
+	}
+}
+
+static void
+vdev_geom_resize(struct g_consumer *cp)
+{
+	struct consumer_priv_t *priv;
+	struct consumer_vdev_elem *elem;
+	spa_t *spa;
+	vdev_t *vd;
+
+	priv = (struct consumer_priv_t *)&cp->private;
+	if (SLIST_EMPTY(priv))
+		return;
+
+	SLIST_FOREACH(elem, priv, elems) {
+		vd = elem->vd;
+		if (vd->vdev_state != VDEV_STATE_HEALTHY)
+			continue;
+		spa = vd->vdev_spa;
+		if (!spa->spa_autoexpand)
+			continue;
+		vdev_online(spa, vd->vdev_guid, ZFS_ONLINE_EXPAND, NULL);
 	}
 }
 
@@ -229,6 +252,7 @@ vdev_geom_attach(struct g_provider *pp, vdev_t *vd, boolean_t sanity)
 		gp = g_new_geomf(&zfs_vdev_class, "zfs::vdev");
 		gp->orphan = vdev_geom_orphan;
 		gp->attrchanged = vdev_geom_attrchanged;
+		gp->resize = vdev_geom_resize;
 		cp = g_new_consumer(gp);
 		error = g_attach(cp, pp);
 		if (error != 0) {
@@ -949,18 +973,22 @@ static void
 vdev_geom_close(vdev_t *vd)
 {
 	struct g_consumer *cp;
+	int locked;
 
 	cp = vd->vdev_tsd;
 
 	DROP_GIANT();
-	g_topology_lock();
+	locked = g_topology_locked();
+	if (!locked)
+		g_topology_lock();
 
 	if (!vd->vdev_reopening ||
 	    (cp != NULL && ((cp->flags & G_CF_ORPHAN) != 0 ||
 	    (cp->provider != NULL && cp->provider->error != 0))))
 		vdev_geom_close_locked(vd);
 
-	g_topology_unlock();
+	if (!locked)
+		g_topology_unlock();
 	PICKUP_GIANT();
 }
 

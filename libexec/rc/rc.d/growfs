@@ -31,7 +31,7 @@
 # BEFORE: sysctl
 # KEYWORD: firstboot
 
-# This allows us to distribute a image
+# This allows us to distribute an image
 # and have it work on essentially any size drive.
 #
 # TODO: Figure out where this should really be ordered.
@@ -57,7 +57,7 @@ growfs_start ()
 		;;
 	zfs)
 		pool=${FSDEV%%/*}
-		rootdev=$(zpool list -v $pool | tail -n 1 | awk '{ print $1 }')
+		rootdev=$(zpool list -v $pool | awk 'END { print $1 }')
 		;;
 	*)
 		echo "Don't know how to grow root filesystem type: $FSTYPE"

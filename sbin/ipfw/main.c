@@ -43,8 +43,8 @@ help(void)
 "add [num] [set N] [prob x] RULE-BODY\n"
 "{pipe|queue} N config PIPE-BODY\n"
 "[pipe|queue] {zero|delete|show} [N{,N}]\n"
-"nat N config {ip IPADDR|if IFNAME|log|deny_in|same_ports|unreg_only|reset|\n"
-"		reverse|proxy_only|redirect_addr linkspec|\n"
+"nat N config {ip IPADDR|if IFNAME|log|deny_in|same_ports|unreg_only|unreg_cgn|\n"
+"		reset|reverse|proxy_only|redirect_addr linkspec|\n"
 "		redirect_port linkspec|redirect_proto linkspec}\n"
 "set [disable N... enable N...] | move [rule] X to Y | swap X Y | show\n"
 "set N {show|list|zero|resetlog|delete} [N{,N}] | flush\n"
@@ -429,6 +429,8 @@ ipfw_main(int oldac, char **oldav)
 	if (co.use_set || try_next) {
 		if (_substrcmp(*av, "delete") == 0)
 			ipfw_delete(av);
+		else if (!strncmp(*av, "nat64clat", strlen(*av)))
+			ipfw_nat64clat_handler(ac, av);
 		else if (!strncmp(*av, "nat64stl", strlen(*av)))
 			ipfw_nat64stl_handler(ac, av);
 		else if (!strncmp(*av, "nat64lsn", strlen(*av)))

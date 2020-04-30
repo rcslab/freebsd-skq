@@ -133,7 +133,7 @@ uint32_t sctp_get_next_mtu(uint32_t);
 void
      sctp_timeout_handler(void *);
 
-uint32_t
+int
 sctp_calculate_rto(struct sctp_tcb *, struct sctp_association *,
     struct sctp_nets *, struct timeval *, int);
 
@@ -163,6 +163,9 @@ sctp_pull_off_control_to_new_inp(struct sctp_inpcb *old_inp,
 
 
 void sctp_stop_timers_for_shutdown(struct sctp_tcb *);
+
+/* Stop all timers for association and remote addresses. */
+void sctp_stop_association_timers(struct sctp_tcb *, bool);
 
 void
 sctp_report_all_outbound(struct sctp_tcb *, uint16_t, int, int
@@ -211,10 +214,9 @@ int
 sctp_connectx_helper_add(struct sctp_tcb *stcb, struct sockaddr *addr,
     int totaddr, int *error);
 
-struct sctp_tcb *
-sctp_connectx_helper_find(struct sctp_inpcb *inp, struct sockaddr *addr,
-    unsigned int *totaddr, unsigned int *num_v4, unsigned int *num_v6,
-    int *error, unsigned int limit, int *bad_addr);
+int
+sctp_connectx_helper_find(struct sctp_inpcb *, struct sockaddr *,
+    unsigned int, unsigned int *, unsigned int *, unsigned int);
 
 int sctp_is_there_an_abort_here(struct mbuf *, int, uint32_t *);
 #ifdef INET6
@@ -367,7 +369,7 @@ void sctp_log_closing(struct sctp_inpcb *inp, struct sctp_tcb *stcb, int16_t loc
 
 void sctp_log_lock(struct sctp_inpcb *inp, struct sctp_tcb *stcb, uint8_t from);
 void sctp_log_maxburst(struct sctp_tcb *stcb, struct sctp_nets *, int, int, uint8_t);
-void sctp_log_block(uint8_t, struct sctp_association *, size_t);
+void sctp_log_block(uint8_t, struct sctp_association *, ssize_t);
 void sctp_log_rwnd(uint8_t, uint32_t, uint32_t, uint32_t);
 void sctp_log_rwnd_set(uint8_t, uint32_t, uint32_t, uint32_t, uint32_t);
 int sctp_fill_stat_log(void *, size_t *);
@@ -390,5 +392,10 @@ void sctp_hc_set_mtu(union sctp_sockstore *, uint16_t, uint32_t);
 uint32_t sctp_hc_get_mtu(union sctp_sockstore *, uint16_t);
 void sctp_set_state(struct sctp_tcb *, int);
 void sctp_add_substate(struct sctp_tcb *, int);
+uint32_t sctp_ticks_to_msecs(uint32_t);
+uint32_t sctp_msecs_to_ticks(uint32_t);
+uint32_t sctp_ticks_to_secs(uint32_t);
+uint32_t sctp_secs_to_ticks(uint32_t);
+
 #endif				/* _KERNEL */
 #endif

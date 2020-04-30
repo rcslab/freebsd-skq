@@ -44,7 +44,6 @@ __FBSDID("$FreeBSD$");
 #include <rpc/rpc.h>
 #include <rpc/rpcsec_gss.h>
 
-#include <nfs/nfs_fha.h>
 #include <fs/nfsserver/nfs_fha_new.h>
 
 #include <security/mac/mac_framework.h>
@@ -109,7 +108,7 @@ extern struct proc *nfsd_master_proc;
 extern time_t nfsdev_time;
 extern int nfsrv_writerpc[NFS_NPROCS];
 extern volatile int nfsrv_devidcnt;
-extern struct nfsv4_opflag nfsv4_opflag[NFSV41_NOPS];
+extern struct nfsv4_opflag nfsv4_opflag[NFSV42_NOPS];
 
 /*
  * NFS server system calls
@@ -323,7 +322,6 @@ static int
 nfs_proc(struct nfsrv_descript *nd, u_int32_t xid, SVCXPRT *xprt,
     struct nfsrvcache **rpp)
 {
-	struct thread *td = curthread;
 	int cacherep = RC_DOIT, isdgram, taglen = -1;
 	struct mbuf *m;
 	u_char tag[NFSV4_SMALLSTR + 1], *tagstr = NULL;
@@ -384,7 +382,7 @@ nfs_proc(struct nfsrv_descript *nd, u_int32_t xid, SVCXPRT *xprt,
 	if (cacherep == RC_DOIT) {
 		if ((nd->nd_flag & ND_NFSV41) != 0)
 			nd->nd_xprt = xprt;
-		nfsrvd_dorpc(nd, isdgram, tagstr, taglen, minorvers, td);
+		nfsrvd_dorpc(nd, isdgram, tagstr, taglen, minorvers);
 		if ((nd->nd_flag & ND_NFSV41) != 0) {
 			if (nd->nd_repstat != NFSERR_REPLYFROMCACHE &&
 			    (nd->nd_flag & ND_SAVEREPLY) != 0) {
@@ -394,8 +392,7 @@ nfs_proc(struct nfsrv_descript *nd, u_int32_t xid, SVCXPRT *xprt,
 			} else
 				m = NULL;
 			if ((nd->nd_flag & ND_HASSEQUENCE) != 0)
-				nfsrv_cache_session(nd->nd_sessionid,
-				    nd->nd_slotid, nd->nd_repstat, &m);
+				nfsrv_cache_session(nd, &m);
 			if (nd->nd_repstat == NFSERR_REPLYFROMCACHE)
 				nd->nd_repstat = 0;
 			cacherep = RC_REPLY;
@@ -591,7 +588,7 @@ nfsrvd_init(int terminating)
 		    SYSCTL_STATIC_CHILDREN(_vfs_nfsd));
 		nfsrvd_pool->sp_rcache = NULL;
 		nfsrvd_pool->sp_assign = fhanew_assign;
-		nfsrvd_pool->sp_done = fha_nd_complete;
+		nfsrvd_pool->sp_done = fhanew_nd_complete;
 		NFSD_LOCK();
 	}
 }

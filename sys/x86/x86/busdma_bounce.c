@@ -114,7 +114,8 @@ static int total_bpages;
 static int busdma_zonecount;
 static STAILQ_HEAD(, bounce_zone) bounce_zone_list;
 
-static SYSCTL_NODE(_hw, OID_AUTO, busdma, CTLFLAG_RD, 0, "Busdma parameters");
+static SYSCTL_NODE(_hw, OID_AUTO, busdma, CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
+    "Busdma parameters");
 SYSCTL_INT(_hw_busdma, OID_AUTO, total_bpages, CTLFLAG_RD, &total_bpages, 0,
 	   "Total bounce pages");
 
@@ -141,6 +142,8 @@ static int reserve_bounce_pages(bus_dma_tag_t dmat, bus_dmamap_t map,
 static bus_addr_t add_bounce_page(bus_dma_tag_t dmat, bus_dmamap_t map,
     vm_offset_t vaddr, vm_paddr_t addr1, vm_paddr_t addr2, bus_size_t size);
 static void free_bounce_page(bus_dma_tag_t dmat, struct bounce_page *bpage);
+static bool _bus_dmamap_pagesneeded(bus_dma_tag_t dmat, vm_paddr_t buf,
+    bus_size_t buflen, int *pagesneeded);
 static void _bus_dmamap_count_pages(bus_dma_tag_t dmat, bus_dmamap_t map,
     pmap_t pmap, void *buf, bus_size_t buflen, int flags);
 static void _bus_dmamap_count_phys(bus_dma_tag_t dmat, bus_dmamap_t map,
@@ -223,6 +226,15 @@ bounce_bus_dma_tag_create(bus_dma_tag_t parent, bus_size_t alignment,
 	return (error);
 }
 
+static bool
+bounce_bus_dma_id_mapped(bus_dma_tag_t dmat, vm_paddr_t buf, bus_size_t buflen)
+{
+
+	if ((dmat->bounce_flags & BUS_DMA_COULD_BOUNCE) == 0)
+		return (true);
+	return (!_bus_dmamap_pagesneeded(dmat, buf, buflen, NULL));
+}
+
 /*
  * Update the domain for the tag.  We may need to reallocate the zone and
  * bounce pages.
@@ -285,8 +297,6 @@ bounce_bus_dmamap_create(bus_dma_tag_t dmat, int flags, bus_dmamap_t *mapp)
 {
 	struct bounce_zone *bz;
 	int error, maxpages, pages;
-
-	WITNESS_WARN(WARN_GIANTOK | WARN_SLEEPOK, NULL, "%s", __func__);
 
 	error = 0;
 
@@ -503,29 +513,45 @@ bounce_bus_dmamem_free(bus_dma_tag_t dmat, void *vaddr, bus_dmamap_t map)
 	    dmat->bounce_flags);
 }
 
+static bool
+_bus_dmamap_pagesneeded(bus_dma_tag_t dmat, vm_paddr_t buf, bus_size_t buflen,
+    int *pagesneeded)
+{
+	vm_paddr_t curaddr;
+	bus_size_t sgsize;
+	int count;
+
+	/*
+	 * Count the number of bounce pages needed in order to
+	 * complete this transfer
+	 */
+	count = 0;
+	curaddr = buf;
+	while (buflen != 0) {
+		sgsize = MIN(buflen, dmat->common.maxsegsz);
+		if (bus_dma_run_filter(&dmat->common, curaddr)) {
+			sgsize = MIN(sgsize,
+			    PAGE_SIZE - (curaddr & PAGE_MASK));
+			if (pagesneeded == NULL)
+				return (true);
+			count++;
+		}
+		curaddr += sgsize;
+		buflen -= sgsize;
+	}
+
+	if (pagesneeded != NULL)
+		*pagesneeded = count;
+	return (count != 0);
+}
+
 static void
 _bus_dmamap_count_phys(bus_dma_tag_t dmat, bus_dmamap_t map, vm_paddr_t buf,
     bus_size_t buflen, int flags)
 {
-	vm_paddr_t curaddr;
-	bus_size_t sgsize;
 
 	if (map != &nobounce_dmamap && map->pagesneeded == 0) {
-		/*
-		 * Count the number of bounce pages
-		 * needed in order to complete this transfer
-		 */
-		curaddr = buf;
-		while (buflen != 0) {
-			sgsize = MIN(buflen, dmat->common.maxsegsz);
-			if (bus_dma_run_filter(&dmat->common, curaddr)) {
-				sgsize = MIN(sgsize,
-				    PAGE_SIZE - (curaddr & PAGE_MASK));
-				map->pagesneeded++;
-			}
-			curaddr += sgsize;
-			buflen -= sgsize;
-		}
+		_bus_dmamap_pagesneeded(dmat, buf, buflen, &map->pagesneeded);
 		CTR1(KTR_BUSDMA, "pagesneeded= %d\n", map->pagesneeded);
 	}
 }
@@ -642,7 +668,7 @@ _bus_dmamap_reserve_pages(bus_dma_tag_t dmat, bus_dmamap_t map, int flags)
 /*
  * Add a single contiguous physical range to the segment list.
  */
-static int
+static bus_size_t
 _bus_dmamap_addseg(bus_dma_tag_t dmat, bus_dmamap_t map, vm_paddr_t curaddr,
     bus_size_t sgsize, bus_dma_segment_t *segs, int *segp)
 {
@@ -1100,7 +1126,7 @@ alloc_bounce_zone(bus_dma_tag_t dmat)
 	sysctl_ctx_init(&bz->sysctl_tree);
 	bz->sysctl_tree_top = SYSCTL_ADD_NODE(&bz->sysctl_tree,
 	    SYSCTL_STATIC_CHILDREN(_hw_busdma), OID_AUTO, bz->zoneid,
-	    CTLFLAG_RD, 0, "");
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, 0, "");
 	if (bz->sysctl_tree_top == NULL) {
 		sysctl_ctx_free(&bz->sysctl_tree);
 		return (0);	/* XXX error code? */
@@ -1307,6 +1333,7 @@ struct bus_dma_impl bus_dma_bounce_impl = {
 	.tag_create = bounce_bus_dma_tag_create,
 	.tag_destroy = bounce_bus_dma_tag_destroy,
 	.tag_set_domain = bounce_bus_dma_tag_set_domain,
+	.id_mapped = bounce_bus_dma_id_mapped,
 	.map_create = bounce_bus_dmamap_create,
 	.map_destroy = bounce_bus_dmamap_destroy,
 	.mem_alloc = bounce_bus_dmamem_alloc,

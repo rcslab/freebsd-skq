@@ -44,12 +44,13 @@ __FBSDID("$FreeBSD$");
 #include <sys/systm.h>
 
 #include <geom/geom.h>
+#include <geom/geom_dbg.h>
 #include <geom/vinum/geom_vinum_var.h>
 #include <geom/vinum/geom_vinum.h>
 #include <geom/vinum/geom_vinum_raid5.h>
 
 SYSCTL_DECL(_kern_geom);
-static SYSCTL_NODE(_kern_geom, OID_AUTO, vinum, CTLFLAG_RW, 0,
+static SYSCTL_NODE(_kern_geom, OID_AUTO, vinum, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
     "GEOM_VINUM stuff");
 u_int g_vinum_debug = 0;
 SYSCTL_UINT(_kern_geom_vinum, OID_AUTO, debug, CTLFLAG_RWTUN, &g_vinum_debug, 0,

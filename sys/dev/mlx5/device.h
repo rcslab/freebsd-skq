@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2013-2018, Mellanox Technologies, Ltd.  All rights reserved.
+ * Copyright (c) 2013-2019, Mellanox Technologies, Ltd.  All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -32,8 +32,10 @@
 #include <rdma/ib_verbs.h>
 #include <dev/mlx5/mlx5_ifc.h>
 
-#define FW_INIT_TIMEOUT_MILI 2000
-#define FW_INIT_WAIT_MS 2
+#define	FW_INIT_TIMEOUT_MILI		2000
+#define	FW_INIT_WAIT_MS			2
+#define	FW_PRE_INIT_TIMEOUT_MILI	120000
+#define	FW_INIT_WARN_MESSAGE_INTERVAL	20000
 
 #if defined(__LITTLE_ENDIAN)
 #define MLX5_SET_HOST_ENDIANNESS	0
@@ -359,6 +361,7 @@ enum {
 	MLX5_OPCODE_ATOMIC_MASKED_FA	= 0x15,
 	MLX5_OPCODE_BIND_MW		= 0x18,
 	MLX5_OPCODE_CONFIG_CMD		= 0x1f,
+	MLX5_OPCODE_DUMP		= 0x23,
 
 	MLX5_RECV_OPCODE_RDMA_WRITE_IMM	= 0x00,
 	MLX5_RECV_OPCODE_SEND		= 0x01,
@@ -377,6 +380,18 @@ enum {
 	MLX5_OPCODE_UMR			= 0x25,
 
 	MLX5_OPCODE_SIGNATURE_CANCELED	= (1 << 15),
+};
+
+enum {
+	MLX5_OPCODE_MOD_UMR_UMR = 0x0,
+	MLX5_OPCODE_MOD_UMR_TLS_TIS_STATIC_PARAMS = 0x1,
+	MLX5_OPCODE_MOD_UMR_TLS_TIR_STATIC_PARAMS = 0x2,
+};
+
+enum {
+	MLX5_OPCODE_MOD_PSV_PSV = 0x0,
+	MLX5_OPCODE_MOD_PSV_TLS_TIS_PROGRESS_PARAMS = 0x1,
+	MLX5_OPCODE_MOD_PSV_TLS_TIR_PROGRESS_PARAMS = 0x2,
 };
 
 enum {
@@ -537,7 +552,7 @@ enum {
 	MLX5_MODULE_STATUS_PLUGGED_ENABLED      = 0x1,
 	MLX5_MODULE_STATUS_UNPLUGGED            = 0x2,
 	MLX5_MODULE_STATUS_ERROR                = 0x3,
-	MLX5_MODULE_STATUS_PLUGGED_DISABLED     = 0x4,
+	MLX5_MODULE_STATUS_NUM			,
 };
 
 enum {
@@ -549,7 +564,7 @@ enum {
 	MLX5_MODULE_EVENT_ERROR_UNSUPPORTED_CABLE                     = 0x5,
 	MLX5_MODULE_EVENT_ERROR_HIGH_TEMPERATURE                      = 0x6,
 	MLX5_MODULE_EVENT_ERROR_CABLE_IS_SHORTED                      = 0x7,
-	MLX5_MODULE_EVENT_ERROR_PCIE_SYSTEM_POWER_SLOT_EXCEEDED       = 0xc,
+	MLX5_MODULE_EVENT_ERROR_NUM		                      ,
 };
 
 struct mlx5_eqe_port_module_event {
@@ -566,6 +581,11 @@ struct mlx5_eqe_general_notification_event {
 	u32       rsvd0[6];
 };
 
+struct mlx5_eqe_temp_warning {
+	__be64 sensor_warning_msb;
+	__be64 sensor_warning_lsb;
+} __packed;
+
 union ev_data {
 	__be32				raw[7];
 	struct mlx5_eqe_cmd		cmd;
@@ -580,6 +600,7 @@ union ev_data {
 	struct mlx5_eqe_port_module_event port_module_event;
 	struct mlx5_eqe_vport_change	vport_change;
 	struct mlx5_eqe_general_notification_event general_notifications;
+	struct mlx5_eqe_temp_warning	temp_warning;
 } __packed;
 
 struct mlx5_eqe {
@@ -818,6 +839,7 @@ static inline int mlx5_host_is_le(void)
 enum {
 	VPORT_STATE_DOWN		= 0x0,
 	VPORT_STATE_UP			= 0x1,
+	VPORT_STATE_FOLLOW		= 0x2,
 };
 
 enum {
@@ -911,6 +933,10 @@ enum mlx5_cap_type {
 	MLX5_CAP_VECTOR_CALC,
 	MLX5_CAP_QOS,
 	MLX5_CAP_DEBUG,
+	MLX5_CAP_NVME,
+	MLX5_CAP_DMC,
+	MLX5_CAP_DEC,
+	MLX5_CAP_TLS,
 	/* NUM OF CAP Types */
 	MLX5_CAP_NUM
 };
@@ -923,9 +949,28 @@ enum mlx5_qcam_feature_groups {
 	MLX5_QCAM_FEATURE_ENHANCED_FEATURES = 0x0,
 };
 
+enum mlx5_pcam_reg_groups {
+	MLX5_PCAM_REGS_5000_TO_507F = 0x0,
+};
+
+enum mlx5_pcam_feature_groups {
+	MLX5_PCAM_FEATURE_ENHANCED_FEATURES = 0x0,
+};
+
+enum mlx5_mcam_reg_groups {
+	MLX5_MCAM_REGS_FIRST_128 = 0x0,
+};
+
+enum mlx5_mcam_feature_groups {
+	MLX5_MCAM_FEATURE_ENHANCED_FEATURES = 0x0,
+};
+
 /* GET Dev Caps macros */
 #define MLX5_CAP_GEN(mdev, cap) \
 	MLX5_GET(cmd_hca_cap, mdev->hca_caps_cur[MLX5_CAP_GENERAL], cap)
+
+#define	MLX5_CAP_GEN_64(mdev, cap)					\
+	MLX5_GET64(cmd_hca_cap, mdev->hca_caps_cur[MLX5_CAP_GENERAL], cap)
 
 #define MLX5_CAP_GEN_MAX(mdev, cap) \
 	MLX5_GET(cmd_hca_cap, mdev->hca_caps_max[MLX5_CAP_GENERAL], cap)
@@ -1028,6 +1073,18 @@ enum mlx5_qcam_feature_groups {
 	MLX5_GET(qos_cap,\
 		 mdev->hca_caps_max[MLX5_CAP_QOS], cap)
 
+#define MLX5_CAP_PCAM_FEATURE(mdev, fld) \
+	MLX5_GET(pcam_reg, (mdev)->caps.pcam, feature_cap_mask.enhanced_features.fld)
+
+#define	MLX5_CAP_PCAM_REG(mdev, reg) \
+	MLX5_GET(pcam_reg, (mdev)->caps.pcam, port_access_reg_cap_mask.regs_5000_to_507f.reg)
+
+#define MLX5_CAP_MCAM_FEATURE(mdev, fld) \
+	MLX5_GET(mcam_reg, (mdev)->caps.mcam, mng_feature_cap_mask.enhanced_features.fld)
+
+#define	MLX5_CAP_MCAM_REG(mdev, reg) \
+	MLX5_GET(mcam_reg, (mdev)->caps.mcam, mng_access_reg_cap_mask.access_regs.reg)
+
 #define	MLX5_CAP_QCAM_REG(mdev, fld) \
 	MLX5_GET(qcam_reg, (mdev)->caps.qcam, qos_access_reg_cap_mask.reg_cap.fld)
 
@@ -1039,6 +1096,9 @@ enum mlx5_qcam_feature_groups {
 
 #define MLX5_CAP64_FPGA(mdev, cap) \
 	MLX5_GET64(fpga_cap, (mdev)->caps.fpga, cap)
+
+#define	MLX5_CAP_TLS(mdev, cap) \
+	MLX5_GET(tls_capabilities, (mdev)->hca_caps_cur[MLX5_CAP_TLS], cap)
 
 enum {
 	MLX5_CMD_STAT_OK			= 0x0,
@@ -1184,6 +1244,12 @@ static inline int mlx5_get_cqe_format(const struct mlx5_cqe64 *cqe)
 
 enum {
 	MLX5_GEN_EVENT_SUBTYPE_DELAY_DROP_TIMEOUT = 0x1,
+	MLX5_GEN_EVENT_SUBTYPE_PCI_POWER_CHANGE_EVENT = 0x5,
+};
+
+enum {
+	MLX5_FRL_LEVEL3 = 0x8,
+	MLX5_FRL_LEVEL6 = 0x40,
 };
 
 /* 8 regular priorities + 1 for multicast */

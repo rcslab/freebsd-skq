@@ -84,11 +84,9 @@ __FBSDID("$FreeBSD$");
 #endif /* _KERNEL */
 
 static void random_other_pre_read(void);
-static void random_other_read(uint8_t *, u_int);
+static void random_other_read(uint8_t *, size_t);
 static bool random_other_seeded(void);
 static void random_other_process_event(struct harvest_event *);
-static void random_other_init_alg(void *);
-static void random_other_deinit_alg(void *);
 
 /*
  * RANDOM_OTHER_NPOOLS is used when reading hardware random
@@ -97,10 +95,11 @@ static void random_other_deinit_alg(void *);
  */
 #define RANDOM_OTHER_NPOOLS 1
 
-struct random_algorithm random_alg_context = {
+#ifdef RANDOM_LOADABLE
+static
+#endif
+const struct random_algorithm random_alg_context = {
 	.ra_ident = "other",
-	.ra_init_alg = random_other_init_alg,
-	.ra_deinit_alg = random_other_deinit_alg,
 	.ra_pre_read = random_other_pre_read,
 	.ra_read = random_other_read,
 	.ra_seeded = random_other_seeded,
@@ -112,34 +111,20 @@ struct random_algorithm random_alg_context = {
 static mtx_t other_mtx;
 
 /*
- * void random_other_init_alg(void *unused __unused)
- *
  * Do algorithm-specific initialisation here.
  */
-void
+static void
 random_other_init_alg(void *unused __unused)
 {
 
+#ifdef RANDOM_LOADABLE
+	p_random_alg_context = &random_alg_context;
+#endif
+
 	RANDOM_RESEED_INIT_LOCK();
-	/*
-	 * Do set-up work here!
-	 */
 }
-
-/*
- * void random_other_deinit_alg(void *unused __unused)
- *
- * Do algorithm-specific deinitialisation here.
- */
-static void
-random_other_deinit_alg(void *unused __unused)
-{
-
-	/*
-	 * Do tear-down work here!
-	 */
-	RANDOM_RESEED_DEINIT_LOCK();
-}
+SYSINIT(random_alg, SI_SUB_RANDOM, SI_ORDER_SECOND, random_other_init_alg,
+    NULL);
 
 /*
  * void random_other_pre_read(void)
@@ -165,10 +150,10 @@ random_other_pre_read(void)
 }
 
 /*
- * void random_other_read(uint8_t *buf, u_int count)
+ * void random_other_read(uint8_t *buf, size_t count)
  *
  * Generate <count> bytes of output into <*buf>.
- * You may use the fact that <count> will be a multiple of
+ * You may NOT use the fact that <count> will be a multiple of
  * RANDOM_BLOCKSIZE for optimization purposes.
  *
  * This function will always be called with your generator
@@ -176,7 +161,7 @@ random_other_pre_read(void)
  * output here, then feel free to KASSERT() or panic().
  */
 static void
-random_other_read(uint8_t *buf, u_int count)
+random_other_read(uint8_t *buf, size_t count)
 {
 
 	RANDOM_RESEED_LOCK();

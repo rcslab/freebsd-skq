@@ -40,6 +40,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/sysctl.h>
 #include <sys/malloc.h>
 #include <geom/geom.h>
+#include <geom/geom_dbg.h>
 #include <geom/concat/g_concat.h>
 
 FEATURE(geom_concat, "GEOM concatenation support");
@@ -47,7 +48,7 @@ FEATURE(geom_concat, "GEOM concatenation support");
 static MALLOC_DEFINE(M_CONCAT, "concat_data", "GEOM_CONCAT Data");
 
 SYSCTL_DECL(_kern_geom);
-static SYSCTL_NODE(_kern_geom, OID_AUTO, concat, CTLFLAG_RW, 0,
+static SYSCTL_NODE(_kern_geom, OID_AUTO, concat, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
     "GEOM_CONCAT stuff");
 static u_int g_concat_debug = 0;
 SYSCTL_UINT(_kern_geom_concat, OID_AUTO, debug, CTLFLAG_RWTUN, &g_concat_debug, 0,
@@ -238,8 +239,10 @@ g_concat_kernel_dump(struct bio *bp)
 		    sc->sc_disks[i].d_end > gkd->offset)
 			break;
 	}
-	if (i == sc->sc_ndisks)
+	if (i == sc->sc_ndisks) {
 		g_io_deliver(bp, EOPNOTSUPP);
+		return;
+	}
 	disk = &sc->sc_disks[i];
 	gkd->offset -= disk->d_start;
 	if (gkd->length > disk->d_end - disk->d_start - gkd->offset)
@@ -276,8 +279,11 @@ g_concat_done(struct bio *bp)
 	g_destroy_bio(bp);
 }
 
+/*
+ * Called for both BIO_FLUSH and BIO_SPEEDUP. Just pass the call down
+ */
 static void
-g_concat_flush(struct g_concat_softc *sc, struct bio *bp)
+g_concat_passdown(struct g_concat_softc *sc, struct bio *bp)
 {
 	struct bio_queue_head queue;
 	struct g_consumer *cp;
@@ -337,8 +343,9 @@ g_concat_start(struct bio *bp)
 	case BIO_WRITE:
 	case BIO_DELETE:
 		break;
+	case BIO_SPEEDUP:
 	case BIO_FLUSH:
-		g_concat_flush(sc, bp);
+		g_concat_passdown(sc, bp);
 		return;
 	case BIO_GETATTR:
 		if (strcmp("GEOM::kerneldump", bp->bio_attribute) == 0) {
@@ -1002,24 +1009,24 @@ g_concat_dumpconf(struct sbuf *sb, const char *indent, struct g_geom *gp,
 		sbuf_printf(sb, "%s<Type>", indent);
 		switch (sc->sc_type) {
 		case G_CONCAT_TYPE_AUTOMATIC:
-			sbuf_printf(sb, "AUTOMATIC");
+			sbuf_cat(sb, "AUTOMATIC");
 			break;
 		case G_CONCAT_TYPE_MANUAL:
-			sbuf_printf(sb, "MANUAL");
+			sbuf_cat(sb, "MANUAL");
 			break;
 		default:
-			sbuf_printf(sb, "UNKNOWN");
+			sbuf_cat(sb, "UNKNOWN");
 			break;
 		}
-		sbuf_printf(sb, "</Type>\n");
+		sbuf_cat(sb, "</Type>\n");
 		sbuf_printf(sb, "%s<Status>Total=%u, Online=%u</Status>\n",
 		    indent, sc->sc_ndisks, g_concat_nvalid(sc));
 		sbuf_printf(sb, "%s<State>", indent);
 		if (sc->sc_provider != NULL && sc->sc_provider->error == 0)
-			sbuf_printf(sb, "UP");
+			sbuf_cat(sb, "UP");
 		else
-			sbuf_printf(sb, "DOWN");
-		sbuf_printf(sb, "</State>\n");
+			sbuf_cat(sb, "DOWN");
+		sbuf_cat(sb, "</State>\n");
 	}
 }
 

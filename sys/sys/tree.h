@@ -125,7 +125,7 @@ struct type *name##_SPLAY_INSERT(struct name *, struct type *);		\
 struct type *name##_SPLAY_REMOVE(struct name *, struct type *);		\
 									\
 /* Finds the node with the same key as elm */				\
-static __inline struct type *						\
+static __unused __inline struct type *					\
 name##_SPLAY_FIND(struct name *head, struct type *elm)			\
 {									\
 	if (SPLAY_EMPTY(head))						\
@@ -136,7 +136,7 @@ name##_SPLAY_FIND(struct name *head, struct type *elm)			\
 	return (NULL);							\
 }									\
 									\
-static __inline struct type *						\
+static __unused __inline struct type *					\
 name##_SPLAY_NEXT(struct name *head, struct type *elm)			\
 {									\
 	name##_SPLAY(head, elm);					\
@@ -150,7 +150,7 @@ name##_SPLAY_NEXT(struct name *head, struct type *elm)			\
 	return (elm);							\
 }									\
 									\
-static __inline struct type *						\
+static __unused __inline struct type *					\
 name##_SPLAY_MIN_MAX(struct name *head, int val)			\
 {									\
 	name##_SPLAY_MINMAX(head, val);					\
@@ -335,8 +335,12 @@ struct {								\
 	RB_COLOR(red, field) = RB_RED;					\
 } while (/*CONSTCOND*/ 0)
 
+/*
+ * Something to be invoked in a loop at the root of every modified subtree,
+ * from the bottom up to the root, to update augmented node data.
+ */
 #ifndef RB_AUGMENT
-#define RB_AUGMENT(x)	do {} while (0)
+#define RB_AUGMENT(x)	break
 #endif
 
 #define RB_ROTATE_LEFT(head, elm, tmp, field) do {			\
@@ -344,7 +348,6 @@ struct {								\
 	if ((RB_RIGHT(elm, field) = RB_LEFT(tmp, field)) != NULL) {	\
 		RB_PARENT(RB_LEFT(tmp, field), field) = (elm);		\
 	}								\
-	RB_AUGMENT(elm);						\
 	if ((RB_PARENT(tmp, field) = RB_PARENT(elm, field)) != NULL) {	\
 		if ((elm) == RB_LEFT(RB_PARENT(elm, field), field))	\
 			RB_LEFT(RB_PARENT(elm, field), field) = (tmp);	\
@@ -354,9 +357,7 @@ struct {								\
 		(head)->rbh_root = (tmp);				\
 	RB_LEFT(tmp, field) = (elm);					\
 	RB_PARENT(elm, field) = (tmp);					\
-	RB_AUGMENT(tmp);						\
-	if ((RB_PARENT(tmp, field)))					\
-		RB_AUGMENT(RB_PARENT(tmp, field));			\
+	RB_AUGMENT(elm);						\
 } while (/*CONSTCOND*/ 0)
 
 #define RB_ROTATE_RIGHT(head, elm, tmp, field) do {			\
@@ -364,7 +365,6 @@ struct {								\
 	if ((RB_LEFT(elm, field) = RB_RIGHT(tmp, field)) != NULL) {	\
 		RB_PARENT(RB_RIGHT(tmp, field), field) = (elm);		\
 	}								\
-	RB_AUGMENT(elm);						\
 	if ((RB_PARENT(tmp, field) = RB_PARENT(elm, field)) != NULL) {	\
 		if ((elm) == RB_LEFT(RB_PARENT(elm, field), field))	\
 			RB_LEFT(RB_PARENT(elm, field), field) = (tmp);	\
@@ -374,9 +374,7 @@ struct {								\
 		(head)->rbh_root = (tmp);				\
 	RB_RIGHT(tmp, field) = (elm);					\
 	RB_PARENT(elm, field) = (tmp);					\
-	RB_AUGMENT(tmp);						\
-	if ((RB_PARENT(tmp, field)))					\
-		RB_AUGMENT(RB_PARENT(tmp, field));			\
+	RB_AUGMENT(elm);						\
 } while (/*CONSTCOND*/ 0)
 
 /* Generates prototypes and inline functions */
@@ -393,7 +391,8 @@ struct {								\
 	RB_PROTOTYPE_NFIND(name, type, attr);				\
 	RB_PROTOTYPE_NEXT(name, type, attr);				\
 	RB_PROTOTYPE_PREV(name, type, attr);				\
-	RB_PROTOTYPE_MINMAX(name, type, attr);
+	RB_PROTOTYPE_MINMAX(name, type, attr);				\
+	RB_PROTOTYPE_REINSERT(name, type, attr);
 #define RB_PROTOTYPE_INSERT_COLOR(name, type, attr)			\
 	attr void name##_RB_INSERT_COLOR(struct name *, struct type *)
 #define RB_PROTOTYPE_REMOVE_COLOR(name, type, attr)			\
@@ -412,6 +411,8 @@ struct {								\
 	attr struct type *name##_RB_PREV(struct type *)
 #define RB_PROTOTYPE_MINMAX(name, type, attr)				\
 	attr struct type *name##_RB_MINMAX(struct name *, int)
+#define RB_PROTOTYPE_REINSERT(name, type, attr)			\
+	attr struct type *name##_RB_REINSERT(struct name *, struct type *)
 
 /* Main rb operation.
  * Moves node close to the key of elm to top
@@ -429,7 +430,9 @@ struct {								\
 	RB_GENERATE_NFIND(name, type, field, cmp, attr)			\
 	RB_GENERATE_NEXT(name, type, field, attr)			\
 	RB_GENERATE_PREV(name, type, field, attr)			\
-	RB_GENERATE_MINMAX(name, type, field, attr)
+	RB_GENERATE_MINMAX(name, type, field, attr)			\
+	RB_GENERATE_REINSERT(name, type, field, cmp, attr)
+
 
 #define RB_GENERATE_INSERT_COLOR(name, type, field, attr)		\
 attr void								\
@@ -566,62 +569,49 @@ name##_RB_REMOVE(struct name *head, struct type *elm)			\
 	else if (RB_RIGHT(elm, field) == NULL)				\
 		child = RB_LEFT(elm, field);				\
 	else {								\
-		struct type *left;					\
-		elm = RB_RIGHT(elm, field);				\
-		while ((left = RB_LEFT(elm, field)) != NULL)		\
-			elm = left;					\
-		child = RB_RIGHT(elm, field);				\
-		parent = RB_PARENT(elm, field);				\
-		color = RB_COLOR(elm, field);				\
-		if (child)						\
-			RB_PARENT(child, field) = parent;		\
-		if (parent) {						\
-			if (RB_LEFT(parent, field) == elm)		\
-				RB_LEFT(parent, field) = child;		\
+		elm = RB_RIGHT(old, field);				\
+		if ((child = RB_LEFT(elm, field)) == NULL) {		\
+			child = RB_RIGHT(elm, field);			\
+			RB_RIGHT(old, field) = child;			\
+			RB_PARENT(elm, field) = elm;			\
+		} else {						\
+			do						\
+				elm = child;				\
+			while ((child = RB_LEFT(elm, field)) != NULL);	\
+			child = RB_RIGHT(elm, field);			\
+			RB_PARENT(RB_RIGHT(old, field), field) = elm;	\
+		}							\
+		RB_PARENT(RB_LEFT(old, field), field) = elm;		\
+		parent = RB_PARENT(old, field);				\
+		if (parent != NULL) {					\
+			if (RB_LEFT(parent, field) == old)		\
+				RB_LEFT(parent, field) = elm;		\
 			else						\
-				RB_RIGHT(parent, field) = child;	\
-			RB_AUGMENT(parent);				\
-		} else							\
-			RB_ROOT(head) = child;				\
-		if (RB_PARENT(elm, field) == old)			\
-			parent = elm;					\
-		(elm)->field = (old)->field;				\
-		if (RB_PARENT(old, field)) {				\
-			if (RB_LEFT(RB_PARENT(old, field), field) == old)\
-				RB_LEFT(RB_PARENT(old, field), field) = elm;\
-			else						\
-				RB_RIGHT(RB_PARENT(old, field), field) = elm;\
-			RB_AUGMENT(RB_PARENT(old, field));		\
+				RB_RIGHT(parent, field) = elm;		\
 		} else							\
 			RB_ROOT(head) = elm;				\
-		RB_PARENT(RB_LEFT(old, field), field) = elm;		\
-		if (RB_RIGHT(old, field))				\
-			RB_PARENT(RB_RIGHT(old, field), field) = elm;	\
-		if (parent) {						\
-			left = parent;					\
-			do {						\
-				RB_AUGMENT(left);			\
-			} while ((left = RB_PARENT(left, field)) != NULL); \
-		}							\
-		goto color;						\
 	}								\
 	parent = RB_PARENT(elm, field);					\
 	color = RB_COLOR(elm, field);					\
-	if (child)							\
+	if (child != NULL)						\
 		RB_PARENT(child, field) = parent;			\
-	if (parent) {							\
+	if (parent != NULL) {						\
 		if (RB_LEFT(parent, field) == elm)			\
 			RB_LEFT(parent, field) = child;			\
 		else							\
 			RB_RIGHT(parent, field) = child;		\
-		RB_AUGMENT(parent);					\
 	} else								\
 		RB_ROOT(head) = child;					\
-color:									\
+	if (elm != old)							\
+		(elm)->field = (old)->field;				\
 	if (color == RB_BLACK)						\
 		name##_RB_REMOVE_COLOR(head, parent, child);		\
+	while (parent != NULL) {					\
+		RB_AUGMENT(parent);					\
+		parent = RB_PARENT(parent, field);			\
+	}								\
 	return (old);							\
-}									\
+}
 
 #define RB_GENERATE_INSERT(name, type, field, cmp, attr)		\
 /* Inserts a node into the RB tree */					\
@@ -648,10 +638,13 @@ name##_RB_INSERT(struct name *head, struct type *elm)			\
 			RB_LEFT(parent, field) = elm;			\
 		else							\
 			RB_RIGHT(parent, field) = elm;			\
-		RB_AUGMENT(parent);					\
 	} else								\
 		RB_ROOT(head) = elm;					\
 	name##_RB_INSERT_COLOR(head, elm);				\
+	while (elm != NULL) {						\
+		RB_AUGMENT(elm);					\
+		elm = RB_PARENT(elm, field);				\
+	}								\
 	return (NULL);							\
 }
 
@@ -758,6 +751,22 @@ name##_RB_MINMAX(struct name *head, int val)				\
 	return (parent);						\
 }
 
+#define	RB_GENERATE_REINSERT(name, type, field, cmp, attr)		\
+attr struct type *							\
+name##_RB_REINSERT(struct name *head, struct type *elm)			\
+{									\
+	struct type *cmpelm;						\
+	if (((cmpelm = RB_PREV(name, head, elm)) != NULL &&		\
+	    cmp(cmpelm, elm) >= 0) ||					\
+	    ((cmpelm = RB_NEXT(name, head, elm)) != NULL &&		\
+	    cmp(elm, cmpelm) >= 0)) {					\
+		/* XXXLAS: Remove/insert is heavy handed. */		\
+		RB_REMOVE(name, head, elm);				\
+		return (RB_INSERT(name, head, elm));			\
+	}								\
+	return (NULL);							\
+}									\
+
 #define RB_NEGINF	-1
 #define RB_INF	1
 
@@ -769,6 +778,7 @@ name##_RB_MINMAX(struct name *head, int val)				\
 #define RB_PREV(name, x, y)	name##_RB_PREV(y)
 #define RB_MIN(name, x)		name##_RB_MINMAX(x, RB_NEGINF)
 #define RB_MAX(name, x)		name##_RB_MINMAX(x, RB_INF)
+#define RB_REINSERT(name, x, y)	name##_RB_REINSERT(x, y)
 
 #define RB_FOREACH(x, name, head)					\
 	for ((x) = RB_MIN(name, head);					\

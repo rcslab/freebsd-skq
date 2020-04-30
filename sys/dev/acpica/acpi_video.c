@@ -30,10 +30,11 @@
 __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
+#include <sys/bus.h>
+#include <sys/eventhandler.h>
 #include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/module.h>
-#include <sys/bus.h>
 #include <sys/power.h>
 #include <sys/queue.h>
 #include <sys/sysctl.h>
@@ -253,9 +254,9 @@ acpi_video_attach(device_t dev)
 	ACPI_SERIAL_BEGIN(video);
 	if (acpi_video_sysctl_tree == NULL) {
 		acpi_video_sysctl_tree = SYSCTL_ADD_NODE(&acpi_video_sysctl_ctx,
-				    SYSCTL_CHILDREN(acpi_sc->acpi_sysctl_tree),
-				    OID_AUTO, "video", CTLFLAG_RD, 0,
-				    "video extension control");
+		    SYSCTL_CHILDREN(acpi_sc->acpi_sysctl_tree), OID_AUTO,
+		    "video", CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
+		    "video extension control");
 	}
 	ACPI_SERIAL_END(video);
 
@@ -538,39 +539,40 @@ acpi_video_vo_init(UINT32 adr)
 			vo->vo_sysctl_tree =
 			    SYSCTL_ADD_NODE(&vo->vo_sysctl_ctx,
 				SYSCTL_CHILDREN(acpi_video_sysctl_tree),
-				OID_AUTO, name, CTLFLAG_RD, 0, desc);
+				OID_AUTO, name, CTLFLAG_RD | CTLFLAG_MPSAFE,
+				0, desc);
 		if (vo->vo_sysctl_tree != NULL) {
 			SYSCTL_ADD_PROC(&vo->vo_sysctl_ctx,
 			    SYSCTL_CHILDREN(vo->vo_sysctl_tree),
 			    OID_AUTO, "active",
-			    CTLTYPE_INT|CTLFLAG_RW, vo, 0,
-			    acpi_video_vo_active_sysctl, "I",
+			    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_NEEDGIANT, vo,
+			    0, acpi_video_vo_active_sysctl, "I",
 			    "current activity of this device");
 			SYSCTL_ADD_PROC(&vo->vo_sysctl_ctx,
 			    SYSCTL_CHILDREN(vo->vo_sysctl_tree),
 			    OID_AUTO, "brightness",
-			    CTLTYPE_INT|CTLFLAG_RW, vo, 0,
-			    acpi_video_vo_bright_sysctl, "I",
+			    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_NEEDGIANT, vo,
+			    0, acpi_video_vo_bright_sysctl, "I",
 			    "current brightness level");
 			SYSCTL_ADD_PROC(&vo->vo_sysctl_ctx,
 			    SYSCTL_CHILDREN(vo->vo_sysctl_tree),
 			    OID_AUTO, "fullpower",
-			    CTLTYPE_INT|CTLFLAG_RW, vo,
+			    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_NEEDGIANT, vo,
 			    POWER_PROFILE_PERFORMANCE,
 			    acpi_video_vo_presets_sysctl, "I",
 			    "preset level for full power mode");
 			SYSCTL_ADD_PROC(&vo->vo_sysctl_ctx,
 			    SYSCTL_CHILDREN(vo->vo_sysctl_tree),
 			    OID_AUTO, "economy",
-			    CTLTYPE_INT|CTLFLAG_RW, vo,
+			    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_NEEDGIANT, vo,
 			    POWER_PROFILE_ECONOMY,
 			    acpi_video_vo_presets_sysctl, "I",
 			    "preset level for economy mode");
 			SYSCTL_ADD_PROC(&vo->vo_sysctl_ctx,
 			    SYSCTL_CHILDREN(vo->vo_sysctl_tree),
 			    OID_AUTO, "levels",
-			    CTLTYPE_INT | CTLFLAG_RD, vo, 0,
-			    acpi_video_vo_levels_sysctl, "I",
+			    CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_NEEDGIANT, vo,
+			    0, acpi_video_vo_levels_sysctl, "I",
 			    "supported brightness levels");
 		} else
 			printf("%s: sysctl node creation failed\n", type);
@@ -640,7 +642,10 @@ acpi_video_vo_destroy(struct acpi_video_output *vo)
 
 	switch (vo->adr & DOD_DEVID_MASK) {
 	case DOD_DEVID_MONITOR:
-		voqh = &crt_units;
+		if ((vo->adr & DOD_DEVID_MASK_FULL) == DOD_DEVID_LCD)
+			voqh = &lcd_units;
+		else
+			voqh = &crt_units;
 		break;
 	case DOD_DEVID_TV:
 		voqh = &tv_units;
@@ -1034,6 +1039,7 @@ vo_get_brightness(ACPI_HANDLE handle)
 static void
 vo_set_brightness(ACPI_HANDLE handle, int level)
 {
+	char notify_buf[16];
 	ACPI_STATUS status;
 
 	ACPI_SERIAL_ASSERT(video_output);
@@ -1041,6 +1047,8 @@ vo_set_brightness(ACPI_HANDLE handle, int level)
 	if (ACPI_FAILURE(status))
 		printf("can't evaluate %s._BCM - %s\n",
 		       acpi_name(handle), AcpiFormatException(status));
+	snprintf(notify_buf, sizeof(notify_buf), "notify=%d", level);
+	devctl_notify("ACPI", "Video", "brightness", notify_buf);
 }
 
 static UINT32

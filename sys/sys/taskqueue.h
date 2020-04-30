@@ -42,6 +42,7 @@
 
 struct taskqueue;
 struct taskqgroup;
+struct proc;
 struct thread;
 
 struct timeout_task {
@@ -75,7 +76,9 @@ struct taskqueue *taskqueue_create(const char *name, int mflags,
 				    taskqueue_enqueue_fn enqueue,
 				    void *context);
 int	taskqueue_start_threads(struct taskqueue **tqp, int count, int pri,
-				const char *name, ...) __printflike(4, 5);
+	    const char *name, ...) __printflike(4, 5);
+int	taskqueue_start_threads_in_proc(struct taskqueue **tqp, int count,
+	    int pri, struct proc *p, const char *name, ...) __printflike(5, 6);
 int	taskqueue_start_threads_cpuset(struct taskqueue **tqp, int count,
 	    int pri, cpuset_t *mask, const char *name, ...) __printflike(5, 6);
 int	taskqueue_enqueue(struct taskqueue *queue, struct task *task);
@@ -104,8 +107,7 @@ void	taskqueue_set_callback(struct taskqueue *queue,
 	    taskqueue_callback_fn callback, void *context);
 
 #define TASK_INITIALIZER(priority, func, context)	\
-	{ .ta_pending = 0,				\
-	  .ta_priority = (priority),			\
+	{ .ta_priority = (priority),			\
 	  .ta_func = (func),				\
 	  .ta_context = (context) }
 
@@ -118,18 +120,24 @@ void	taskqueue_thread_enqueue(void *context);
 /*
  * Initialise a task structure.
  */
-#define TASK_INIT(task, priority, func, context) do {	\
-	(task)->ta_pending = 0;				\
-	(task)->ta_priority = (priority);		\
-	(task)->ta_func = (func);			\
-	(task)->ta_context = (context);			\
+#define TASK_INIT_FLAGS(task, priority, func, context, flags) do {	\
+	(task)->ta_pending = 0;					\
+	(task)->ta_priority = (priority);			\
+	(task)->ta_flags = (flags);				\
+	(task)->ta_func = (func);				\
+	(task)->ta_context = (context);				\
 } while (0)
+
+#define TASK_INIT(t, p, f, c)	TASK_INIT_FLAGS(t, p, f, c, 0)
 
 void _timeout_task_init(struct taskqueue *queue,
 	    struct timeout_task *timeout_task, int priority, task_fn_t func,
 	    void *context);
-#define	TIMEOUT_TASK_INIT(queue, timeout_task, priority, func, context) \
-	_timeout_task_init(queue, timeout_task, priority, func, context);
+#define	TIMEOUT_TASK_INIT(queue, timeout_task, priority, func, context)	do { \
+	_Static_assert((priority) >= 0 && (priority) <= 255,	\
+	    "struct task priority is 8 bit in size");           \
+	_timeout_task_init(queue, timeout_task, priority, func, context); \
+} while (0)
 
 /*
  * Declare a reference to a taskqueue.

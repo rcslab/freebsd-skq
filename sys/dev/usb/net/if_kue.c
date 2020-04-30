@@ -171,7 +171,8 @@ static void	kue_reset(struct kue_softc *);
 #ifdef USB_DEBUG
 static int kue_debug = 0;
 
-static SYSCTL_NODE(_hw_usb, OID_AUTO, kue, CTLFLAG_RW, 0, "USB kue");
+static SYSCTL_NODE(_hw_usb, OID_AUTO, kue, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "USB kue");
 SYSCTL_INT(_hw_usb_kue, OID_AUTO, debug, CTLFLAG_RWTUN, &kue_debug, 0,
     "Debug level");
 #endif
@@ -357,13 +358,25 @@ kue_setpromisc(struct usb_ether *ue)
 	kue_setword(sc, KUE_CMD_SET_PKT_FILTER, sc->sc_rxfilt);
 }
 
+static u_int
+kue_copy_maddr(void *arg, struct sockaddr_dl *sdl, u_int cnt)
+{
+	struct kue_softc *sc = arg;
+
+	if (cnt >= KUE_MCFILTCNT(sc))
+		return (1);
+
+	memcpy(KUE_MCFILT(sc, cnt), LLADDR(sdl), ETHER_ADDR_LEN);
+
+	return (1);
+}
+
 static void
 kue_setmulti(struct usb_ether *ue)
 {
 	struct kue_softc *sc = uether_getsc(ue);
 	struct ifnet *ifp = uether_getifp(ue);
-	struct ifmultiaddr *ifma;
-	int i = 0;
+	int i;
 
 	KUE_LOCK_ASSERT(sc, MA_OWNED);
 
@@ -376,25 +389,9 @@ kue_setmulti(struct usb_ether *ue)
 
 	sc->sc_rxfilt &= ~KUE_RXFILT_ALLMULTI;
 
-	if_maddr_rlock(ifp);
-	CK_STAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link)
-	{
-		if (ifma->ifma_addr->sa_family != AF_LINK)
-			continue;
-		/*
-		 * If there are too many addresses for the
-		 * internal filter, switch over to allmulti mode.
-		 */
-		if (i == KUE_MCFILTCNT(sc))
-			break;
-		memcpy(KUE_MCFILT(sc, i),
-		    LLADDR((struct sockaddr_dl *)ifma->ifma_addr),
-		    ETHER_ADDR_LEN);
-		i++;
-	}
-	if_maddr_runlock(ifp);
+	i = if_foreach_llmaddr(ifp, kue_copy_maddr, sc);
 
-	if (i == KUE_MCFILTCNT(sc))
+	if (i >= KUE_MCFILTCNT(sc))
 		sc->sc_rxfilt |= KUE_RXFILT_ALLMULTI;
 	else {
 		sc->sc_rxfilt |= KUE_RXFILT_MULTICAST;

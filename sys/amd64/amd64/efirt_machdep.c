@@ -74,7 +74,7 @@ efi_destroy_1t1_map(void)
 	if (obj_1t1_pt != NULL) {
 		VM_OBJECT_RLOCK(obj_1t1_pt);
 		TAILQ_FOREACH(m, &obj_1t1_pt->memq, listq)
-			m->wire_count = 0;
+			m->ref_count = VPRC_OBJREF;
 		vm_wire_sub(obj_1t1_pt->resident_page_count);
 		VM_OBJECT_RUNLOCK(obj_1t1_pt);
 		vm_object_deallocate(obj_1t1_pt);
@@ -325,5 +325,7 @@ efi_time_sysctl_handler(SYSCTL_HANDLER_ARGS)
 	return (error);
 }
 
-SYSCTL_PROC(_debug, OID_AUTO, efi_time, CTLTYPE_INT | CTLFLAG_RW, NULL, 0,
-    efi_time_sysctl_handler, "I", "");
+SYSCTL_PROC(_debug, OID_AUTO, efi_time,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_MPSAFE, NULL, 0,
+    efi_time_sysctl_handler, "I",
+    "");

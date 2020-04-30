@@ -325,6 +325,11 @@ LIST_HEAD(tmpfs_node_list, tmpfs_node);
  */
 struct tmpfs_mount {
 	/*
+	 * Original value of the "size" parameter, for reference purposes,
+	 * mostly.
+	 */
+	off_t			tm_size_max;
+	/*
 	 * Maximum number of memory pages available for use by the file
 	 * system, set during mount time.  This variable must never be
 	 * used directly as it may be bigger than the current amount of
@@ -373,14 +378,12 @@ struct tmpfs_mount {
 	/* All node lock to protect the node list and tmp_pages_used. */
 	struct mtx		tm_allnode_lock;
 
-	/* Zones used to store file system meta data, per tmpfs mount. */
-	uma_zone_t		tm_dirent_pool;
-	uma_zone_t		tm_node_pool;
-
 	/* Read-only status. */
 	bool			tm_ronly;
 	/* Do not use namecache. */
 	bool			tm_nonc;
+	/* Do not update mtime on writes through mmaped areas. */
+	bool			tm_nomtime;
 };
 #define	TMPFS_LOCK(tm) mtx_lock(&(tm)->tm_allnode_lock)
 #define	TMPFS_UNLOCK(tm) mtx_unlock(&(tm)->tm_allnode_lock)
@@ -432,8 +435,8 @@ void	tmpfs_dir_destroy(struct tmpfs_mount *, struct tmpfs_node *);
 struct tmpfs_dirent *	tmpfs_dir_lookup(struct tmpfs_node *node,
 			    struct tmpfs_node *f,
 			    struct componentname *cnp);
-int	tmpfs_dir_getdents(struct tmpfs_node *, struct uio *, int,
-	    u_long *, int *);
+int	tmpfs_dir_getdents(struct tmpfs_mount *, struct tmpfs_node *,
+	    struct uio *, int, u_long *, int *);
 int	tmpfs_dir_whiteout_add(struct vnode *, struct componentname *);
 void	tmpfs_dir_whiteout_remove(struct vnode *, struct componentname *);
 int	tmpfs_reg_resize(struct vnode *, off_t, boolean_t);
@@ -447,13 +450,19 @@ int	tmpfs_chtimes(struct vnode *, struct vattr *, struct ucred *cred,
 void	tmpfs_itimes(struct vnode *, const struct timespec *,
 	    const struct timespec *);
 
-void	tmpfs_set_status(struct tmpfs_node *node, int status);
-void	tmpfs_update(struct vnode *);
+void	tmpfs_set_status(struct tmpfs_mount *tm, struct tmpfs_node *node,
+	    int status);
 int	tmpfs_truncate(struct vnode *, off_t);
 struct tmpfs_dirent *tmpfs_dir_first(struct tmpfs_node *dnode,
 	    struct tmpfs_dir_cursor *dc);
 struct tmpfs_dirent *tmpfs_dir_next(struct tmpfs_node *dnode,
 	    struct tmpfs_dir_cursor *dc);
+static __inline void
+tmpfs_update(struct vnode *vp)
+{
+
+	tmpfs_itimes(vp, NULL, NULL);
+}
 
 /*
  * Convenience macros to simplify some logical expressions.
@@ -482,13 +491,14 @@ struct tmpfs_dirent *tmpfs_dir_next(struct tmpfs_node *dnode,
  * Amount of memory pages to reserve for the system (e.g., to not use by
  * tmpfs).
  */
+#if !defined(TMPFS_PAGES_MINRESERVED)
 #define TMPFS_PAGES_MINRESERVED		(4 * 1024 * 1024 / PAGE_SIZE)
+#endif
 
 size_t tmpfs_mem_avail(void);
-
 size_t tmpfs_pages_used(struct tmpfs_mount *tmp);
-
-#endif
+void tmpfs_subr_init(void);
+void tmpfs_subr_uninit(void);
 
 /*
  * Macros/functions to convert from generic data structures to tmpfs
@@ -531,5 +541,20 @@ tmpfs_use_nc(struct vnode *vp)
 
 	return (!(VFS_TO_TMPFS(vp->v_mount)->tm_nonc));
 }
+
+static inline void
+tmpfs_update_getattr(struct vnode *vp)
+{
+	struct tmpfs_node *node;
+	int update_flags;
+
+	update_flags = TMPFS_NODE_ACCESSED | TMPFS_NODE_MODIFIED | TMPFS_NODE_CHANGED;
+
+	node = VP_TO_TMPFS_NODE(vp);
+	if (__predict_false(node->tn_status & update_flags) != 0)
+		tmpfs_update(vp);
+}
+
+#endif /* _KERNEL */
 
 #endif /* _FS_TMPFS_TMPFS_H_ */

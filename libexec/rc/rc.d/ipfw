@@ -34,6 +34,15 @@ ipfw_prestart()
 	if checkyesno firewall_nat_enable; then
 		required_modules="$required_modules ipfw_nat"
 	fi
+	if checkyesno firewall_nat64_enable; then
+		required_modules="$required_modules ipfw_nat64"
+	fi
+	if checkyesno firewall_nptv6_enable; then
+		required_modules="$required_modules ipfw_nptv6"
+	fi
+	if checkyesno firewall_pmod_enable; then
+		required_modules="$required_modules ipfw_pmod"
+	fi
 }
 
 ipfw_start()
@@ -118,7 +127,11 @@ ipfw_stop()
 ipfw_status()
 {
 	status=$(sysctl -i -n net.inet.ip.fw.enable)
-	if [ ${status:-0} -eq 0 ]; then
+	: ${status:=0}
+	if afexists inet6; then
+		status=$((${status} + $(sysctl -i -n net.inet6.ip6.fw.enable)))
+	fi
+	if [ ${status} -eq 0 ]; then
 		echo "ipfw is not enabled"
 		exit 1
 	else

@@ -34,8 +34,18 @@ __FBSDID("$FreeBSD$");
 #include <sys/proc.h>
 
 #include <machine/frame.h>
+#include <machine/machdep.h>
 #include <machine/pcb.h>
-#include <machine/vmparam.h>
+
+/* Sizeof arm64_bootparams, rounded to keep stack alignment */
+ASSYM(BOOTPARAMS_SIZE, roundup2(sizeof(struct arm64_bootparams),
+    STACKALIGNBYTES + 1));
+ASSYM(BP_MODULEP, offsetof(struct arm64_bootparams, modulep));
+ASSYM(BP_KERN_L1PT, offsetof(struct arm64_bootparams, kern_l1pt));
+ASSYM(BP_KERN_DELTA, offsetof(struct arm64_bootparams, kern_delta));
+ASSYM(BP_KERN_STACK, offsetof(struct arm64_bootparams, kern_stack));
+ASSYM(BP_KERN_L0PT, offsetof(struct arm64_bootparams, kern_l0pt));
+ASSYM(BP_BOOT_EL, offsetof(struct arm64_bootparams, boot_el));
 
 ASSYM(TDF_ASTPENDING, TDF_ASTPENDING);
 ASSYM(TDF_NEEDRESCHED, TDF_NEEDRESCHED);
@@ -53,9 +63,6 @@ ASSYM(PCB_SP, offsetof(struct pcb, pcb_sp));
 ASSYM(PCB_TPIDRRO, offsetof(struct pcb, pcb_tpidrro_el0));
 ASSYM(PCB_ONFAULT, offsetof(struct pcb, pcb_onfault));
 ASSYM(PCB_FLAGS, offsetof(struct pcb, pcb_flags));
-
-ASSYM(P_MD, offsetof(struct proc, p_md));
-ASSYM(MD_L0ADDR, offsetof(struct mdproc, md_l0addr));
 
 ASSYM(SF_UC, offsetof(struct sigframe, sf_uc));
 

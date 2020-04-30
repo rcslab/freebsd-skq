@@ -29,7 +29,6 @@
 
 .include <src.opts.mk>
 
-PACKAGE=runtime
 PROG=	setkey
 MAN=	setkey.8
 SRCS=	setkey.c parse.y token.l
@@ -37,8 +36,6 @@ WARNS?=	1
 
 CFLAGS+= -I${.CURDIR} -I${SRCTOP}/lib/libipsec
 YFLAGS=	-d
-
-LIBADD=	l y
 
 CLEANFILES=	y.tab.c y.tab.h key_test.o keytest
 

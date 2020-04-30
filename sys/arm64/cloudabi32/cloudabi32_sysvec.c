@@ -49,7 +49,7 @@ extern struct sysent cloudabi32_sysent[];
 
 static void
 cloudabi32_proc_setregs(struct thread *td, struct image_params *imgp,
-    unsigned long stack)
+    uintptr_t stack)
 {
 	struct trapframe *regs;
 
@@ -182,7 +182,6 @@ static struct sysentvec cloudabi32_elf_sysvec = {
 	.sv_fixup		= cloudabi32_fixup,
 	.sv_name		= "CloudABI ELF32",
 	.sv_coredump		= elf32_coredump,
-	.sv_pagesize		= PAGE_SIZE,
 	.sv_minuser		= VM_MIN_ADDRESS,
 	.sv_maxuser		= (uintmax_t)1 << 32,
 	.sv_stackprot		= VM_PROT_READ | VM_PROT_WRITE,

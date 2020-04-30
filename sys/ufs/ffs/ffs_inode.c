@@ -124,7 +124,7 @@ loop:
 		 *
 		 * Hold a reference to the vnode to protect against
 		 * ffs_snapgone(). Since we hold a reference, it can only
-		 * get reclaimed (VI_DOOMED flag) in a forcible downgrade
+		 * get reclaimed (VIRF_DOOMED flag) in a forcible downgrade
 		 * or unmount. For an unmount, the entire filesystem will be
 		 * gone, so we cannot attempt to touch anything associated
 		 * with it while the vnode is unlocked; all we can do is 
@@ -133,11 +133,11 @@ loop:
 		 * longer necessary and we can just return an error.
 		 */
 		vref(vp);
-		VOP_UNLOCK(vp, 0);
+		VOP_UNLOCK(vp);
 		pause("ffsupd", 1);
 		vn_lock(vp, LK_EXCLUSIVE | LK_RETRY);
 		vrele(vp);
-		if ((vp->v_iflag & VI_DOOMED) != 0)
+		if (VN_IS_DOOMED(vp))
 			return (ENOENT);
 		goto loop;
 	}
@@ -244,6 +244,7 @@ ffs_truncate(vp, length, flags, cred)
 	needextclean = 0;
 	softdeptrunc = 0;
 	journaltrunc = DOINGSUJ(vp);
+	journaltrunc = 0;	/* XXX temp patch until bug found */
 	if (journaltrunc == 0 && DOINGSOFTDEP(vp) && length == 0)
 		softdeptrunc = !softdep_slowdown(vp);
 	extblocks = 0;
@@ -263,7 +264,7 @@ ffs_truncate(vp, length, flags, cred)
 			if ((error = ffs_syncvnode(vp, MNT_WAIT, 0)) != 0)
 				return (error);
 #ifdef QUOTA
-			(void) chkdq(ip, -extblocks, NOCRED, 0);
+			(void) chkdq(ip, -extblocks, NOCRED, FORCE);
 #endif
 			vinvalbuf(vp, V_ALT, 0, 0);
 			vn_pages_remove(vp,
@@ -275,7 +276,7 @@ ffs_truncate(vp, length, flags, cred)
 				oldblks[i] = ip->i_din2->di_extb[i];
 				ip->i_din2->di_extb[i] = 0;
 			}
-			ip->i_flag |= IN_CHANGE;
+			UFS_INODE_SET_FLAG(ip, IN_CHANGE);
 			if ((error = ffs_update(vp, waitforupdate)))
 				return (error);
 			for (i = 0; i < UFS_NXADDR; i++) {
@@ -299,13 +300,13 @@ ffs_truncate(vp, length, flags, cred)
 		bzero(SHORTLINK(ip), (u_int)ip->i_size);
 		ip->i_size = 0;
 		DIP_SET(ip, i_size, 0);
-		ip->i_flag |= IN_CHANGE | IN_UPDATE;
+		UFS_INODE_SET_FLAG(ip, IN_CHANGE | IN_UPDATE);
 		if (needextclean)
 			goto extclean;
 		return (ffs_update(vp, waitforupdate));
 	}
 	if (ip->i_size == length) {
-		ip->i_flag |= IN_CHANGE | IN_UPDATE;
+		UFS_INODE_SET_FLAG(ip, IN_CHANGE | IN_UPDATE);
 		if (needextclean)
 			goto extclean;
 		return (ffs_update(vp, 0));
@@ -339,7 +340,7 @@ ffs_truncate(vp, length, flags, cred)
 			bdwrite(bp);
 		else
 			bawrite(bp);
-		ip->i_flag |= IN_CHANGE | IN_UPDATE;
+		UFS_INODE_SET_FLAG(ip, IN_CHANGE | IN_UPDATE);
 		return (ffs_update(vp, waitforupdate));
 	}
 	/*
@@ -405,7 +406,7 @@ ffs_truncate(vp, length, flags, cred)
 				softdep_setup_freeblocks(ip, length, flags);
 			ASSERT_VOP_LOCKED(vp, "ffs_truncate1");
 			if (journaltrunc == 0) {
-				ip->i_flag |= IN_CHANGE | IN_UPDATE;
+				UFS_INODE_SET_FLAG(ip, IN_CHANGE | IN_UPDATE);
 				error = ffs_update(vp, 0);
 			}
 			return (error);
@@ -489,7 +490,7 @@ ffs_truncate(vp, length, flags, cred)
 		if (i > lastblock)
 			DIP_SET(ip, i_db[i], 0);
 	}
-	ip->i_flag |= IN_CHANGE | IN_UPDATE;
+	UFS_INODE_SET_FLAG(ip, IN_CHANGE | IN_UPDATE);
 	allerror = ffs_update(vp, waitforupdate);
 	
 	/*
@@ -509,7 +510,7 @@ ffs_truncate(vp, length, flags, cred)
 	ip->i_size = osize;
 	DIP_SET(ip, i_size, osize);
 
-	error = vtruncbuf(vp, cred, length, fs->fs_bsize);
+	error = vtruncbuf(vp, length, fs->fs_bsize);
 	if (error && (allerror == 0))
 		allerror = error;
 
@@ -594,15 +595,20 @@ done:
 #ifdef INVARIANTS
 	for (level = SINGLE; level <= TRIPLE; level++)
 		if (newblks[UFS_NDADDR + level] != DIP(ip, i_ib[level]))
-			panic("ffs_truncate1");
+			panic("ffs_truncate1: level %d newblks %jd != i_ib %jd",
+			    level, (intmax_t)newblks[UFS_NDADDR + level],
+			    (intmax_t)DIP(ip, i_ib[level]));
 	for (i = 0; i < UFS_NDADDR; i++)
 		if (newblks[i] != DIP(ip, i_db[i]))
-			panic("ffs_truncate2");
+			panic("ffs_truncate2: blkno %d newblks %jd != i_db %jd",
+			    i, (intmax_t)newblks[UFS_NDADDR + level],
+			    (intmax_t)DIP(ip, i_ib[level]));
 	BO_LOCK(bo);
 	if (length == 0 &&
 	    (fs->fs_magic != FS_UFS2_MAGIC || ip->i_din2->di_extsize == 0) &&
 	    (bo->bo_dirty.bv_cnt > 0 || bo->bo_clean.bv_cnt > 0))
-		panic("ffs_truncate3");
+		panic("ffs_truncate3: vp = %p, buffers: dirty = %d, clean = %d",
+			vp, bo->bo_dirty.bv_cnt, bo->bo_clean.bv_cnt);
 	BO_UNLOCK(bo);
 #endif /* INVARIANTS */
 	/*
@@ -614,9 +620,9 @@ done:
 		DIP_SET(ip, i_blocks, DIP(ip, i_blocks) - blocksreleased);
 	else	/* sanity */
 		DIP_SET(ip, i_blocks, 0);
-	ip->i_flag |= IN_CHANGE;
+	UFS_INODE_SET_FLAG(ip, IN_CHANGE);
 #ifdef QUOTA
-	(void) chkdq(ip, -blocksreleased, NOCRED, 0);
+	(void) chkdq(ip, -blocksreleased, NOCRED, FORCE);
 #endif
 	return (allerror);
 
@@ -673,34 +679,14 @@ ffs_indirtrunc(ip, lbn, dbn, lastbn, level, countp)
 	 * Get buffer of block pointers, zero those entries corresponding
 	 * to blocks to be free'd, and update on disk copy first.  Since
 	 * double(triple) indirect before single(double) indirect, calls
-	 * to bmap on these blocks will fail.  However, we already have
-	 * the on disk address, so we have to set the b_blkno field
-	 * explicitly instead of letting bread do everything for us.
+	 * to VOP_BMAP() on these blocks will fail.  However, we already
+	 * have the on-disk address, so we just pass it to bread() instead
+	 * of having bread() attempt to calculate it using VOP_BMAP().
 	 */
 	vp = ITOV(ip);
-	bp = getblk(vp, lbn, (int)fs->fs_bsize, 0, 0, 0);
-	if ((bp->b_flags & B_CACHE) == 0) {
-#ifdef RACCT
-		if (racct_enable) {
-			PROC_LOCK(curproc);
-			racct_add_buf(curproc, bp, 0);
-			PROC_UNLOCK(curproc);
-		}
-#endif /* RACCT */
-		curthread->td_ru.ru_inblock++;	/* pay for read */
-		bp->b_iocmd = BIO_READ;
-		bp->b_flags &= ~B_INVAL;
-		bp->b_ioflags &= ~BIO_ERROR;
-		if (bp->b_bcount > bp->b_bufsize)
-			panic("ffs_indirtrunc: bad buffer size");
-		bp->b_blkno = dbn;
-		vfs_busy_pages(bp, 0);
-		bp->b_iooffset = dbtob(bp->b_blkno);
-		bstrategy(bp);
-		error = bufwait(bp);
-	}
+	error = breadn_flags(vp, lbn, dbn, (int)fs->fs_bsize, NULL, NULL, 0,
+	    NOCRED, 0, NULL, &bp);
 	if (error) {
-		brelse(bp);
 		*countp = 0;
 		return (error);
 	}

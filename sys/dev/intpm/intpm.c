@@ -102,6 +102,7 @@ const struct intsmb_device {
 	{ AMDSB_SMBUS_DEVID, "AMD SB600/7xx/8xx/9xx SMBus Controller" },
 	{ AMDFCH_SMBUS_DEVID, "AMD FCH SMBus Controller" },
 	{ AMDCZ_SMBUS_DEVID, "AMD FCH SMBus Controller" },
+	{ HYGONCZ_SMBUS_DEVID, "Hygon FCH SMBus Controller" },
 };
 
 static int
@@ -243,6 +244,7 @@ intsmb_attach(device_t dev)
 		break;
 	case AMDFCH_SMBUS_DEVID:
 	case AMDCZ_SMBUS_DEVID:
+	case HYGONCZ_SMBUS_DEVID:
 		sc->sb8xx = 1;
 		break;
 	}
@@ -525,12 +527,19 @@ intsmb_error(device_t dev, int status)
 {
 	int error = 0;
 
+	/*
+	 * PIIX4_SMBHSTSTAT_ERR can mean either of
+	 * - SMB_ENOACK ("Unclaimed cycle"),
+	 * - SMB_ETIMEOUT ("Host device time-out"),
+	 * - SMB_EINVAL ("Illegal command field").
+	 * SMB_ENOACK seems to be most typical.
+	 */
 	if (status & PIIX4_SMBHSTSTAT_ERR)
-		error |= SMB_EBUSERR;
+		error |= SMB_ENOACK;
 	if (status & PIIX4_SMBHSTSTAT_BUSC)
 		error |= SMB_ECOLLI;
 	if (status & PIIX4_SMBHSTSTAT_FAIL)
-		error |= SMB_ENOACK;
+		error |= SMB_EABORT;
 
 	if (error != 0 && bootverbose)
 		device_printf(dev, "error = %d, status = %#x\n", error, status);

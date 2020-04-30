@@ -1,7 +1,7 @@
 /*-
  * BSD LICENSE
  *
- * Copyright (c) 2015-2017 Amazon.com, Inc. or its affiliates.
+ * Copyright (c) 2015-2019 Amazon.com, Inc. or its affiliates.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -34,12 +34,27 @@ __FBSDID("$FreeBSD$");
 
 static void	ena_sysctl_add_wd(struct ena_adapter *);
 static void	ena_sysctl_add_stats(struct ena_adapter *);
+static void	ena_sysctl_add_tuneables(struct ena_adapter *);
+static int	ena_sysctl_buf_ring_size(SYSCTL_HANDLER_ARGS);
+static int	ena_sysctl_rx_queue_size(SYSCTL_HANDLER_ARGS);
+
+static SYSCTL_NODE(_hw, OID_AUTO, ena, CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
+    "ENA driver parameters");
+
+/*
+ * Logging level for changing verbosity of the output
+ */
+int ena_log_level = ENA_ALERT | ENA_WARNING;
+SYSCTL_INT(_hw_ena, OID_AUTO, log_level, CTLFLAG_RWTUN,
+    &ena_log_level, 0, "Logging level indicating verbosity of the logs");
+
 
 void
 ena_sysctl_add_nodes(struct ena_adapter *adapter)
 {
 	ena_sysctl_add_wd(adapter);
 	ena_sysctl_add_stats(adapter);
+	ena_sysctl_add_tuneables(adapter);
 }
 
 static void
@@ -136,12 +151,12 @@ ena_sysctl_add_stats(struct ena_adapter *adapter)
 		snprintf(namebuf, QUEUE_NAME_LEN, "queue%d", i);
 
 		queue_node = SYSCTL_ADD_NODE(ctx, child, OID_AUTO,
-		    namebuf, CTLFLAG_RD, NULL, "Queue Name");
+		    namebuf, CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "Queue Name");
 		queue_list = SYSCTL_CHILDREN(queue_node);
 
 		/* TX specific stats */
 		tx_node = SYSCTL_ADD_NODE(ctx, queue_list, OID_AUTO,
-		    "tx_ring", CTLFLAG_RD, NULL, "TX ring");
+		    "tx_ring", CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "TX ring");
 		tx_list = SYSCTL_CHILDREN(tx_node);
 
 		tx_stats = &tx_ring->tx_stats;
@@ -176,10 +191,20 @@ ena_sysctl_add_stats(struct ena_adapter *adapter)
 		        "mbuf_collapse_err", CTLFLAG_RD,
 		        &tx_stats->collapse_err,
 		        "Mbuf collapse failures");
+		SYSCTL_ADD_COUNTER_U64(ctx, tx_list, OID_AUTO,
+		    "queue_wakeups", CTLFLAG_RD,
+		    &tx_stats->queue_wakeup, "Queue wakeups");
+		SYSCTL_ADD_COUNTER_U64(ctx, tx_list, OID_AUTO,
+		    "queue_stops", CTLFLAG_RD,
+		    &tx_stats->queue_stop, "Queue stops");
+		SYSCTL_ADD_COUNTER_U64(ctx, tx_list, OID_AUTO,
+		    "llq_buffer_copy", CTLFLAG_RD,
+		    &tx_stats->llq_buffer_copy,
+		    "Header copies for llq transaction");
 
 		/* RX specific stats */
 		rx_node = SYSCTL_ADD_NODE(ctx, queue_list, OID_AUTO,
-		    "rx_ring", CTLFLAG_RD, NULL, "RX ring");
+		    "rx_ring", CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "RX ring");
 		rx_list = SYSCTL_CHILDREN(rx_node);
 
 		rx_stats = &rx_ring->rx_stats;
@@ -218,7 +243,7 @@ ena_sysctl_add_stats(struct ena_adapter *adapter)
 
 	/* Stats read from device */
 	hw_node = SYSCTL_ADD_NODE(ctx, child, OID_AUTO, "hw_stats",
-	    CTLFLAG_RD, NULL, "Statistics from hardware");
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "Statistics from hardware");
 	hw_list = SYSCTL_CHILDREN(hw_node);
 
 	SYSCTL_ADD_COUNTER_U64(ctx, hw_list, OID_AUTO, "rx_packets", CTLFLAG_RD,
@@ -234,7 +259,7 @@ ena_sysctl_add_stats(struct ena_adapter *adapter)
 
 	/* ENA Admin queue stats */
 	admin_node = SYSCTL_ADD_NODE(ctx, child, OID_AUTO, "admin_stats",
-	    CTLFLAG_RD, NULL, "ENA Admin Queue statistics");
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "ENA Admin Queue statistics");
 	admin_list = SYSCTL_CHILDREN(admin_node);
 
 	SYSCTL_ADD_U32(ctx, admin_list, OID_AUTO, "aborted_cmd", CTLFLAG_RD,
@@ -249,3 +274,92 @@ ena_sysctl_add_stats(struct ena_adapter *adapter)
 	    &admin_stats->no_completion, 0, "Commands not completed");
 }
 
+static void
+ena_sysctl_add_tuneables(struct ena_adapter *adapter)
+{
+	device_t dev;
+
+	struct sysctl_ctx_list *ctx;
+	struct sysctl_oid *tree;
+	struct sysctl_oid_list *child;
+
+	dev = adapter->pdev;
+
+	ctx = device_get_sysctl_ctx(dev);
+	tree = device_get_sysctl_tree(dev);
+	child = SYSCTL_CHILDREN(tree);
+
+	/* Tuneable number of buffers in the buf-ring (drbr) */
+	SYSCTL_ADD_PROC(ctx, child, OID_AUTO, "buf_ring_size",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_NEEDGIANT, adapter, 0,
+	    ena_sysctl_buf_ring_size, "I", "Size of the bufring");
+
+	/* Tuneable number of Rx ring size */
+	SYSCTL_ADD_PROC(ctx, child, OID_AUTO, "rx_queue_size",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_NEEDGIANT, adapter, 0,
+	    ena_sysctl_rx_queue_size, "I", "Size of the Rx ring. "
+	    "The size should be a power of 2. Max value is 8K");
+}
+
+
+static int
+ena_sysctl_buf_ring_size(SYSCTL_HANDLER_ARGS)
+{
+	struct ena_adapter *adapter = arg1;
+	int val;
+	int error;
+
+	val = 0;
+	error = sysctl_wire_old_buffer(req, sizeof(int));
+	if (error == 0) {
+		val = adapter->buf_ring_size;
+		error = sysctl_handle_int(oidp, &val, 0, req);
+	}
+	if (error != 0 || req->newptr == NULL)
+		return (error);
+	if (val < 0)
+		return (EINVAL);
+
+	device_printf(adapter->pdev,
+	    "Requested new buf ring size: %d. Old size: %d\n",
+	    val, adapter->buf_ring_size);
+
+	if (val != adapter->buf_ring_size) {
+		adapter->buf_ring_size = val;
+		adapter->reset_reason = ENA_REGS_RESET_OS_TRIGGER;
+		ENA_FLAG_SET_ATOMIC(ENA_FLAG_TRIGGER_RESET, adapter);
+	}
+
+	return (0);
+}
+
+static int
+ena_sysctl_rx_queue_size(SYSCTL_HANDLER_ARGS)
+{
+	struct ena_adapter *adapter = arg1;
+	int val;
+	int error;
+
+	val = 0;
+	error = sysctl_wire_old_buffer(req, sizeof(int));
+	if (error == 0) {
+		val = adapter->rx_ring_size;
+		error = sysctl_handle_int(oidp, &val, 0, req);
+	}
+	if (error != 0 || req->newptr == NULL)
+		return (error);
+	if  (val < 16)
+		return (EINVAL);
+
+	device_printf(adapter->pdev,
+	    "Requested new rx queue size: %d. Old size: %d\n",
+	    val, adapter->rx_ring_size);
+
+	if (val != adapter->rx_ring_size) {
+		adapter->rx_ring_size = val;
+		adapter->reset_reason = ENA_REGS_RESET_OS_TRIGGER;
+		ENA_FLAG_SET_ATOMIC(ENA_FLAG_TRIGGER_RESET, adapter);
+	}
+
+	return (0);
+}

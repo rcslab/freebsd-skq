@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2018 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2014-2020 The OpenSSL Project Authors. All Rights Reserved.
  * Copyright (c) 2014, Intel Corporation. All Rights Reserved.
  * Copyright (c) 2015, CloudFlare, Inc.
  *
@@ -21,8 +21,8 @@
 #include <string.h>
 
 #include "internal/cryptlib.h"
-#include "internal/bn_int.h"
-#include "ec_lcl.h"
+#include "crypto/bn.h"
+#include "ec_local.h"
 #include "internal/refcount.h"
 
 #if BN_BITS2 != 64
@@ -358,16 +358,47 @@ static void ecp_nistz256_point_add(P256_POINT *r,
     ecp_nistz256_sub(H, U2, U1);                /* H = U2 - U1 */
 
     /*
-     * This should not happen during sign/ecdh, so no constant time violation
+     * The formulae are incorrect if the points are equal so we check for
+     * this and do doubling if this happens.
+     *
+     * Points here are in Jacobian projective coordinates (Xi, Yi, Zi)
+     * that are bound to the affine coordinates (xi, yi) by the following
+     * equations:
+     *     - xi = Xi / (Zi)^2
+     *     - y1 = Yi / (Zi)^3
+     *
+     * For the sake of optimization, the algorithm operates over
+     * intermediate variables U1, U2 and S1, S2 that are derived from
+     * the projective coordinates:
+     *     - U1 = X1 * (Z2)^2 ; U2 = X2 * (Z1)^2
+     *     - S1 = Y1 * (Z2)^3 ; S2 = Y2 * (Z1)^3
+     *
+     * It is easy to prove that is_equal(U1, U2) implies that the affine
+     * x-coordinates are equal, or either point is at infinity.
+     * Likewise is_equal(S1, S2) implies that the affine y-coordinates are
+     * equal, or either point is at infinity.
+     *
+     * The special case of either point being the point at infinity (Z1 or Z2
+     * is zero), is handled separately later on in this function, so we avoid
+     * jumping to point_double here in those special cases.
+     *
+     * When both points are inverse of each other, we know that the affine
+     * x-coordinates are equal, and the y-coordinates have different sign.
+     * Therefore since U1 = U2, we know H = 0, and therefore Z3 = H*Z1*Z2
+     * will equal 0, thus the result is infinity, if we simply let this
+     * function continue normally.
+     *
+     * We use bitwise operations to avoid potential side-channels introduced by
+     * the short-circuiting behaviour of boolean operators.
      */
-    if (is_equal(U1, U2) && !in1infty && !in2infty) {
-        if (is_equal(S1, S2)) {
-            ecp_nistz256_point_double(r, a);
-            return;
-        } else {
-            memset(r, 0, sizeof(*r));
-            return;
-        }
+    if (is_equal(U1, U2) & ~in1infty & ~in2infty & is_equal(S1, S2)) {
+        /*
+         * This is obviously not constant-time but it should never happen during
+         * single point multiplication, so there is no timing leak for ECDH or
+         * ECDSA signing.
+         */
+        ecp_nistz256_point_double(r, a);
+        return;
     }
 
     ecp_nistz256_sqr_mont(Rsqr, R);             /* R^2 */
@@ -888,8 +919,7 @@ __owur static int ecp_nistz256_mult_precompute(EC_GROUP *group, BN_CTX *ctx)
     ret = 1;
 
  err:
-    if (ctx != NULL)
-        BN_CTX_end(ctx);
+    BN_CTX_end(ctx);
     BN_CTX_free(new_ctx);
 
     EC_nistz256_pre_comp_free(pre_comp);
@@ -1677,6 +1707,7 @@ const EC_METHOD *EC_GFp_nistz256_method(void)
         ec_GFp_mont_field_mul,
         ec_GFp_mont_field_sqr,
         0,                                          /* field_div */
+        ec_GFp_mont_field_inv,
         ec_GFp_mont_field_encode,
         ec_GFp_mont_field_decode,
         ec_GFp_mont_field_set_to_one,

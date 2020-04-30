@@ -24,7 +24,7 @@
 .\"
 .\" $FreeBSD$
 .\"
-.Dd December 11, 2018
+.Dd April 22, 2020
 .Dt BHYVE 8
 .Os
 .Sh NAME
@@ -32,23 +32,40 @@
 .Nd "run a guest operating system inside a virtual machine"
 .Sh SYNOPSIS
 .Nm
-.Op Fl abehuwxACHPSWY
+.Op Fl AabCeHhPSuWwxY
 .Oo
-.Fl c\~ Ns
+.Sm off
+.Fl c\~
 .Oo
-.Op Ar cpus= Ns
-.Ar numcpus Ns
-.Oc Ns
-.Op Ar ,sockets=n Ns
-.Op Ar ,cores=n Ns
-.Op Ar ,threads=n
+.Op Cm cpus=
+.Ar numcpus
 .Oc
-.Op Fl g Ar gdbport
-.Op Fl l Ar help|lpcdev Ns Op , Ns Ar conf
-.Op Fl m Ar memsize Ns Op Ar K|k|M|m|G|g|T|t
-.Op Fl p Ar vcpu:hostcpu
-.Op Fl s Ar help|slot,emulation Ns Op , Ns Ar conf
+.Op Cm ,sockets= Ar n
+.Op Cm ,cores= Ar n
+.Op Cm ,threads= Ar n
+.Oc
+.Sm on
 .Op Fl G Ar port
+.Op Fl g Ar gdbport
+.Oo Fl l
+.Sm off
+.Cm help | Ar lpcdev Op Cm \&, Ar conf
+.Sm on
+.Oc
+.Oo Fl m
+.Sm off
+.Ar memsize
+.Oo
+.Cm K No | Cm k No | Cm M No | Cm m No | Cm G No | Cm g No | Cm T No | Cm t
+.Oc
+.Sm on
+.Oc
+.Op Fl p Ar vcpu Ns Cm \&: Ns Ar hostcpu
+.Oo Fl s
+.Sm off
+.Cm help | Ar slot Cm \&, Ar emulation Op Cm \&, Ar conf
+.Sm on
+.Oc
 .Op Fl U Ar uuid
 .Ar vmname
 .Sh DESCRIPTION
@@ -248,6 +265,8 @@ Raw framebuffer device attached to VNC server.
 eXtensible Host Controller Interface (xHCI) USB controller.
 .It Li nvme
 NVM Express (NVMe) controller.
+.It Li hda
+High Definition Audio Controller.
 .El
 .It Op Ar conf
 This optional parameter describes the backend for device emulations.
@@ -345,7 +364,7 @@ Guest memory must be wired using the
 option when a pass-through device is configured.
 .Pp
 The host device must have been reserved at boot-time using the
-.Va pptdev
+.Va pptdevs
 loader variable as described in
 .Xr vmm 4 .
 .Pp
@@ -475,6 +494,16 @@ Sector size (defaults to blockif sector size).
 .It Li ser
 Serial number with maximum 20 characters.
 .El
+.Pp
+HD Audio devices:
+.Bl -tag -width 10n
+.It Li play
+Playback device, typically
+.Ar /dev/dsp0 .
+.It Li rec
+Recording device, typically
+.Ar /dev/dsp0 .
+.El
 .El
 .It Fl S
 Wire guest memory.
@@ -509,8 +538,7 @@ Each virtual CPU is exposed to the debugger as a thread.
 General purpose registers can be queried for each virtual CPU, but other
 registers such as floating-point and system registers cannot be queried.
 .Ss Memory
-Memory (including memory mapped I/O regions) can be read by the debugger,
-but not written.
+Memory (including memory mapped I/O regions) can be read and written by the debugger.
 Memory operations use virtual addresses that are resolved to physical addresses
 via the current virtual CPU's active address translation.
 .Ss Control
@@ -519,7 +547,10 @@ The running guest can be interrupted by the debugger at any time
 .Pp
 Single stepping is only supported on Intel CPUs supporting the MTRAP VM exit.
 .Pp
-Breakpoints are not supported.
+Breakpoints are supported on Intel CPUs that support single stepping.
+Note that continuing from a breakpoint while interrupts are enabled in the
+guest may not work as expected due to timer interrupts firing while single
+stepping over the breakpoint.
 .Sh SIGNAL HANDLING
 .Nm
 deals with the following signals:

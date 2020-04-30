@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2015 Ruslan Bukin <br@bsdpad.com>
+ * Copyright (c) 2015, 2020 Ruslan Bukin <br@bsdpad.com>
  * Copyright (c) 2014 The FreeBSD Foundation
  * All rights reserved.
  *
@@ -53,21 +53,6 @@ __FBSDID("$FreeBSD$");
 #include <machine/intr.h>
 
 #include "pcib_if.h"
-
-/* Assembling ECAM Configuration Address */
-#define	PCIE_BUS_SHIFT		20
-#define	PCIE_SLOT_SHIFT		15
-#define	PCIE_FUNC_SHIFT		12
-#define	PCIE_BUS_MASK		0xFF
-#define	PCIE_SLOT_MASK		0x1F
-#define	PCIE_FUNC_MASK		0x07
-#define	PCIE_REG_MASK		0xFFF
-
-#define	PCIE_ADDR_OFFSET(bus, slot, func, reg)			\
-	((((bus) & PCIE_BUS_MASK) << PCIE_BUS_SHIFT)	|	\
-	(((slot) & PCIE_SLOT_MASK) << PCIE_SLOT_SHIFT)	|	\
-	(((func) & PCIE_FUNC_MASK) << PCIE_FUNC_SHIFT)	|	\
-	((reg) & PCIE_REG_MASK))
 
 /* Forward prototypes */
 
@@ -359,29 +344,30 @@ generic_pcie_activate_resource(device_t dev, device_t child, int type,
 
 	switch (type) {
 	case SYS_RES_IOPORT:
+	case SYS_RES_MEMORY:
 		found = 0;
 		for (i = 0; i < MAX_RANGES_TUPLES; i++) {
 			pci_base = sc->ranges[i].pci_base;
 			phys_base = sc->ranges[i].phys_base;
 			size = sc->ranges[i].size;
 
-			if ((rid > pci_base) && (rid < (pci_base + size))) {
+			if ((rman_get_start(r) >= pci_base) && (rman_get_start(r) < (pci_base + size))) {
 				found = 1;
 				break;
 			}
 		}
 		if (found) {
-			rman_set_start(r, rman_get_start(r) + phys_base);
-			rman_set_end(r, rman_get_end(r) + phys_base);
+			rman_set_start(r, rman_get_start(r) - pci_base + phys_base);
+			rman_set_end(r, rman_get_end(r) - pci_base + phys_base);
 			res = BUS_ACTIVATE_RESOURCE(device_get_parent(dev),
 			    child, type, rid, r);
 		} else {
 			device_printf(dev,
-			    "Failed to activate IOPORT resource\n");
-			res = 0;
+			    "Failed to activate %s resource\n",
+			    type == SYS_RES_IOPORT ? "IOPORT" : "MEMORY");
+			res = ENXIO;
 		}
 		break;
-	case SYS_RES_MEMORY:
 	case SYS_RES_IRQ:
 		res = BUS_ACTIVATE_RESOURCE(device_get_parent(dev), child,
 		    type, rid, r);

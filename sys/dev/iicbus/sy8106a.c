@@ -1,6 +1,5 @@
 /*-
  * Copyright (c) 2016 Jared McNeill <jmcneill@invisible.ca>
- * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -300,3 +299,4 @@ EARLY_DRIVER_MODULE(sy8106a, iicbus, sy8106a_driver, sy8106a_devclass, 0, 0,
     BUS_PASS_RESOURCE);
 MODULE_VERSION(sy8106a, 1);
 MODULE_DEPEND(sy8106a, iicbus, 1, 1, 1);
+IICBUS_FDT_PNP_INFO(compat_data);

@@ -133,7 +133,7 @@ main(int argc, char *argv[])
 	(void)signal(SIGINFO, siginfo_handler);
 
 	fa = fileargs_init(argc, argv, O_RDONLY, 0,
-	    cap_rights_init(&rights, CAP_READ, CAP_FSTAT));
+	    cap_rights_init(&rights, CAP_READ, CAP_FSTAT), FA_OPEN);
 	if (fa == NULL) {
 		xo_warn("Unable to init casper");
 		exit(1);
@@ -246,7 +246,7 @@ cnt(const char *file)
 	 */
 	if (doline == 0 && dolongline == 0) {
 		if (fstat(fd, &sb)) {
-			xo_warn("%s: fstat", file);
+			xo_warn("%s: fstat", file != NULL ? file : "stdin");
 			(void)close(fd);
 			return (1);
 		}
@@ -267,7 +267,7 @@ cnt(const char *file)
 	 */
 	while ((len = read(fd, buf, MAXBSIZE))) {
 		if (len == -1) {
-			xo_warn("%s: read", file);
+			xo_warn("%s: read", file != NULL ? file : "stdin");
 			(void)close(fd);
 			return (1);
 		}

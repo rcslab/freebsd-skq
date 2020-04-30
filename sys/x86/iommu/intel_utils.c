@@ -66,6 +66,7 @@ __FBSDID("$FreeBSD$");
 #include <x86/include/busdma_impl.h>
 #include <x86/iommu/intel_reg.h>
 #include <x86/iommu/busdma_dmar.h>
+#include <dev/pci/pcireg.h>
 #include <x86/iommu/intel_dmar.h>
 
 u_int
@@ -297,7 +298,7 @@ dmar_pgfree(vm_object_t obj, vm_pindex_t idx, int flags)
 
 	if ((flags & DMAR_PGF_OBJL) == 0)
 		VM_OBJECT_WLOCK(obj);
-	m = vm_page_lookup(obj, idx);
+	m = vm_page_grab(obj, idx, VM_ALLOC_NOCREAT);
 	if (m != NULL) {
 		vm_page_free(m);
 		atomic_subtract_int(&dmar_tbl_pagecnt, 1);
@@ -614,7 +615,6 @@ dmar_barrier_exit(struct dmar_unit *dmar, u_int barrier_id)
 	DMAR_UNLOCK(dmar);
 }
 
-int dmar_match_verbose;
 int dmar_batch_coalesce = 100;
 struct timespec dmar_hw_timeout = {
 	.tv_sec = 0,
@@ -654,13 +654,11 @@ dmar_timeout_sysctl(SYSCTL_HANDLER_ARGS)
 	return (error);
 }
 
-static SYSCTL_NODE(_hw, OID_AUTO, dmar, CTLFLAG_RD, NULL, "");
+static SYSCTL_NODE(_hw, OID_AUTO, dmar, CTLFLAG_RD | CTLFLAG_MPSAFE, NULL,
+    "");
 SYSCTL_INT(_hw_dmar, OID_AUTO, tbl_pagecnt, CTLFLAG_RD,
     &dmar_tbl_pagecnt, 0,
     "Count of pages used for DMAR pagetables");
-SYSCTL_INT(_hw_dmar, OID_AUTO, match_verbose, CTLFLAG_RWTUN,
-    &dmar_match_verbose, 0,
-    "Verbose matching of the PCI devices to DMAR paths");
 SYSCTL_INT(_hw_dmar, OID_AUTO, batch_coalesce, CTLFLAG_RWTUN,
     &dmar_batch_coalesce, 0,
     "Number of qi batches between interrupt");

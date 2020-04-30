@@ -31,10 +31,11 @@ __FBSDID("$FreeBSD$");
 
 #include "opt_acpi.h"
 #include <sys/param.h>
+#include <sys/bus.h>
+#include <sys/eventhandler.h>
 #include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/module.h>
-#include <sys/bus.h>
 #include <sys/power.h>
 
 #include <contrib/dev/acpica/include/acpi.h>
@@ -167,13 +168,13 @@ acpi_panasonic_attach(device_t dev)
 	sysctl_ctx_init(&sc->sysctl_ctx);
 	sc->sysctl_tree = SYSCTL_ADD_NODE(&sc->sysctl_ctx,
 	    SYSCTL_CHILDREN(acpi_sc->acpi_sysctl_tree), OID_AUTO,
-	    "panasonic", CTLFLAG_RD, 0, "");
+	    "panasonic", CTLFLAG_RD | CTLFLAG_MPSAFE, 0, "");
 	for (i = 0; sysctl_table[i].name != NULL; i++) {
 		SYSCTL_ADD_PROC(&sc->sysctl_ctx,
 		    SYSCTL_CHILDREN(sc->sysctl_tree), OID_AUTO,
 		    sysctl_table[i].name,
-		    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY,
-		    sc, i, acpi_panasonic_sysctl, "I", "");
+		    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY |
+		    CTLFLAG_NEEDGIANT, sc, i, acpi_panasonic_sysctl, "I", "");
 	}
 
 #if 0

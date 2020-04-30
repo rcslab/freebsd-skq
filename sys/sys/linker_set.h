@@ -42,8 +42,11 @@
  * For ELF, this is done by constructing a separate segment for each set.
  */
 
-#if defined(__powerpc64__)
+#if defined(__powerpc64__) && (!defined(_CALL_ELF) || _CALL_ELF == 1)
 /*
+ * ELFv1 pointers to functions are actaully pointers to function
+ * descriptors.
+ *
  * Move the symbol pointer from ".text" to ".data" segment, to make
  * the GCC compiler happy:
  */
@@ -61,6 +64,7 @@
 	__GLOBL(__CONCAT(__stop_set_,set));		\
 	static void const * qv				\
 	__set_##set##_sym_##sym __section("set_" #set)	\
+	__nosanitizeaddress				\
 	__used = &(sym)
 #define __MAKE_SET(set, sym)	__MAKE_SET_QV(set, sym, __MAKE_SET_CONST)
 #else /* !__GNUCLIKE___SECTION */

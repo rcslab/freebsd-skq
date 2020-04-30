@@ -53,7 +53,7 @@ extern struct sysent cloudabi32_sysent[];
 extern unsigned long ia32_maxssiz;
 
 static int
-cloudabi32_fixup_tcb(register_t **stack_base, struct image_params *imgp)
+cloudabi32_fixup_tcb(uintptr_t *stack_base, struct image_params *imgp)
 {
 	int error;
 	uint32_t args[2];
@@ -73,16 +73,16 @@ cloudabi32_fixup_tcb(register_t **stack_base, struct image_params *imgp)
 	 * refer to the auxiliary vector, which is stored right after
 	 * the TCB.
 	 */
-	args[0] = (uintptr_t)*stack_base;
-	args[1] = (uintptr_t)*stack_base +
+	args[0] = *stack_base;
+	args[1] = *stack_base +
 	    roundup(sizeof(cloudabi32_tcb_t), sizeof(register_t));
-	*stack_base -= howmany(sizeof(args), sizeof(register_t));
-	return (copyout(args, *stack_base, sizeof(args)));
+	*stack_base -= roundup2(sizeof(args), sizeof(register_t));
+	return (copyout(args, (void *)*stack_base, sizeof(args)));
 }
 
 static void
 cloudabi32_proc_setregs(struct thread *td, struct image_params *imgp,
-    unsigned long stack)
+    uintptr_t stack)
 {
 
 	ia32_setregs(td, imgp, stack);
@@ -210,7 +210,6 @@ static struct sysentvec cloudabi32_elf_sysvec = {
 	.sv_fixup		= cloudabi32_fixup_tcb,
 	.sv_name		= "CloudABI ELF32",
 	.sv_coredump		= elf32_coredump,
-	.sv_pagesize		= IA32_PAGE_SIZE,
 	.sv_minuser		= FREEBSD32_MINUSER,
 	.sv_maxuser		= FREEBSD32_MAXUSER,
 	.sv_stackprot		= VM_PROT_READ | VM_PROT_WRITE,

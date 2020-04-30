@@ -605,7 +605,7 @@ zfsctl_relock_dot(vnode_t *dvp, int ltype)
 			vn_lock(dvp, LK_DOWNGRADE | LK_RETRY);
 
 		/* Relock for the "." case may left us with reclaimed vnode. */
-		if ((dvp->v_iflag & VI_DOOMED) != 0) {
+		if (VN_IS_DOOMED(dvp)) {
 			vrele(dvp);
 			return (SET_ERROR(ENOENT));
 		}
@@ -721,7 +721,7 @@ zfsctl_root_vptocnp(struct vop_vptocnp_args *ap)
 	if (error != 0)
 		return (SET_ERROR(error));
 
-	VOP_UNLOCK(dvp, 0);
+	VOP_UNLOCK(dvp);
 	*ap->a_vpp = dvp;
 	*ap->a_buflen -= sizeof (dotzfs_name);
 	bcopy(dotzfs_name, ap->a_buf + *ap->a_buflen, sizeof (dotzfs_name));
@@ -753,10 +753,6 @@ zfsctl_common_pathconf(ap)
 
 	case _PC_MIN_HOLE_SIZE:
 		*ap->a_retval = (int)SPA_MINBLOCKSIZE;
-		return (0);
-
-	case _PC_ACL_EXTENDED:
-		*ap->a_retval = 0;
 		return (0);
 
 	case _PC_ACL_NFS4:
@@ -830,6 +826,7 @@ static struct vop_vector zfsctl_ops_root = {
 	.vop_pathconf =	zfsctl_common_pathconf,
 	.vop_getacl =	zfsctl_common_getacl,
 };
+VFS_VOP_VECTOR_REGISTER(zfsctl_ops_root);
 
 static int
 zfsctl_snapshot_zname(vnode_t *vp, const char *name, int len, char *zname)
@@ -1163,6 +1160,7 @@ static struct vop_vector zfsctl_ops_snapdir = {
 	.vop_pathconf =	zfsctl_common_pathconf,
 	.vop_getacl =	zfsctl_common_getacl,
 };
+VFS_VOP_VECTOR_REGISTER(zfsctl_ops_snapdir);
 
 static int
 zfsctl_snapshot_inactive(ap)
@@ -1200,6 +1198,7 @@ zfsctl_snapshot_vptocnp(struct vop_vptocnp_args *ap)
 	vnode_t *vp;
 	sfs_node_t *node;
 	size_t len;
+	enum vgetstate vs;
 	int locked;
 	int error;
 
@@ -1228,19 +1227,19 @@ zfsctl_snapshot_vptocnp(struct vop_vptocnp_args *ap)
 	 * before we can lock the vnode again.
 	 */
 	locked = VOP_ISLOCKED(vp);
-	vhold(vp);
+	vs = vget_prep(vp);
 	vput(vp);
 
 	/* Look up .zfs/snapshot, our parent. */
 	error = zfsctl_snapdir_vnode(vp->v_mount, NULL, LK_SHARED, &dvp);
 	if (error == 0) {
-		VOP_UNLOCK(dvp, 0);
+		VOP_UNLOCK(dvp);
 		*ap->a_vpp = dvp;
 		*ap->a_buflen -= len;
 		bcopy(node->sn_name, ap->a_buf + *ap->a_buflen, len);
 	}
 	vfs_unbusy(mp);
-	vget(vp, locked | LK_VNHELD | LK_RETRY, curthread);
+	vget_finish(vp, locked | LK_RETRY, vs);
 	return (error);
 }
 
@@ -1251,6 +1250,7 @@ zfsctl_snapshot_vptocnp(struct vop_vptocnp_args *ap)
 static struct vop_vector zfsctl_ops_snapshot = {
 	.vop_default =		NULL, /* ensure very restricted access */
 	.vop_inactive =		zfsctl_snapshot_inactive,
+	.vop_need_inactive =	vop_stdneed_inactive,
 	.vop_reclaim =		zfsctl_snapshot_reclaim,
 	.vop_vptocnp =		zfsctl_snapshot_vptocnp,
 	.vop_lock1 =		vop_stdlock,
@@ -1259,6 +1259,7 @@ static struct vop_vector zfsctl_ops_snapshot = {
 	.vop_advlockpurge =	vop_stdadvlockpurge, /* called by vgone */
 	.vop_print =		zfsctl_common_print,
 };
+VFS_VOP_VECTOR_REGISTER(zfsctl_ops_snapshot);
 
 int
 zfsctl_lookup_objset(vfs_t *vfsp, uint64_t objsetid, zfsvfs_t **zfsvfsp)

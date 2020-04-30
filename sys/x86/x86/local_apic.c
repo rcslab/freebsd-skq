@@ -1,9 +1,9 @@
 /*-
  * SPDX-License-Identifier: BSD-3-Clause
  *
- * Copyright (c) 2003 John Baldwin <jhb@FreeBSD.org>
  * Copyright (c) 1996, by Steve Passe
  * All rights reserved.
+ * Copyright (c) 2003 John Baldwin <jhb@FreeBSD.org>
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -130,7 +130,7 @@ struct lvt {
 
 struct lapic {
 	struct lvt la_lvts[APIC_LVT_MAX + 1];
-	struct lvt la_elvts[APIC_ELVT_MAX + 1];;
+	struct lvt la_elvts[APIC_ELVT_MAX + 1];
 	u_int la_id:8;
 	u_int la_cluster:4;
 	u_int la_cluster_id:2;
@@ -204,7 +204,8 @@ static uint64_t lapic_ipi_wait_mult;
 #endif
 unsigned int max_apic_id;
 
-SYSCTL_NODE(_hw, OID_AUTO, apic, CTLFLAG_RD, 0, "APIC options");
+SYSCTL_NODE(_hw, OID_AUTO, apic, CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
+    "APIC options");
 SYSCTL_INT(_hw_apic, OID_AUTO, x2apic_mode, CTLFLAG_RD, &x2apic_mode, 0, "");
 SYSCTL_INT(_hw_apic, OID_AUTO, eoi_suppression, CTLFLAG_RD,
     &lapic_eoi_suppression, 0, "");
@@ -480,8 +481,8 @@ native_lapic_init(vm_paddr_t addr)
 	uint64_t r, r1, r2, rx;
 #endif
 	uint32_t ver;
-	u_int regs[4];
-	int i, arat;
+	int i;
+	bool arat;
 
 	/*
 	 * Enable x2APIC mode if possible. Map the local APIC
@@ -526,16 +527,9 @@ native_lapic_init(vm_paddr_t addr)
 	    SDT_APIC, SEL_KPL, GSEL_APIC);
 
 	if ((resource_int_value("apic", 0, "clock", &i) != 0 || i != 0)) {
-		arat = 0;
-		/* Intel CPUID 0x06 EAX[2] set if APIC timer runs in C3. */
-		if (cpu_vendor_id == CPU_VENDOR_INTEL && cpu_high >= 6) {
-			do_cpuid(0x06, regs);
-			if ((regs[0] & CPUTPM1_ARAT) != 0)
-				arat = 1;
-		} else if (cpu_vendor_id == CPU_VENDOR_AMD &&
-		    CPUID_TO_FAMILY(cpu_id) >= 0x12) {
-			arat = 1;
-		}
+		/* Set if APIC timer runs in C3. */
+		arat = (cpu_power_eax & CPUTPM1_ARAT);
+
 		bzero(&lapic_et, sizeof(lapic_et));
 		lapic_et.et_name = "LAPIC";
 		lapic_et.et_flags = ET_FLAGS_PERIODIC | ET_FLAGS_ONESHOT |
@@ -676,7 +670,8 @@ amd_read_ext_features(void)
 {
 	uint32_t version;
 
-	if (cpu_vendor_id != CPU_VENDOR_AMD)
+	if (cpu_vendor_id != CPU_VENDOR_AMD &&
+	    cpu_vendor_id != CPU_VENDOR_HYGON)
 		return (0);
 	version = lapic_read32(LAPIC_VERSION);
 	if ((version & APIC_VER_AMD_EXT_SPACE) != 0)
@@ -2083,7 +2078,7 @@ native_lapic_ipi_vectored(u_int vector, int dest)
 
 	/* Wait for an earlier IPI to finish. */
 	if (!lapic_ipi_wait(BEFORE_SPIN)) {
-		if (panicstr != NULL)
+		if (KERNEL_PANICKED())
 			return;
 		else
 			panic("APIC: Previous IPI is stuck");

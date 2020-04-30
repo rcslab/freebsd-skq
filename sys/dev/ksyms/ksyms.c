@@ -191,6 +191,7 @@ ksyms_add(linker_file_t lf, void *arg)
 	size_t len, numsyms, strsz, symsz;
 	linker_symval_t symval;
 	int error, i, nsyms;
+	bool fixup;
 
 	buf = malloc(SYMBLKSZ, M_KSYMS, M_WAITOK);
 	to = arg;
@@ -200,6 +201,12 @@ ksyms_add(linker_file_t lf, void *arg)
 	numsyms =  LINKER_SYMTAB_GET(lf, &symtab);
 	strsz = LINKER_STRTAB_GET(lf, &strtab);
 	symsz = numsyms * sizeof(Elf_Sym);
+
+#ifdef __powerpc__
+	fixup = true;
+#else
+	fixup = lf->id > 1;
+#endif
 
 	while (symsz > 0) {
 		len = min(SYMBLKSZ, symsz);
@@ -214,7 +221,7 @@ ksyms_add(linker_file_t lf, void *arg)
 		nsyms = len / sizeof(Elf_Sym);
 		for (i = 0; i < nsyms; i++) {
 			symp[i].st_name += to->to_stridx;
-			if (lf->id > 1 && LINKER_SYMBOL_VALUES(lf,
+			if (fixup && LINKER_SYMBOL_VALUES(lf,
 			    (c_linker_sym_t)&symtab[i], &symval) == 0) {
 				symp[i].st_value = (uintptr_t)symval.value;
 			}
@@ -397,6 +404,7 @@ ksyms_open(struct cdev *dev, int flags, int fmt __unused, struct thread *td)
 {
 	struct tsizes ts;
 	struct ksyms_softc *sc;
+	vm_object_t object;
 	vm_size_t elfsz;
 	int error, try;
 
@@ -434,8 +442,9 @@ ksyms_open(struct cdev *dev, int flags, int fmt __unused, struct thread *td)
 		ksyms_size_calc(&ts);
 		elfsz = sizeof(struct ksyms_hdr) + ts.ts_symsz + ts.ts_strsz;
 
-		sc->sc_obj = vm_object_allocate(OBJT_DEFAULT,
+		object = vm_object_allocate(OBJT_PHYS,
 		    OFF_TO_IDX(round_page(elfsz)));
+		sc->sc_obj = object;
 		sc->sc_objsz = elfsz;
 
 		error = ksyms_snapshot(sc, &ts);

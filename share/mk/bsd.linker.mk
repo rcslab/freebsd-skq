@@ -50,8 +50,8 @@ _can_export=	no
 .endfor
 .if ${_can_export} == yes
 .for var in ${_exported_vars}
-.if defined(${var}.${${X_}_ld_hash})
-${var}=	${${var}.${${X_}_ld_hash}}
+.if defined(${var}__${${X_}_ld_hash})
+${var}=	${${var}__${${X_}_ld_hash}}
 .endif
 .endfor
 .endif
@@ -65,19 +65,21 @@ _ld_version!=	(${${ld}} --version || echo none) | sed -n 1p
 .if ${_ld_version:[1..2]} == "GNU ld"
 ${X_}LINKER_TYPE=	bfd
 ${X_}LINKER_FREEBSD_VERSION=	0
-_v=	${_ld_version:M[1-9].[0-9]*:[1]}
+_v=	${_ld_version:M[1-9]*.[0-9]*:[1]}
 .elif ${_ld_version:[1]} == "LLD"
 ${X_}LINKER_TYPE=	lld
 _v=	${_ld_version:[2]}
-${X_}LINKER_FREEBSD_VERSION!= \
-	${${ld}} --version | \
-	awk '$$3 ~ /FreeBSD/ {print substr($$4, 1, length($$4)-1)}'
+.if ${_ld_version:[3]} == "(FreeBSD"
+${X_}LINKER_FREEBSD_VERSION:=	${_ld_version:[4]:C/.*-([^-]*)\)/\1/}
+.else
+${X_}LINKER_FREEBSD_VERSION=	0
+.endif
 .else
 .warning Unknown linker from ${ld}=${${ld}}: ${_ld_version}, defaulting to bfd
 ${X_}LINKER_TYPE=	bfd
 _v=	2.17.50
 .endif
-${X_}LINKER_VERSION!=	echo "${_v:M[1-9].[0-9]*}" | \
+${X_}LINKER_VERSION!=	echo "${_v:M[1-9]*.[0-9]*}" | \
 			  awk -F. '{print $$1 * 10000 + $$2 * 100 + $$3;}'
 .undef _ld_version
 .undef _v
@@ -85,6 +87,9 @@ ${X_}LINKER_FEATURES=
 .if ${${X_}LINKER_TYPE} != "bfd" || ${${X_}LINKER_VERSION} > 21750
 ${X_}LINKER_FEATURES+=	build-id
 ${X_}LINKER_FEATURES+=	ifunc
+.endif
+.if ${${X_}LINKER_TYPE} == "bfd" && ${${X_}LINKER_VERSION} > 21750
+${X_}LINKER_FEATURES+=	riscv-relaxations
 .endif
 .if ${${X_}LINKER_TYPE} == "lld" && ${${X_}LINKER_VERSION} >= 60000
 ${X_}LINKER_FEATURES+=	retpoline
@@ -101,9 +106,9 @@ X_LINKER_FREEBSD_VERSION= ${LINKER_FREEBSD_VERSION}
 # Export the values so sub-makes don't have to look them up again, using the
 # hash key computed above.
 .for var in ${_exported_vars}
-${var}.${${X_}_ld_hash}:=	${${var}}
-.export-env ${var}.${${X_}_ld_hash}
-.undef ${var}.${${X_}_ld_hash}
+${var}__${${X_}_ld_hash}:=	${${var}}
+.export-env ${var}__${${X_}_ld_hash}
+.undef ${var}__${${X_}_ld_hash}
 .endfor
 
 .endif	# ${ld} == "LD" || !empty(XLD)

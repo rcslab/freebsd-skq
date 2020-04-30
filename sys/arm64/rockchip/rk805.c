@@ -2,7 +2,6 @@
  * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
  *
  * Copyright (c) 2018 Emmanuel Vadot <manu@FreeBSD.org>
- * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -51,6 +50,9 @@ __FBSDID("$FreeBSD$");
 
 MALLOC_DEFINE(M_RK805_REG, "RK805 regulator", "RK805 power regulator");
 
+/* #define	dprintf(sc, format, arg...)	device_printf(sc->base_dev, "%s: " format, __func__, arg) */
+#define	dprintf(sc, format, arg...)
+
 enum rk_pmic_type {
 	RK805 = 1,
 	RK808,
@@ -83,6 +85,11 @@ struct rk805_reg_sc {
 	struct regnode_std_param *param;
 };
 
+struct reg_list {
+	TAILQ_ENTRY(reg_list)	next;
+	struct rk805_reg_sc	*reg;
+};
+
 struct rk805_softc {
 	device_t		dev;
 	struct mtx		mtx;
@@ -91,9 +98,14 @@ struct rk805_softc {
 	struct intr_config_hook	intr_hook;
 	enum rk_pmic_type	type;
 
-	struct rk805_reg_sc	**regs;
+	TAILQ_HEAD(, reg_list)		regs;
 	int			nregs;
 };
+
+static int rk805_regnode_status(struct regnode *regnode, int *status);
+static int rk805_regnode_set_voltage(struct regnode *regnode, int min_uvolt,
+    int max_uvolt, int *udelay);
+static int rk805_regnode_get_voltage(struct regnode *regnode, int *uvolt);
 
 static struct rk805_regdef rk805_regdefs[] = {
 	{
@@ -138,6 +150,42 @@ static struct rk805_regdef rk805_regdefs[] = {
 		.voltage_step = 100000,
 		.voltage_nstep = 28,
 	},
+	{
+		.id = RK805_LDO1,
+		.name = "LDO_REG1",
+		.enable_reg = RK805_LDO_EN,
+		.enable_mask = 0x11,
+		.voltage_reg = RK805_LDO1_ON_VSEL,
+		.voltage_mask = 0x1F,
+		.voltage_min = 800000,
+		.voltage_max = 3400000,
+		.voltage_step = 100000,
+		.voltage_nstep = 27,
+	},
+	{
+		.id = RK805_LDO2,
+		.name = "LDO_REG2",
+		.enable_reg = RK805_LDO_EN,
+		.enable_mask = 0x22,
+		.voltage_reg = RK805_LDO2_ON_VSEL,
+		.voltage_mask = 0x1F,
+		.voltage_min = 800000,
+		.voltage_max = 3400000,
+		.voltage_step = 100000,
+		.voltage_nstep = 27,
+	},
+	{
+		.id = RK805_LDO3,
+		.name = "LDO_REG3",
+		.enable_reg = RK805_LDO_EN,
+		.enable_mask = 0x44,
+		.voltage_reg = RK805_LDO3_ON_VSEL,
+		.voltage_mask = 0x1F,
+		.voltage_min = 800000,
+		.voltage_max = 3400000,
+		.voltage_step = 100000,
+		.voltage_nstep = 27,
+	},
 };
 
 static struct rk805_regdef rk808_regdefs[] = {
@@ -166,6 +214,7 @@ static struct rk805_regdef rk808_regdefs[] = {
 		.voltage_nstep = 64,
 	},
 	{
+		/* BUCK3 voltage is calculated based on external resistor */
 		.id = RK805_DCDC3,
 		.name = "DCDC_REG3",
 		.enable_reg = RK805_DCDC_EN,
@@ -183,35 +232,171 @@ static struct rk805_regdef rk808_regdefs[] = {
 		.voltage_step = 100000,
 		.voltage_nstep = 16,
 	},
+	{
+		.id = RK808_LDO1,
+		.name = "LDO_REG1",
+		.enable_reg = RK808_LDO_EN,
+		.enable_mask = 0x1,
+		.voltage_reg = RK805_LDO1_ON_VSEL,
+		.voltage_mask = 0x1F,
+		.voltage_min = 1800000,
+		.voltage_max = 3400000,
+		.voltage_step = 100000,
+		.voltage_nstep = 17,
+	},
+	{
+		.id = RK808_LDO2,
+		.name = "LDO_REG2",
+		.enable_reg = RK808_LDO_EN,
+		.enable_mask = 0x2,
+		.voltage_reg = RK805_LDO2_ON_VSEL,
+		.voltage_mask = 0x1F,
+		.voltage_min = 1800000,
+		.voltage_max = 3400000,
+		.voltage_step = 100000,
+		.voltage_nstep = 17,
+	},
+	{
+		.id = RK808_LDO3,
+		.name = "LDO_REG3",
+		.enable_reg = RK808_LDO_EN,
+		.enable_mask = 0x4,
+		.voltage_reg = RK805_LDO3_ON_VSEL,
+		.voltage_mask = 0xF,
+		.voltage_min = 800000,
+		.voltage_max = 2500000,
+		.voltage_step = 100000,
+		.voltage_nstep = 18,
+	},
+	{
+		.id = RK808_LDO4,
+		.name = "LDO_REG4",
+		.enable_reg = RK808_LDO_EN,
+		.enable_mask = 0x8,
+		.voltage_reg = RK808_LDO4_ON_VSEL,
+		.voltage_mask = 0x1F,
+		.voltage_min = 1800000,
+		.voltage_max = 3400000,
+		.voltage_step = 100000,
+		.voltage_nstep = 17,
+	},
+	{
+		.id = RK808_LDO5,
+		.name = "LDO_REG5",
+		.enable_reg = RK808_LDO_EN,
+		.enable_mask = 0x10,
+		.voltage_reg = RK808_LDO5_ON_VSEL,
+		.voltage_mask = 0x1F,
+		.voltage_min = 1800000,
+		.voltage_max = 3400000,
+		.voltage_step = 100000,
+		.voltage_nstep = 17,
+	},
+	{
+		.id = RK808_LDO6,
+		.name = "LDO_REG6",
+		.enable_reg = RK808_LDO_EN,
+		.enable_mask = 0x20,
+		.voltage_reg = RK808_LDO6_ON_VSEL,
+		.voltage_mask = 0x1F,
+		.voltage_min = 800000,
+		.voltage_max = 2500000,
+		.voltage_step = 100000,
+		.voltage_nstep = 18,
+	},
+	{
+		.id = RK808_LDO7,
+		.name = "LDO_REG7",
+		.enable_reg = RK808_LDO_EN,
+		.enable_mask = 0x40,
+		.voltage_reg = RK808_LDO7_ON_VSEL,
+		.voltage_mask = 0x1F,
+		.voltage_min = 800000,
+		.voltage_max = 2500000,
+		.voltage_step = 100000,
+		.voltage_nstep = 18,
+	},
+	{
+		.id = RK808_LDO8,
+		.name = "LDO_REG8",
+		.enable_reg = RK808_LDO_EN,
+		.enable_mask = 0x80,
+		.voltage_reg = RK808_LDO8_ON_VSEL,
+		.voltage_mask = 0x1F,
+		.voltage_min = 1800000,
+		.voltage_max = 3400000,
+		.voltage_step = 100000,
+		.voltage_nstep = 17,
+	},
+	{
+		.id = RK808_SWITCH1,
+		.name = "SWITCH_REG1",
+		.enable_reg = RK805_DCDC_EN,
+		.enable_mask = 0x20,
+		.voltage_min = 3000000,
+		.voltage_max = 3000000,
+	},
+	{
+		.id = RK808_SWITCH2,
+		.name = "SWITCH_REG2",
+		.enable_reg = RK805_DCDC_EN,
+		.enable_mask = 0x40,
+		.voltage_min = 3000000,
+		.voltage_max = 3000000,
+	},
 };
 
 static int
 rk805_read(device_t dev, uint8_t reg, uint8_t *data, uint8_t size)
 {
+	int err;
 
-	return (iicdev_readfrom(dev, reg, data, size, IIC_INTRWAIT));
+	err = iicdev_readfrom(dev, reg, data, size, IIC_INTRWAIT);
+	return (err);
 }
 
 static int
 rk805_write(device_t dev, uint8_t reg, uint8_t data)
 {
-	struct iic_msg msg;
-	uint8_t buf[2];
 
-	buf[0] = reg;
-	buf[1] = data;
-	msg.slave = iicbus_get_addr(dev);
-	msg.flags = IIC_M_WR;
-	msg.buf = buf;
-	msg.len = sizeof(buf);
-
-	return (iicbus_transfer_excl(dev, &msg, 1, IIC_INTRWAIT));
+	return (iicdev_writeto(dev, reg, &data, 1, IIC_INTRWAIT));
 }
 
 static int
 rk805_regnode_init(struct regnode *regnode)
 {
-	return (0);
+	struct rk805_reg_sc *sc;
+	struct regnode_std_param *param;
+	int rv, udelay, uvolt, status;
+
+	sc = regnode_get_softc(regnode);
+	dprintf(sc, "Regulator %s init called\n", sc->def->name);
+	param = regnode_get_stdparam(regnode);
+	if (param->min_uvolt == 0)
+		return (0);
+
+	/* Check that the regulator is preset to the correct voltage */
+	rv  = rk805_regnode_get_voltage(regnode, &uvolt);
+	if (rv != 0)
+		return(rv);
+
+	if (uvolt >= param->min_uvolt && uvolt <= param->max_uvolt)
+		return(0);
+	/* 
+	 * Set the regulator at the correct voltage if it is not enabled.
+	 * Do not enable it, this is will be done either by a
+	 * consumer or by regnode_set_constraint if boot_on is true
+	 */
+	rv = rk805_regnode_status(regnode, &status);
+	if (rv != 0 || status == REGULATOR_STATUS_ENABLED)
+		return (rv);
+
+	rv = rk805_regnode_set_voltage(regnode, param->min_uvolt,
+	    param->max_uvolt, &udelay);
+	if (udelay != 0)
+		DELAY(udelay);
+
+	return (rv);
 }
 
 static int
@@ -222,6 +407,9 @@ rk805_regnode_enable(struct regnode *regnode, bool enable, int *udelay)
 
 	sc = regnode_get_softc(regnode);
 
+	dprintf(sc, "%sabling regulator %s\n",
+	    enable ? "En" : "Dis",
+	    sc->def->name);
 	rk805_read(sc->base_dev, sc->def->enable_reg, &val, 1);
 	if (enable)
 		val |= sc->def->enable_mask;
@@ -267,29 +455,52 @@ rk805_regnode_voltage_to_reg(struct rk805_reg_sc *sc, int min_uvolt,
 }
 
 static int
-rk805_regnode_set_voltage(struct regnode *regnode, int min_uvolt,
-    int max_uvolt, int *udelay)
+rk805_regnode_status(struct regnode *regnode, int *status)
 {
 	struct rk805_reg_sc *sc;
 	uint8_t val;
 
 	sc = regnode_get_softc(regnode);
 
+	*status = 0;
+	rk805_read(sc->base_dev, sc->def->enable_reg, &val, 1);
+	if (val & sc->def->enable_mask)
+		*status = REGULATOR_STATUS_ENABLED;
+
+	return (0);
+}
+
+static int
+rk805_regnode_set_voltage(struct regnode *regnode, int min_uvolt,
+    int max_uvolt, int *udelay)
+{
+	struct rk805_reg_sc *sc;
+	uint8_t val;
+	int uvolt;
+
+	sc = regnode_get_softc(regnode);
+
 	if (!sc->def->voltage_step)
 		return (ENXIO);
 
+	dprintf(sc, "Setting %s to %d<->%d uvolts\n",
+	    sc->def->name,
+	    min_uvolt,
+	    max_uvolt);
 	rk805_read(sc->base_dev, sc->def->voltage_reg, &val, 1);
-	printf("rk805_set_voltage: Current value for %x: %x\n", sc->def->voltage_reg, val);
 	if (rk805_regnode_voltage_to_reg(sc, min_uvolt, max_uvolt, &val) != 0)
 		return (ERANGE);
 
-	printf("rk805_set_voltage: Setting %x to %x\n", sc->def->voltage_reg, val);
 	rk805_write(sc->base_dev, sc->def->voltage_reg, val);
 
 	rk805_read(sc->base_dev, sc->def->voltage_reg, &val, 1);
-	printf("rk805_set_voltage: Set value for %x: %x\n", sc->def->voltage_reg, val);
 
 	*udelay = 0;
+
+	rk805_regnode_reg_to_voltage(sc, val, &uvolt);
+	dprintf(sc, "Regulator %s set to %d uvolt\n",
+	  sc->def->name,
+	  uvolt);
 
 	return (0);
 }
@@ -302,11 +513,20 @@ rk805_regnode_get_voltage(struct regnode *regnode, int *uvolt)
 
 	sc = regnode_get_softc(regnode);
 
+	if (sc->def->voltage_min ==  sc->def->voltage_max) {
+		*uvolt = sc->def->voltage_min;
+		return (0);
+	}
+
 	if (!sc->def->voltage_step)
 		return (ENXIO);
 
 	rk805_read(sc->base_dev, sc->def->voltage_reg, &val, 1);
 	rk805_regnode_reg_to_voltage(sc, val & sc->def->voltage_mask, uvolt);
+
+	dprintf(sc, "Regulator %s is at %d uvolt\n",
+	  sc->def->name,
+	  *uvolt);
 
 	return (0);
 }
@@ -315,8 +535,10 @@ static regnode_method_t rk805_regnode_methods[] = {
 	/* Regulator interface */
 	REGNODEMETHOD(regnode_init,		rk805_regnode_init),
 	REGNODEMETHOD(regnode_enable,		rk805_regnode_enable),
+	REGNODEMETHOD(regnode_status,		rk805_regnode_status),
 	REGNODEMETHOD(regnode_set_voltage,	rk805_regnode_set_voltage),
 	REGNODEMETHOD(regnode_get_voltage,	rk805_regnode_get_voltage),
+	REGNODEMETHOD(regnode_check_voltage,	regnode_method_check_voltage),
 	REGNODEMETHOD_END
 };
 DEFINE_CLASS_1(rk805_regnode, rk805_regnode_class, rk805_regnode_methods,
@@ -341,6 +563,7 @@ rk805_reg_attach(device_t dev, phandle_t node,
 		initdef.std_param.max_uvolt = def->voltage_max;
 	initdef.id = def->id;
 	initdef.ofw_node = node;
+
 	regnode = regnode_create(dev, &rk805_regnode_class, &initdef);
 	if (regnode == NULL) {
 		device_printf(dev, "cannot create regulator\n");
@@ -410,6 +633,7 @@ rk805_attach(device_t dev)
 	struct rk805_softc *sc;
 	struct rk805_reg_sc *reg;
 	struct rk805_regdef *regdefs;
+	struct reg_list *regp;
 	phandle_t rnode, child;
 	int i;
 
@@ -421,9 +645,6 @@ rk805_attach(device_t dev)
 	if (config_intrhook_establish(&sc->intr_hook) != 0)
 		return (ENOMEM);
 
-	sc->regs = malloc(sizeof(struct rk805_reg_sc *) * sc->nregs,
-	    M_RK805_REG, M_WAITOK | M_ZERO);
-
 	sc->type = ofw_bus_search_compatible(dev, compat_data)->ocd_data;
 	switch (sc->type) {
 	case RK805:
@@ -434,7 +655,12 @@ rk805_attach(device_t dev)
 		regdefs = rk808_regdefs;
 		sc->nregs = nitems(rk808_regdefs);
 		break;
+	default:
+		device_printf(dev, "Unknown type %d\n", sc->type);
+		return (ENXIO);
 	}
+
+	TAILQ_INIT(&sc->regs);
 
 	rnode = ofw_bus_find_child(ofw_bus_get_node(dev), "regulators");
 	if (rnode > 0) {
@@ -443,6 +669,8 @@ rk805_attach(device_t dev)
 			    regdefs[i].name);
 			if (child == 0)
 				continue;
+			if (OF_hasprop(child, "regulator-name") != 1)
+				continue;
 			reg = rk805_reg_attach(dev, child, &regdefs[i]);
 			if (reg == NULL) {
 				device_printf(dev,
@@ -450,7 +678,9 @@ rk805_attach(device_t dev)
 				    regdefs[i].name);
 				continue;
 			}
-			sc->regs[i] = reg;
+			regp = malloc(sizeof(*regp), M_DEVBUF, M_WAITOK | M_ZERO);
+			regp->reg = reg;
+			TAILQ_INSERT_TAIL(&sc->regs, regp, next);
 			if (bootverbose)
 				device_printf(dev, "Regulator %s attached\n",
 				    regdefs[i].name);
@@ -468,11 +698,32 @@ rk805_detach(device_t dev)
 	return (EBUSY);
 }
 
+static int
+rk805_map(device_t dev, phandle_t xref, int ncells,
+    pcell_t *cells, intptr_t *id)
+{
+	struct rk805_softc *sc;
+	struct reg_list *regp;
+
+	sc = device_get_softc(dev);
+
+	TAILQ_FOREACH(regp, &sc->regs, next) {
+		if (regp->reg->xref == xref) {
+			*id = regp->reg->def->id;
+			return (0);
+		}
+	}
+
+	return (ERANGE);
+}
+
 static device_method_t rk805_methods[] = {
 	DEVMETHOD(device_probe,		rk805_probe),
 	DEVMETHOD(device_attach,	rk805_attach),
 	DEVMETHOD(device_detach,	rk805_detach),
 
+	/* regdev interface */
+	DEVMETHOD(regdev_map,		rk805_map),
 	DEVMETHOD_END
 };
 

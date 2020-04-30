@@ -81,13 +81,18 @@
 
 /* ARM Part numbers */
 #define	CPU_PART_FOUNDATION	0xD00
-#define	CPU_PART_CORTEX_A35	0xD04
 #define	CPU_PART_CORTEX_A53	0xD03
+#define	CPU_PART_CORTEX_A35	0xD04
 #define	CPU_PART_CORTEX_A55	0xD05
+#define	CPU_PART_CORTEX_A65	0xD06
 #define	CPU_PART_CORTEX_A57	0xD07
 #define	CPU_PART_CORTEX_A72	0xD08
 #define	CPU_PART_CORTEX_A73	0xD09
 #define	CPU_PART_CORTEX_A75	0xD0A
+#define	CPU_PART_CORTEX_A76	0xD0B
+#define	CPU_PART_NEOVERSE_N1	0xD0C
+#define	CPU_PART_CORTEX_A77	0xD0D
+#define	CPU_PART_CORTEX_A76AE	0xD0E
 
 /* Cavium Part numbers */
 #define	CPU_PART_THUNDERX	0x0A1
@@ -99,6 +104,9 @@
 #define	CPU_REV_THUNDERX_1_1	0x01
 
 #define	CPU_REV_THUNDERX2_0	0x00
+
+/* APM / Ampere Part Number */
+#define CPU_PART_EMAG8180	0x000
 
 #define	CPU_IMPL(midr)	(((midr) >> 24) & 0xff)
 #define	CPU_PART(midr)	(((midr) >> 4) & 0xfff)
@@ -158,9 +166,9 @@ extern uint64_t __cpu_affinity[];
 void	cpu_halt(void) __dead2;
 void	cpu_reset(void) __dead2;
 void	fork_trampoline(void);
+void	identify_cache(uint64_t);
 void	identify_cpu(void);
 void	install_cpu_errata(void);
-void	print_cpu_features(u_int);
 void	swi_vm(void *v);
 
 #define	CPU_AFFINITY(cpu)	__cpu_affinity[(cpu)]

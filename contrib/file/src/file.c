@@ -32,7 +32,7 @@
 #include "file.h"
 
 #ifndef	lint
-FILE_RCSID("@(#)$File: file.c,v 1.175 2018/03/02 16:11:37 christos Exp $")
+FILE_RCSID("@(#)$File: file.c,v 1.184 2019/08/03 11:51:59 christos Exp $")
 #endif	/* lint */
 
 #include "magic.h"
@@ -76,13 +76,7 @@ int getopt_long(int, char * const *, const char *,
 # define IFLNK_L ""
 #endif
 
-#ifdef HAVE_LIBSECCOMP
-# define SECCOMP_S "S"
-#else
-# define SECCOMP_S ""
-#endif
-
-#define FILE_FLAGS	"bcCdE" IFLNK_h "ik" IFLNK_L "lNnprs" SECCOMP_S "vzZ0"
+#define FILE_FLAGS	"bcCdE" IFLNK_h "ik" IFLNK_L "lNnprsSvzZ0"
 #define OPTSTRING	"bcCde:Ef:F:hiklLm:nNpP:rsSvzZ0"
 
 # define USAGE  \
@@ -124,10 +118,12 @@ private const struct {
 	{ "ascii",	MAGIC_NO_CHECK_ASCII },
 	{ "cdf",	MAGIC_NO_CHECK_CDF },
 	{ "compress",	MAGIC_NO_CHECK_COMPRESS },
+	{ "csv",	MAGIC_NO_CHECK_CSV },
 	{ "elf",	MAGIC_NO_CHECK_ELF },
 	{ "encoding",	MAGIC_NO_CHECK_ENCODING },
 	{ "soft",	MAGIC_NO_CHECK_SOFT },
 	{ "tar",	MAGIC_NO_CHECK_TAR },
+	{ "json",	MAGIC_NO_CHECK_JSON },
 	{ "text",	MAGIC_NO_CHECK_TEXT },	/* synonym for ascii */
 	{ "tokens",	MAGIC_NO_CHECK_TOKENS }, /* OBSOLETE: ignored for backwards compatibility */
 };
@@ -136,14 +132,15 @@ private struct {
 	const char *name;
 	int tag;
 	size_t value;
+	int set;
 } pm[] = {
-	{ "indir",	MAGIC_PARAM_INDIR_MAX, 0 },
-	{ "name",	MAGIC_PARAM_NAME_MAX, 0 },
-	{ "elf_phnum",	MAGIC_PARAM_ELF_PHNUM_MAX, 0 },
-	{ "elf_shnum",	MAGIC_PARAM_ELF_SHNUM_MAX, 0 },
-	{ "elf_notes",	MAGIC_PARAM_ELF_NOTES_MAX, 0 },
-	{ "regex",	MAGIC_PARAM_REGEX_MAX, 0 },
-	{ "bytes",	MAGIC_PARAM_BYTES_MAX, 0 },
+	{ "indir",	MAGIC_PARAM_INDIR_MAX, 0, 0 },
+	{ "name",	MAGIC_PARAM_NAME_MAX, 0, 0 },
+	{ "elf_phnum",	MAGIC_PARAM_ELF_PHNUM_MAX, 0, 0 },
+	{ "elf_shnum",	MAGIC_PARAM_ELF_SHNUM_MAX, 0, 0 },
+	{ "elf_notes",	MAGIC_PARAM_ELF_NOTES_MAX, 0, 0 },
+	{ "regex",	MAGIC_PARAM_REGEX_MAX, 0, 0 },
+	{ "bytes",	MAGIC_PARAM_BYTES_MAX, 0, 0 },
 };
 
 private int posixly;
@@ -184,9 +181,7 @@ main(int argc, char *argv[])
 	char *progname;
 
 	/* makes islower etc work for other langs */
-#ifdef HAVE_SETLOCALE
 	(void)setlocale(LC_CTYPE, "");
-#endif
 
 #ifdef __EMX__
 	/* sh-like wildcard expansion! Shouldn't hurt at least ... */
@@ -242,11 +237,11 @@ main(int argc, char *argv[])
 			flags |= MAGIC_ERROR;
 			break;
 		case 'e':
-			for (i = 0; i < sizeof(nv) / sizeof(nv[0]); i++)
+			for (i = 0; i < __arraycount(nv); i++)
 				if (strcmp(nv[i].name, optarg) == 0)
 					break;
 
-			if (i == sizeof(nv) / sizeof(nv[0]))
+			if (i == __arraycount(nv))
 				errflg++;
 			else
 				flags |= nv[i].value;
@@ -297,11 +292,11 @@ main(int argc, char *argv[])
 		case 's':
 			flags |= MAGIC_DEVICES;
 			break;
-#ifdef HAVE_LIBSECCOMP
 		case 'S':
+#ifdef HAVE_LIBSECCOMP
 			sandbox = 0;
-			break;
 #endif
+			break;
 		case 'v':
 			if (magicfile == NULL)
 				magicfile = magic_getpath(magicfile, action);
@@ -309,6 +304,9 @@ main(int argc, char *argv[])
 			    VERSION);
 			(void)fprintf(stdout, "magic file from %s\n",
 			    magicfile);
+#ifdef HAVE_LIBSECCOMP
+			(void)fprintf(stdout, "seccomp support included\n");
+#endif
 			return 0;
 		case 'z':
 			flags |= MAGIC_COMPRESS;
@@ -398,7 +396,8 @@ main(int argc, char *argv[])
 	}
 	else {
 		size_t j, wid, nw;
-		for (wid = 0, j = (size_t)optind; j < (size_t)argc; j++) {
+		for (wid = 0, j = CAST(size_t, optind); j < CAST(size_t, argc);
+		    j++) {
 			nw = file_mbswidth(argv[j]);
 			if (nw > wid)
 				wid = nw;
@@ -426,7 +425,7 @@ applyparam(magic_t magic)
 	size_t i;
 
 	for (i = 0; i < __arraycount(pm); i++) {
-		if (pm[i].value == 0)
+		if (!pm[i].set)
 			continue;
 		if (magic_setparam(magic, pm[i].tag, &pm[i].value) == -1)
 			file_err(EXIT_FAILURE, "Can't set %s", pm[i].name);
@@ -446,6 +445,7 @@ setparam(const char *p)
 		if (strncmp(p, pm[i].name, s - p) != 0)
 			continue;
 		pm[i].value = atoi(s + 1);
+		pm[i].set = 1;
 		return;
 	}
 badparm:
@@ -534,9 +534,8 @@ process(struct magic_set *ms, const char *inname, int wid)
 			(void)putc('\0', stdout);
 		if (nulsep < 2) {
 			(void)printf("%s", separator);
-			(void)printf("%*s ",
-			    (int) (nopad ? 0 : (wid - file_mbswidth(inname))),
-			    "");
+			(void)printf("%*s ", CAST(int, nopad ? 0
+			    : (wid - file_mbswidth(inname))), "");
 		}
 	}
 
@@ -563,8 +562,8 @@ file_mbswidth(const char *s)
 
 	while (n > 0) {
 		bytesconsumed = mbrtowc(&nextchar, s, n, &state);
-		if (bytesconsumed == (size_t)(-1) ||
-		    bytesconsumed == (size_t)(-2)) {
+		if (bytesconsumed == CAST(size_t, -1) ||
+		    bytesconsumed == CAST(size_t, -2)) {
 			/* Something went wrong, return something reasonable */
 			return old_n;
 		}
@@ -623,13 +622,13 @@ docprint(const char *opts, int def)
 	for (sp = p - 1; sp > opts && *sp == ' '; sp--)
 		continue;
 
-	fprintf(stdout, "%.*s", (int)(p - opts), opts);
+	fprintf(stdout, "%.*s", CAST(int, p - opts), opts);
 
 	comma = 0;
 	for (i = 0; i < __arraycount(nv); i++) {
 		fprintf(stdout, "%s%s", comma++ ? ", " : "", nv[i].name);
-		if (i && i % 5 == 0) {
-			fprintf(stdout, ",\n%*s", (int)(p - sp - 1), "");
+		if (i && i % 5 == 0 && i != __arraycount(nv) - 1) {
+			fprintf(stdout, ",\n%*s", CAST(int, p - sp - 1), "");
 			comma = 0;
 		}
 	}
@@ -653,7 +652,7 @@ help(void)
 #include "file_opts.h"
 #undef OPT
 #undef OPT_LONGONLY
-	fprintf(stdout, "\nReport bugs to http://bugs.gw.com/\n");
+	fprintf(stdout, "\nReport bugs to https://bugs.astron.com/\n");
 	exit(EXIT_SUCCESS);
 }
 

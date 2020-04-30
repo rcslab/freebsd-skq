@@ -65,7 +65,7 @@ __FBSDID("$FreeBSD$");
 #endif
 
 static int	exec_aout_imgact(struct image_params *imgp);
-static int	aout_fixup(register_t **stack_base, struct image_params *imgp);
+static int	aout_fixup(uintptr_t *stack_base, struct image_params *imgp);
 
 #define	AOUT32_USRSTACK		0xbfc00000
 
@@ -87,7 +87,6 @@ struct sysentvec aout_sysvec = {
 	.sv_coredump	= NULL,
 	.sv_imgact_try	= NULL,
 	.sv_minsigstksz	= MINSIGSTKSZ,
-	.sv_pagesize	= PAGE_SIZE,
 	.sv_minuser	= VM_MIN_ADDRESS,
 	.sv_maxuser	= AOUT32_USRSTACK,
 	.sv_usrstack	= AOUT32_USRSTACK,
@@ -129,7 +128,6 @@ struct sysentvec aout_sysvec = {
 	.sv_coredump	= NULL,
 	.sv_imgact_try	= NULL,
 	.sv_minsigstksz	= MINSIGSTKSZ,
-	.sv_pagesize	= IA32_PAGE_SIZE,
 	.sv_minuser	= AOUT32_MINUSER,
 	.sv_maxuser	= AOUT32_USRSTACK,
 	.sv_usrstack	= AOUT32_USRSTACK,
@@ -149,11 +147,13 @@ struct sysentvec aout_sysvec = {
 #endif
 
 static int
-aout_fixup(register_t **stack_base, struct image_params *imgp)
+aout_fixup(uintptr_t *stack_base, struct image_params *imgp)
 {
 
-	*(char **)stack_base -= sizeof(uint32_t);
-	return (suword32(*stack_base, imgp->args->argc));
+	*stack_base -= sizeof(uint32_t);
+	if (suword32((void *)*stack_base, imgp->args->argc) != 0)
+		return (EFAULT);
+	return (0);
 }
 
 static int
@@ -200,7 +200,7 @@ exec_aout_imgact(struct image_params *imgp)
 		file_offset = 0;
 		/* Pass PS_STRINGS for BSD/OS binaries only. */
 		if (N_GETMID(*a_out) == MID_ZERO)
-			imgp->ps_strings = aout_sysvec.sv_psstrings;
+			imgp->ps_strings = (void *)aout_sysvec.sv_psstrings;
 		break;
 	default:
 		/* NetBSD compatibility */
@@ -249,8 +249,8 @@ exec_aout_imgact(struct image_params *imgp)
 	    /* data + bss can't exceed rlimit */
 	    a_out->a_data + bss_size > lim_cur_proc(imgp->proc, RLIMIT_DATA) ||
 	    racct_set(imgp->proc, RACCT_DATA, a_out->a_data + bss_size) != 0) {
-			PROC_UNLOCK(imgp->proc);
-			return (ENOMEM);
+		PROC_UNLOCK(imgp->proc);
+		return (ENOMEM);
 	}
 	PROC_UNLOCK(imgp->proc);
 
@@ -262,14 +262,14 @@ exec_aout_imgact(struct image_params *imgp)
 	 * However, in cases where the vnode lock is external, such as nullfs,
 	 * v_usecount may become zero.
 	 */
-	VOP_UNLOCK(imgp->vp, 0);
+	VOP_UNLOCK(imgp->vp);
 
 	/*
 	 * Destroy old process VM and create a new one (with a new stack)
 	 */
 	error = exec_new_vmspace(imgp, &aout_sysvec);
 
-	vn_lock(imgp->vp, LK_EXCLUSIVE | LK_RETRY);
+	vn_lock(imgp->vp, LK_SHARED | LK_RETRY);
 	if (error)
 		return (error);
 
@@ -288,12 +288,13 @@ exec_aout_imgact(struct image_params *imgp)
 		file_offset,
 		virtual_offset, text_end,
 		VM_PROT_READ | VM_PROT_EXECUTE, VM_PROT_ALL,
-		MAP_COPY_ON_WRITE | MAP_PREFAULT);
+		MAP_COPY_ON_WRITE | MAP_PREFAULT | MAP_VN_EXEC);
 	if (error) {
 		vm_map_unlock(map);
 		vm_object_deallocate(object);
 		return (error);
 	}
+	VOP_SET_TEXT_CHECKED(imgp->vp);
 	data_end = text_end + a_out->a_data;
 	if (a_out->a_data) {
 		vm_object_reference(object);
@@ -301,12 +302,13 @@ exec_aout_imgact(struct image_params *imgp)
 			file_offset + a_out->a_text,
 			text_end, data_end,
 			VM_PROT_ALL, VM_PROT_ALL,
-			MAP_COPY_ON_WRITE | MAP_PREFAULT);
+			MAP_COPY_ON_WRITE | MAP_PREFAULT | MAP_VN_EXEC);
 		if (error) {
 			vm_map_unlock(map);
 			vm_object_deallocate(object);
 			return (error);
 		}
+		VOP_SET_TEXT_CHECKED(imgp->vp);
 	}
 
 	if (bss_size) {

@@ -42,6 +42,7 @@ typedef struct {
 } atomic_long_t;
 
 #define	atomic_long_add(i, v)		atomic_long_add_return((i), (v))
+#define	atomic_long_sub(i, v)		atomic_long_add_return(-(i), (v))
 #define	atomic_long_inc_return(v)	atomic_long_add_return(1, (v))
 #define	atomic_long_inc_not_zero(v)	atomic_long_add_unless((v), 1, 0)
 
@@ -107,6 +108,20 @@ atomic_long_add_unless(atomic_long_t *v, long a, long u)
 			break;
 	}
 	return (c != u);
+}
+
+static inline long
+atomic_long_fetch_add_unless(atomic_long_t *v, long a, long u)
+{
+	long c = atomic_long_read(v);
+
+	for (;;) {
+		if (unlikely(c == u))
+			break;
+		if (likely(atomic_fcmpset_long(&v->counter, &c, c + a)))
+			break;
+	}
+	return (c);
 }
 
 static inline long

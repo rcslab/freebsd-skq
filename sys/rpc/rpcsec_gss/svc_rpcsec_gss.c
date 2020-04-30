@@ -174,8 +174,10 @@ struct svc_rpc_gss_cookedcred {
 u_int svc_rpc_gss_client_max = CLIENT_MAX;
 u_int svc_rpc_gss_client_hash_size = CLIENT_HASH_SIZE;
 
-SYSCTL_NODE(_kern, OID_AUTO, rpc, CTLFLAG_RW, 0, "RPC");
-SYSCTL_NODE(_kern_rpc, OID_AUTO, gss, CTLFLAG_RW, 0, "GSS");
+SYSCTL_NODE(_kern, OID_AUTO, rpc, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "RPC");
+SYSCTL_NODE(_kern_rpc, OID_AUTO, gss, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "GSS");
 
 SYSCTL_UINT(_kern_rpc_gss, OID_AUTO, client_max, CTLFLAG_RW,
     &svc_rpc_gss_client_max, 0,
@@ -184,6 +186,11 @@ SYSCTL_UINT(_kern_rpc_gss, OID_AUTO, client_max, CTLFLAG_RW,
 SYSCTL_UINT(_kern_rpc_gss, OID_AUTO, client_hash, CTLFLAG_RDTUN,
     &svc_rpc_gss_client_hash_size, 0,
     "Size of rpc-gss client hash table");
+
+static u_int svc_rpc_gss_lifetime_max = 0;
+SYSCTL_UINT(_kern_rpc_gss, OID_AUTO, lifetime_max, CTLFLAG_RW,
+    &svc_rpc_gss_lifetime_max, 0,
+    "Maximum lifetime (seconds) of rpc-gss clients");
 
 static u_int svc_rpc_gss_client_count;
 SYSCTL_UINT(_kern_rpc_gss, OID_AUTO, client_count, CTLFLAG_RD,
@@ -568,19 +575,18 @@ svc_rpc_gss_create_client(void)
 
 	client = mem_alloc(sizeof(struct svc_rpc_gss_client));
 	memset(client, 0, sizeof(struct svc_rpc_gss_client));
-	refcount_init(&client->cl_refs, 1);
+
+	/*
+	 * Set the initial value of cl_refs to two.  One for the caller
+	 * and the other to hold onto the client structure until it expires.
+	 */
+	refcount_init(&client->cl_refs, 2);
 	sx_init(&client->cl_lock, "GSS-client");
 	getcredhostid(curthread->td_ucred, &hostid);
 	client->cl_id.ci_hostid = hostid;
 	getboottime(&boottime);
 	client->cl_id.ci_boottime = boottime.tv_sec;
 	client->cl_id.ci_id = svc_rpc_gss_next_clientid++;
-	list = &svc_rpc_gss_client_hash[client->cl_id.ci_id % svc_rpc_gss_client_hash_size];
-	sx_xlock(&svc_rpc_gss_lock);
-	TAILQ_INSERT_HEAD(list, client, cl_link);
-	TAILQ_INSERT_HEAD(&svc_rpc_gss_clients, client, cl_alllink);
-	svc_rpc_gss_client_count++;
-	sx_xunlock(&svc_rpc_gss_lock);
 
 	/*
 	 * Start the client off with a short expiration time. We will
@@ -590,6 +596,12 @@ svc_rpc_gss_create_client(void)
 	client->cl_locked = FALSE;
 	client->cl_expiration = time_uptime + 5*60;
 
+	list = &svc_rpc_gss_client_hash[client->cl_id.ci_id % svc_rpc_gss_client_hash_size];
+	sx_xlock(&svc_rpc_gss_lock);
+	TAILQ_INSERT_HEAD(list, client, cl_link);
+	TAILQ_INSERT_HEAD(&svc_rpc_gss_clients, client, cl_alllink);
+	svc_rpc_gss_client_count++;
+	sx_xunlock(&svc_rpc_gss_lock);
 	return (client);
 }
 
@@ -759,7 +771,7 @@ gss_oid_to_str(OM_uint32 *minor_status, gss_OID oid, gss_buffer_t oid_str)
 	 * here for "{ " and "}\0".
 	 */
 	string_length += 4;
-	if ((bp = (char *) mem_alloc(string_length))) {
+	if ((bp = malloc(string_length, M_GSSAPI, M_WAITOK | M_ZERO))) {
 		strcpy(bp, "{ ");
 		number = (unsigned long) cp[0];
 		sprintf(numstr, "%ld ", number/40);
@@ -951,8 +963,15 @@ svc_rpc_gss_accept_sec_context(struct svc_rpc_gss_client *client,
 		 * that out).
 		 */
 		if (cred_lifetime == GSS_C_INDEFINITE)
-			cred_lifetime = time_uptime + 24*60*60;
+			cred_lifetime = 24*60*60;
 
+		/*
+		 * Cap cred_lifetime if sysctl kern.rpc.gss.lifetime_max is set.
+		 */
+		if (svc_rpc_gss_lifetime_max > 0 && cred_lifetime >
+		    svc_rpc_gss_lifetime_max)
+			cred_lifetime = svc_rpc_gss_lifetime_max;
+		
 		client->cl_expiration = time_uptime + cred_lifetime;
 
 		/*
@@ -1287,7 +1306,6 @@ svc_rpc_gss(struct svc_req *rqst, struct rpc_msg *msg)
 			goto out;
 		}
 		client = svc_rpc_gss_create_client();
-		refcount_acquire(&client->cl_refs);
 	} else {
 		struct svc_rpc_gss_clientid *p;
 		if (gc.gc_handle.length != sizeof(*p)) {

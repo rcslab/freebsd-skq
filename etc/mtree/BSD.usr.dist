@@ -13,6 +13,18 @@
             ..
             event
             ..
+            gmock
+                internal
+                    custom
+                    ..
+                ..
+            ..
+            gtest
+                internal
+                    custom
+                    ..
+                ..
+            ..
             sqlite3
             ..
             ucl
@@ -25,9 +37,21 @@
         aout
         ..
         clang
-            7.0.1
+            10.0.0
                 include
+                    cuda_wrappers
+                    ..
+                    fuzzer
+                    ..
+                    openmp_wrappers
+                    ..
+                    ppc_wrappers
+                    ..
+                    profile
+                    ..
                     sanitizer
+                    ..
+                    xray
                     ..
                 ..
                 lib
@@ -182,12 +206,20 @@
             uk_UA.KOI8-U
             ..
         ..
+        certs
+            blacklisted tags=package=caroot
+            ..
+            trusted tags=package=caroot
+            ..
+        ..
         dict
         ..
         doc
             IPv6
             ..
             atf
+            ..
+            kyua
             ..
             legal
             ..
@@ -283,6 +315,8 @@
                     ..
                 ..
             ..
+            kyua
+            ..
             libusb20
             ..
             libvgl
@@ -290,8 +324,6 @@
             mdoc
             ..
             netgraph
-            ..
-            pc-sysinstall
             ..
             perfmon
             ..
@@ -416,10 +448,16 @@
         ..
         keys
             pkg
-                revoked
+                revoked tags=package=runtime
                 ..
-                trusted
+                trusted tags=package=runtime
                 ..
+            ..
+        ..
+        kyua
+            misc
+            ..
+            store
             ..
         ..
         locale
@@ -1154,20 +1192,10 @@
                 ..
                 man3
                 ..
-            ..
-        ..
-        pc-sysinstall
-            backend
-            ..
-            backend-partmanager
-            ..
-            backend-query
-            ..
-            conf
-                license
+                man5
                 ..
-            ..
-            doc
+                man7
+                ..
             ..
         ..
         security
@@ -1225,15 +1253,25 @@
             ..
             Australia
             ..
+            Brazil
+            ..
+            Canada
+            ..
+            Chile
+            ..
             Etc
             ..
             Europe
             ..
             Indian
             ..
+            Mexico
+            ..
             Pacific
             ..
             SystemV
+            ..
+            US
             ..
         ..
     ..

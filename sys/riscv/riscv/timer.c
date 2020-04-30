@@ -56,12 +56,16 @@ __FBSDID("$FreeBSD$");
 
 #include <machine/bus.h>
 #include <machine/cpu.h>
+#include <machine/cpufunc.h>
 #include <machine/intr.h>
 #include <machine/asm.h>
 #include <machine/trap.h>
 #include <machine/sbi.h>
 
-#define	DEFAULT_FREQ	10000000
+#include <dev/fdt/fdt_common.h>
+#include <dev/ofw/ofw_bus.h>
+#include <dev/ofw/ofw_bus_subr.h>
+#include <dev/ofw/openfirm.h>
 
 #define	TIMER_COUNTS		0x00
 #define	TIMER_MTIMECMP(cpu)	(cpu * 8)
@@ -88,11 +92,8 @@ static struct timecounter riscv_timer_timecount = {
 static inline uint64_t
 get_cycles(void)
 {
-	uint64_t cycles;
 
-	__asm __volatile("rdtime %0" : "=r" (cycles));
-
-	return (cycles);
+	return (rdtime());
 }
 
 static long
@@ -157,6 +158,32 @@ riscv_timer_intr(void *arg)
 }
 
 static int
+riscv_timer_get_timebase(device_t dev, uint32_t *freq)
+{
+	phandle_t node;
+	int len;
+
+	node = OF_finddevice("/cpus");
+	if (node == -1) {
+		if (bootverbose)
+			device_printf(dev, "Can't find cpus node.\n");
+		return (ENXIO);
+	}
+
+	len = OF_getproplen(node, "timebase-frequency");
+	if (len != 4) {
+		if (bootverbose)
+			device_printf(dev,
+			    "Can't find timebase-frequency property.\n");
+		return (ENXIO);
+	}
+
+	OF_getencprop(node, "timebase-frequency", freq, len);
+
+	return (0);
+}
+
+static int
 riscv_timer_probe(device_t dev)
 {
 
@@ -176,10 +203,9 @@ riscv_timer_attach(device_t dev)
 		return (ENXIO);
 
 	if (device_get_unit(dev) != 0)
-		return ENXIO;
+		return (ENXIO);
 
-	sc->clkfreq = DEFAULT_FREQ;
-	if (sc->clkfreq == 0) {
+	if (riscv_timer_get_timebase(dev, &sc->clkfreq) != 0) {
 		device_printf(dev, "No clock frequency specified\n");
 		return (ENXIO);
 	}

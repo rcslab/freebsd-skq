@@ -863,6 +863,7 @@ bind_lease(struct interface_info *ip)
 	opt = &ip->client->new->options[DHO_INTERFACE_MTU];
 	if (opt->len == sizeof(u_int16_t)) {
 		u_int16_t mtu = 0;
+		u_int16_t old_mtu = 0;
 		bool supersede = (ip->client->config->default_actions[DHO_INTERFACE_MTU] ==
 			ACTION_SUPERSEDE);
 
@@ -871,12 +872,19 @@ bind_lease(struct interface_info *ip)
 		else
 			mtu = be16dec(opt->data);
 
+		if (ip->client->active) {
+			opt = &ip->client->active->options[DHO_INTERFACE_MTU];
+			if (opt->len == sizeof(u_int16_t)) {
+				old_mtu = be16dec(opt->data);
+			}
+		}
+
 		if (mtu < MIN_MTU) {
 			/* Treat 0 like a user intentionally doesn't want to change MTU and,
 			 * therefore, warning is not needed */
 			if (!supersede || mtu != 0)
 				warning("mtu size %u < %d: ignored", (unsigned)mtu, MIN_MTU);
-		} else {
+		} else if (ip->client->state != S_RENEWING || mtu != old_mtu) {
 			interface_set_mtu_unpriv(privfd, mtu);
 		}
 	}
@@ -1774,7 +1782,7 @@ make_request(struct interface_info *ip, struct client_lease * lease)
 	}
 
 	/* set unique client identifier */
-	char client_ident[sizeof(struct hardware)];
+	char client_ident[sizeof(ip->hw_address.haddr) + 1];
 	if (!options[DHO_DHCP_CLIENT_IDENTIFIER]) {
 		int hwlen = (ip->hw_address.hlen < sizeof(client_ident)-1) ?
 				ip->hw_address.hlen : sizeof(client_ident)-1;
@@ -2593,6 +2601,7 @@ check_option(struct client_lease *l, int option)
 	case DHO_DHCP_CLIENT_IDENTIFIER:
 	case DHO_BOOTFILE_NAME:
 	case DHO_DHCP_USER_CLASS_ID:
+	case DHO_URL:
 	case DHO_END:
 		return (1);
 	case DHO_CLASSLESS_ROUTES:

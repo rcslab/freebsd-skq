@@ -44,6 +44,7 @@ __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
 #include <sys/systm.h>
+#include <sys/blockcount.h>
 #include <sys/condvar.h>
 #include <sys/kdb.h>
 #include <sys/kernel.h>
@@ -65,6 +66,9 @@ __FBSDID("$FreeBSD$");
 #include <sys/uio.h>
 #include <sys/ktrace.h>
 #endif
+#ifdef EPOCH_TRACE
+#include <sys/epoch.h>
+#endif
 
 #include <machine/cpu.h>
 
@@ -73,7 +77,7 @@ SYSINIT(synch_setup, SI_SUB_KICK_SCHEDULER, SI_ORDER_FIRST, synch_setup,
     NULL);
 
 int	hogticks;
-static uint8_t pause_wchan[MAXCPU];
+static const char pause_wchan[MAXCPU];
 
 static struct callout loadav_callout;
 
@@ -90,7 +94,8 @@ static fixpt_t cexp[3] = {
 };
 
 /* kernel uses `FSCALE', userland (SHOULD) use kern.fscale */
-SYSCTL_INT(_kern, OID_AUTO, fscale, CTLFLAG_RD, SYSCTL_NULL_INT_PTR, FSCALE, "");
+SYSCTL_INT(_kern, OID_AUTO, fscale, CTLFLAG_RD, SYSCTL_NULL_INT_PTR, FSCALE,
+    "Fixed-point scale factor used for calculating load average values");
 
 static void	loadav(void *arg);
 
@@ -127,7 +132,7 @@ SYSINIT(sleepinit, SI_SUB_KMEM, SI_ORDER_ANY, sleepinit, NULL);
  * flag the lock is not re-locked before returning.
  */
 int
-_sleep(void *ident, struct lock_object *lock, int priority,
+_sleep(const void *ident, struct lock_object *lock, int priority,
     const char *wmesg, sbintime_t sbt, sbintime_t pr, int flags)
 {
 	struct thread *td;
@@ -147,7 +152,6 @@ _sleep(void *ident, struct lock_object *lock, int priority,
 	    ("sleeping without a lock"));
 	KASSERT(ident != NULL, ("_sleep: NULL ident"));
 	KASSERT(TD_IS_RUNNING(td), ("_sleep: curthread not running"));
-	KASSERT(td->td_epochnest == 0, ("sleeping in an epoch section"));
 	if (priority & PDROP)
 		KASSERT(lock != NULL && lock != &Giant.lock_object,
 		    ("PDROP requires a non-Giant lock"));
@@ -166,8 +170,8 @@ _sleep(void *ident, struct lock_object *lock, int priority,
 
 	KASSERT(!TD_ON_SLEEPQ(td), ("recursive sleep"));
 
-	if ((uint8_t *)ident >= &pause_wchan[0] &&
-	    (uint8_t *)ident <= &pause_wchan[MAXCPU - 1])
+	if ((uintptr_t)ident >= (uintptr_t)&pause_wchan[0] &&
+	    (uintptr_t)ident <= (uintptr_t)&pause_wchan[MAXCPU - 1])
 		sleepq_flags = SLEEPQ_PAUSE;
 	else
 		sleepq_flags = SLEEPQ_SLEEP;
@@ -230,7 +234,7 @@ _sleep(void *ident, struct lock_object *lock, int priority,
 }
 
 int
-msleep_spin_sbt(void *ident, struct mtx *mtx, const char *wmesg,
+msleep_spin_sbt(const void *ident, struct mtx *mtx, const char *wmesg,
     sbintime_t sbt, sbintime_t pr, int flags)
 {
 	struct thread *td;
@@ -337,7 +341,7 @@ pause_sbt(const char *wmesg, sbintime_t sbt, sbintime_t pr, int flags)
  * Make all threads sleeping on the specified identifier runnable.
  */
 void
-wakeup(void *ident)
+wakeup(const void *ident)
 {
 	int wakeup_swapper;
 
@@ -357,7 +361,7 @@ wakeup(void *ident)
  * swapped out.
  */
 void
-wakeup_one(void *ident)
+wakeup_one(const void *ident)
 {
 	int wakeup_swapper;
 
@@ -366,6 +370,104 @@ wakeup_one(void *ident)
 	sleepq_release(ident);
 	if (wakeup_swapper)
 		kick_proc0();
+}
+
+void
+wakeup_any(const void *ident)
+{
+	int wakeup_swapper;
+
+	sleepq_lock(ident);
+	wakeup_swapper = sleepq_signal(ident, SLEEPQ_SLEEP | SLEEPQ_UNFAIR,
+	    0, 0);
+	sleepq_release(ident);
+	if (wakeup_swapper)
+		kick_proc0();
+}
+
+/*
+ * Signal sleeping waiters after the counter has reached zero.
+ */
+void
+_blockcount_wakeup(blockcount_t *bc, u_int old)
+{
+
+	KASSERT(_BLOCKCOUNT_WAITERS(old),
+	    ("%s: no waiters on %p", __func__, bc));
+
+	if (atomic_cmpset_int(&bc->__count, _BLOCKCOUNT_WAITERS_FLAG, 0))
+		wakeup(bc);
+}
+
+/*
+ * Wait for a wakeup or a signal.  This does not guarantee that the count is
+ * still zero on return.  Callers wanting a precise answer should use
+ * blockcount_wait() with an interlock.
+ *
+ * If there is no work to wait for, return 0.  If the sleep was interrupted by a
+ * signal, return EINTR or ERESTART, and return EAGAIN otherwise.
+ */
+int
+_blockcount_sleep(blockcount_t *bc, struct lock_object *lock, const char *wmesg,
+    int prio)
+{
+	void *wchan;
+	uintptr_t lock_state;
+	u_int old;
+	int ret;
+	bool catch, drop;
+
+	KASSERT(lock != &Giant.lock_object,
+	    ("%s: cannot use Giant as the interlock", __func__));
+
+	catch = (prio & PCATCH) != 0;
+	drop = (prio & PDROP) != 0;
+	prio &= PRIMASK;
+
+	/*
+	 * Synchronize with the fence in blockcount_release().  If we end up
+	 * waiting, the sleepqueue lock acquisition will provide the required
+	 * side effects.
+	 *
+	 * If there is no work to wait for, but waiters are present, try to put
+	 * ourselves to sleep to avoid jumping ahead.
+	 */
+	if (atomic_load_acq_int(&bc->__count) == 0) {
+		if (lock != NULL && drop)
+			LOCK_CLASS(lock)->lc_unlock(lock);
+		return (0);
+	}
+	lock_state = 0;
+	wchan = bc;
+	sleepq_lock(wchan);
+	DROP_GIANT();
+	if (lock != NULL)
+		lock_state = LOCK_CLASS(lock)->lc_unlock(lock);
+	old = blockcount_read(bc);
+	ret = 0;
+	do {
+		if (_BLOCKCOUNT_COUNT(old) == 0) {
+			sleepq_release(wchan);
+			goto out;
+		}
+		if (_BLOCKCOUNT_WAITERS(old))
+			break;
+	} while (!atomic_fcmpset_int(&bc->__count, &old,
+	    old | _BLOCKCOUNT_WAITERS_FLAG));
+	sleepq_add(wchan, NULL, wmesg, catch ? SLEEPQ_INTERRUPTIBLE : 0, 0);
+	if (catch)
+		ret = sleepq_wait_sig(wchan, prio);
+	else
+		sleepq_wait(wchan, prio);
+	if (ret == 0)
+		ret = EAGAIN;
+
+out:
+	PICKUP_GIANT();
+	if (lock != NULL && !drop)
+		LOCK_CLASS(lock)->lc_lock(lock, lock_state);
+
+	return (ret);
 }
 
 static void
@@ -379,9 +481,11 @@ kdb_switch(void)
 
 /*
  * The machine independent parts of context switching.
+ *
+ * The thread lock is required on entry and is no longer held on return.
  */
 void
-mi_switch(int flags, struct thread *newtd)
+mi_switch(int flags)
 {
 	uint64_t runtime, new_switchtime;
 	struct thread *td;
@@ -393,11 +497,10 @@ mi_switch(int flags, struct thread *newtd)
 	if (!TD_ON_LOCK(td) && !TD_IS_RUNNING(td))
 		mtx_assert(&Giant, MA_NOTOWNED);
 #endif
-	KASSERT(td->td_critnest == 1 || panicstr,
-	    ("mi_switch: switch in a critical section"));
+	KASSERT(td->td_critnest == 1 || KERNEL_PANICKED(),
+		("mi_switch: switch in a critical section"));
 	KASSERT((flags & (SW_INVOL | SW_VOL)) != 0,
 	    ("mi_switch: switch must be voluntary or involuntary"));
-	KASSERT(newtd != curthread, ("mi_switch: preempting back to ourself"));
 
 	/*
 	 * Don't perform context switches from the debugger.
@@ -436,7 +539,7 @@ mi_switch(int flags, struct thread *newtd)
 	    (flags & SW_TYPE_MASK) == SWT_NEEDRESCHED)))
 		SDT_PROBE0(sched, , , preempt);
 #endif
-	sched_switch(td, newtd, flags);
+	sched_switch(td, flags);
 	CTR4(KTR_PROC, "mi_switch: new thread %ld (td_sched %p, pid %ld, %s)",
 	    td->td_tid, td_get_sched(td), td->td_proc->p_pid, td->td_name);
 
@@ -447,46 +550,55 @@ mi_switch(int flags, struct thread *newtd)
 		PCPU_SET(deadthread, NULL);
 		thread_stash(td);
 	}
+	spinlock_exit();
 }
 
 /*
  * Change thread state to be runnable, placing it on the run queue if
  * it is in memory.  If it is swapped out, return true so our caller
  * will know to awaken the swapper.
+ *
+ * Requires the thread lock on entry, drops on exit.
  */
 int
-setrunnable(struct thread *td)
+setrunnable(struct thread *td, int srqflags)
 {
+	int swapin;
 
 	THREAD_LOCK_ASSERT(td, MA_OWNED);
 	KASSERT(td->td_proc->p_state != PRS_ZOMBIE,
 	    ("setrunnable: pid %d is a zombie", td->td_proc->p_pid));
+
+	swapin = 0;
 	switch (td->td_state) {
 	case TDS_RUNNING:
 	case TDS_RUNQ:
+		break;
+	case TDS_CAN_RUN:
+		KASSERT((td->td_flags & TDF_INMEM) != 0,
+		    ("setrunnable: td %p not in mem, flags 0x%X inhibit 0x%X",
+		    td, td->td_flags, td->td_inhibitors));
+		/* unlocks thread lock according to flags */
+		sched_wakeup(td, srqflags);
 		return (0);
 	case TDS_INHIBITED:
 		/*
 		 * If we are only inhibited because we are swapped out
-		 * then arange to swap in this process. Otherwise just return.
+		 * arrange to swap in this process.
 		 */
-		if (td->td_inhibitors != TDI_SWAPPED)
-			return (0);
-		/* FALLTHROUGH */
-	case TDS_CAN_RUN:
+		if (td->td_inhibitors == TDI_SWAPPED &&
+		    (td->td_flags & TDF_SWAPINREQ) == 0) {
+			td->td_flags |= TDF_SWAPINREQ;
+			swapin = 1;
+		}
 		break;
 	default:
-		printf("state is 0x%x", td->td_state);
-		panic("setrunnable(2)");
+		panic("setrunnable: state 0x%x", td->td_state);
 	}
-	if ((td->td_flags & TDF_INMEM) == 0) {
-		if ((td->td_flags & TDF_SWAPINREQ) == 0) {
-			td->td_flags |= TDF_SWAPINREQ;
-			return (1);
-		}
-	} else
-		sched_wakeup(td);
-	return (0);
+	if ((srqflags & (SRQ_HOLD | SRQ_HOLDTD)) == 0)
+		thread_unlock(td);
+
+	return (swapin);
 }
 
 /*
@@ -553,8 +665,7 @@ kern_yield(int prio)
 		prio = td->td_user_pri;
 	if (prio >= 0)
 		sched_prio(td, prio);
-	mi_switch(SW_VOL | SWT_RELINQUISH, NULL);
-	thread_unlock(td);
+	mi_switch(SW_VOL | SWT_RELINQUISH);
 	PICKUP_GIANT();
 }
 
@@ -568,8 +679,7 @@ sys_yield(struct thread *td, struct yield_args *uap)
 	thread_lock(td);
 	if (PRI_BASE(td->td_pri_class) == PRI_TIMESHARE)
 		sched_prio(td, PRI_MAX_TIMESHARE);
-	mi_switch(SW_VOL | SWT_RELINQUISH, NULL);
-	thread_unlock(td);
+	mi_switch(SW_VOL | SWT_RELINQUISH);
 	td->td_retval[0] = 0;
 	return (0);
 }

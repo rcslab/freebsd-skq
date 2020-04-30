@@ -37,26 +37,34 @@ __FBSDID("$FreeBSD$");
 #include "opt_inet.h"
 #include "opt_inet6.h"
 #include "opt_ipsec.h"
+#include "opt_kern_tls.h"
 #include "opt_tcpdebug.h"
 
 #include <sys/param.h>
 #include <sys/systm.h>
+#include <sys/arb.h>
 #include <sys/domain.h>
 #ifdef TCP_HHOOK
 #include <sys/hhook.h>
 #endif
 #include <sys/kernel.h>
+#ifdef KERN_TLS
+#include <sys/ktls.h>
+#endif
 #include <sys/lock.h>
 #include <sys/mbuf.h>
 #include <sys/mutex.h>
 #include <sys/protosw.h>
+#include <sys/qmath.h>
 #include <sys/sdt.h>
 #include <sys/socket.h>
 #include <sys/socketvar.h>
 #include <sys/sysctl.h>
+#include <sys/stats.h>
 
 #include <net/if.h>
 #include <net/route.h>
+#include <net/route/nhop.h>
 #include <net/vnet.h>
 
 #include <netinet/in.h>
@@ -191,7 +199,7 @@ tcp_output(struct tcpcb *tp)
 	uint32_t recwin, sendwin;
 	int off, flags, error = 0;	/* Keep compiler happy */
 	u_int if_hw_tsomaxsegcount = 0;
-	u_int if_hw_tsomaxsegsize;
+	u_int if_hw_tsomaxsegsize = 0;
 	struct mbuf *m;
 	struct ip *ip = NULL;
 #ifdef TCPDEBUG
@@ -219,7 +227,13 @@ tcp_output(struct tcpcb *tp)
 
 	isipv6 = (tp->t_inpcb->inp_vflag & INP_IPV6) != 0;
 #endif
+#ifdef KERN_TLS
+	const bool hw_tls = (so->so_snd.sb_flags & SB_TLS_IFNET) != 0;
+#else
+	const bool hw_tls = false;
+#endif
 
+	NET_EPOCH_ASSERT();
 	INP_WLOCK_ASSERT(tp->t_inpcb);
 
 #ifdef TCP_OFFLOAD
@@ -288,7 +302,7 @@ again:
 	if ((tp->t_flags & TF_SACK_PERMIT) && IN_FASTRECOVERY(tp->t_flags) &&
 	    (p = tcp_sack_output(tp, &sack_bytes_rxmt))) {
 		uint32_t cwin;
-		
+
 		cwin =
 		    imax(min(tp->snd_wnd, tp->snd_cwnd) - sack_bytes_rxmt, 0);
 		/* Do not retransmit SACK segments beyond snd_recover */
@@ -399,15 +413,15 @@ after_sack_rexmit:
 			    off);
 			/*
 			 * Don't remove this (len > 0) check !
-			 * We explicitly check for len > 0 here (although it 
-			 * isn't really necessary), to work around a gcc 
+			 * We explicitly check for len > 0 here (although it
+			 * isn't really necessary), to work around a gcc
 			 * optimization issue - to force gcc to compute
 			 * len above. Without this check, the computation
 			 * of len is bungled by the optimizer.
 			 */
 			if (len > 0) {
-				cwin = tp->snd_cwnd - 
-					(tp->snd_nxt - tp->sack_newdata) -
+				cwin = tp->snd_cwnd -
+					(tp->snd_nxt - tp->snd_recover) -
 					sack_bytes_rxmt;
 				if (cwin < 0)
 					cwin = 0;
@@ -645,7 +659,7 @@ after_sack_rexmit:
 		} else
 			oldwin = 0;
 
-		/* 
+		/*
 		 * If the new window size ends up being the same as or less
 		 * than the old size when it is scaled, then don't force
 		 * a window update.
@@ -693,7 +707,7 @@ dontupdate:
 	    !tcp_timer_active(tp, TT_PERSIST)) {
 		tcp_timer_activate(tp, TT_REXMT, tp->t_rxtcur);
 		goto just_return;
-	} 
+	}
 	/*
 	 * TCP window updates are not reliable, rather a polling protocol
 	 * using ``persist'' packets is used to insure receipt of window
@@ -932,6 +946,20 @@ send:
 			if (tp->t_flags & TF_NEEDFIN)
 				sendalot = 1;
 		} else {
+			if (optlen + ipoptlen >= tp->t_maxseg) {
+				/*
+				 * Since we don't have enough space to put
+				 * the IP header chain and the TCP header in
+				 * one packet as required by RFC 7112, don't
+				 * send it. Also ensure that at least one
+				 * byte of the payload can be put into the
+				 * TCP segment.
+				 */
+				SOCKBUF_UNLOCK(&so->so_snd);
+				error = EMSGSIZE;
+				sack_rxmit = 0;
+				goto out;
+			}
 			len = tp->t_maxseg - optlen - ipoptlen;
 			sendalot = 1;
 			if (dont_sendalot)
@@ -968,15 +996,31 @@ send:
 		struct sockbuf *msb;
 		u_int moff;
 
-		if ((tp->t_flags & TF_FORCEDATA) && len == 1)
+		if ((tp->t_flags & TF_FORCEDATA) && len == 1) {
 			TCPSTAT_INC(tcps_sndprobe);
-		else if (SEQ_LT(tp->snd_nxt, tp->snd_max) || sack_rxmit) {
+#ifdef STATS
+			if (SEQ_LT(tp->snd_nxt, tp->snd_max))
+				stats_voi_update_abs_u32(tp->t_stats,
+				VOI_TCP_RETXPB, len);
+			else
+				stats_voi_update_abs_u64(tp->t_stats,
+				    VOI_TCP_TXPB, len);
+#endif /* STATS */
+		} else if (SEQ_LT(tp->snd_nxt, tp->snd_max) || sack_rxmit) {
 			tp->t_sndrexmitpack++;
 			TCPSTAT_INC(tcps_sndrexmitpack);
 			TCPSTAT_ADD(tcps_sndrexmitbyte, len);
+#ifdef STATS
+			stats_voi_update_abs_u32(tp->t_stats, VOI_TCP_RETXPB,
+			    len);
+#endif /* STATS */
 		} else {
 			TCPSTAT_INC(tcps_sndpack);
 			TCPSTAT_ADD(tcps_sndbyte, len);
+#ifdef STATS
+			stats_voi_update_abs_u64(tp->t_stats, VOI_TCP_TXPB,
+			    len);
+#endif /* STATS */
 		}
 #ifdef INET6
 		if (MHLEN < hdrlen + max_linkhdr)
@@ -1000,7 +1044,7 @@ send:
 		 * to the offset in the socket buffer chain.
 		 */
 		mb = sbsndptr_noadv(&so->so_snd, off, &moff);
-		if (len <= MHLEN - hdrlen - max_linkhdr) {
+		if (len <= MHLEN - hdrlen - max_linkhdr && !hw_tls) {
 			m_copydata(mb, moff, len,
 			    mtod(m, caddr_t) + hdrlen);
 			if (SEQ_LT(tp->snd_nxt, tp->snd_max))
@@ -1013,9 +1057,9 @@ send:
 				msb = &so->so_snd;
 			m->m_next = tcp_m_copym(mb, moff,
 			    &len, if_hw_tsomaxsegcount,
-			    if_hw_tsomaxsegsize, msb);
+			    if_hw_tsomaxsegsize, msb, hw_tls);
 			if (len <= (tp->t_maxseg - optlen)) {
-				/* 
+				/*
 				 * Must have ran out of mbufs for the copy
 				 * shorten it to no longer need tso. Lets
 				 * not put on sendalot since we are low on
@@ -1110,15 +1154,16 @@ send:
 		} else
 			flags |= TH_ECE|TH_CWR;
 	}
-	
+
 	if (tp->t_state == TCPS_ESTABLISHED &&
-	    (tp->t_flags & TF_ECN_PERMIT)) {
+	    (tp->t_flags2 & TF2_ECN_PERMIT)) {
 		/*
 		 * If the peer has ECN, mark data packets with
 		 * ECN capable transmission (ECT).
 		 * Ignore pure ack packets, retransmissions and window probes.
 		 */
 		if (len > 0 && SEQ_GEQ(tp->snd_nxt, tp->snd_max) &&
+		    (sack_rxmit == 0) &&
 		    !((tp->t_flags & TF_FORCEDATA) && len == 1)) {
 #ifdef INET6
 			if (isipv6)
@@ -1128,18 +1173,18 @@ send:
 				ip->ip_tos |= IPTOS_ECN_ECT0;
 			TCPSTAT_INC(tcps_ecn_ect0);
 		}
-		
+
 		/*
 		 * Reply with proper ECN notifications.
 		 */
-		if (tp->t_flags & TF_ECN_SND_CWR) {
+		if (tp->t_flags2 & TF2_ECN_SND_CWR) {
 			flags |= TH_CWR;
-			tp->t_flags &= ~TF_ECN_SND_CWR;
-		} 
-		if (tp->t_flags & TF_ECN_SND_ECE)
+			tp->t_flags2 &= ~TF2_ECN_SND_CWR;
+		}
+		if (tp->t_flags2 & TF2_ECN_SND_ECE)
 			flags |= TH_ECE;
 	}
-	
+
 	/*
 	 * If we are doing retransmissions, then snd_nxt will
 	 * not reflect the first unsent octet.  For ACK only
@@ -1193,8 +1238,11 @@ send:
 	if (flags & TH_SYN)
 		th->th_win = htons((u_short)
 				(min(sbspace(&so->so_rcv), TCP_MAXWIN)));
-	else
+	else {
+		/* Avoid shrinking window with window scaling. */
+		recwin = roundup2(recwin, 1 << tp->rcv_scale);
 		th->th_win = htons((u_short)(recwin >> tp->rcv_scale));
+	}
 
 	/*
 	 * Adjust the RXWIN0SENT flag - indicate that we have advertised
@@ -1284,15 +1332,9 @@ send:
 		m->m_pkthdr.tso_segsz = tp->t_maxseg - optlen;
 	}
 
-#if defined(IPSEC) || defined(IPSEC_SUPPORT)
-	KASSERT(len + hdrlen + ipoptlen - ipsec_optlen == m_length(m, NULL),
-	    ("%s: mbuf chain shorter than expected: %d + %u + %u - %u != %u",
-	    __func__, len, hdrlen, ipoptlen, ipsec_optlen, m_length(m, NULL)));
-#else
-	KASSERT(len + hdrlen + ipoptlen == m_length(m, NULL),
-	    ("%s: mbuf chain shorter than expected: %d + %u + %u != %u",
-	    __func__, len, hdrlen, ipoptlen, m_length(m, NULL)));
-#endif
+	KASSERT(len + hdrlen == m_length(m, NULL),
+	    ("%s: mbuf chain shorter than expected: %d + %u != %u",
+	    __func__, len, hdrlen, m_length(m, NULL)));
 
 #ifdef TCP_HHOOK
 	/* Run HHOOK_TCP_ESTABLISHED_OUT helper hooks. */
@@ -1373,8 +1415,8 @@ send:
 		    ((so->so_options & SO_DONTROUTE) ?  IP_ROUTETOIF : 0),
 		    NULL, NULL, tp->t_inpcb);
 
-		if (error == EMSGSIZE && tp->t_inpcb->inp_route6.ro_rt != NULL)
-			mtu = tp->t_inpcb->inp_route6.ro_rt->rt_mtu;
+		if (error == EMSGSIZE && tp->t_inpcb->inp_route6.ro_nh != NULL)
+			mtu = tp->t_inpcb->inp_route6.ro_nh->nh_mtu;
 	}
 #endif /* INET6 */
 #if defined(INET) && defined(INET6)
@@ -1416,8 +1458,8 @@ send:
 	    ((so->so_options & SO_DONTROUTE) ? IP_ROUTETOIF : 0), 0,
 	    tp->t_inpcb);
 
-	if (error == EMSGSIZE && tp->t_inpcb->inp_route.ro_rt != NULL)
-		mtu = tp->t_inpcb->inp_route.ro_rt->rt_mtu;
+	if (error == EMSGSIZE && tp->t_inpcb->inp_route.ro_nh != NULL)
+		mtu = tp->t_inpcb->inp_route.ro_nh->nh_mtu;
     }
 #endif /* INET */
 
@@ -1426,7 +1468,7 @@ out:
 	 * In transmit state, time the transmission and arrange for
 	 * the retransmit.  In persist state, just set snd_max.
 	 */
-	if ((tp->t_flags & TF_FORCEDATA) == 0 || 
+	if ((tp->t_flags & TF_FORCEDATA) == 0 ||
 	    !tcp_timer_active(tp, TT_PERSIST)) {
 		tcp_seq startseq = tp->snd_nxt;
 
@@ -1455,6 +1497,15 @@ out:
 				tp->t_rtseq = startseq;
 				TCPSTAT_INC(tcps_segstimed);
 			}
+#ifdef STATS
+			if (!(tp->t_flags & TF_GPUTINPROG) && len) {
+				tp->t_flags |= TF_GPUTINPROG;
+				tp->gput_seq = startseq;
+				tp->gput_ack = startseq +
+				    ulmin(sbavail(&so->so_snd) - off, sendwin);
+				tp->gput_ts = tcp_ts_getticks();
+			}
+#endif /* STATS */
 		}
 
 		/*
@@ -1514,7 +1565,13 @@ timer:
 		if (SEQ_GT(tp->snd_nxt + xlen, tp->snd_max))
 			tp->snd_max = tp->snd_nxt + xlen;
 	}
-
+	if ((error == 0) &&
+	    (TCPS_HAVEESTABLISHED(tp->t_state) &&
+	     (tp->t_flags & TF_SACK_PERMIT) &&
+	     tp->rcv_numsacks > 0)) {
+		    /* Clean up any DSACK's sent */
+		    tcp_clean_dsack_blocks(tp);
+	}
 	if (error) {
 		/* Record the error. */
 		TCP_LOG_EVENT(tp, NULL, &so->so_rcv, &so->so_snd, TCP_LOG_OUT,
@@ -1816,8 +1873,12 @@ tcp_addoptions(struct tcpopt *to, u_char *optp)
  */
 struct mbuf *
 tcp_m_copym(struct mbuf *m, int32_t off0, int32_t *plen,
-    int32_t seglimit, int32_t segsize, struct sockbuf *sb)
+    int32_t seglimit, int32_t segsize, struct sockbuf *sb, bool hw_tls)
 {
+#ifdef KERN_TLS
+	struct ktls_session *tls, *ntls;
+	struct mbuf *start;
+#endif
 	struct mbuf *n, **np;
 	struct mbuf *top;
 	int32_t off = off0;
@@ -1849,6 +1910,13 @@ tcp_m_copym(struct mbuf *m, int32_t off0, int32_t *plen,
 	np = &top;
 	top = NULL;
 	pkthdrlen = NULL;
+#ifdef KERN_TLS
+	if (hw_tls && (m->m_flags & M_NOMAP))
+		tls = m->m_ext_pgs.tls;
+	else
+		tls = NULL;
+	start = m;
+#endif
 	while (len > 0) {
 		if (m == NULL) {
 			KASSERT(len == M_COPYALL,
@@ -1858,6 +1926,38 @@ tcp_m_copym(struct mbuf *m, int32_t off0, int32_t *plen,
 				*pkthdrlen = len_cp;
 			break;
 		}
+#ifdef KERN_TLS
+		if (hw_tls) {
+			if (m->m_flags & M_NOMAP)
+				ntls = m->m_ext_pgs.tls;
+			else
+				ntls = NULL;
+
+			/*
+			 * Avoid mixing TLS records with handshake
+			 * data or TLS records from different
+			 * sessions.
+			 */
+			if (tls != ntls) {
+				MPASS(m != start);
+				*plen = len_cp;
+				if (pkthdrlen != NULL)
+					*pkthdrlen = len_cp;
+				break;
+			}
+
+			/*
+			 * Don't end a send in the middle of a TLS
+			 * record if it spans multiple TLS records.
+			 */
+			if (tls != NULL && (m != start) && len < m->m_len) {
+				*plen = len_cp;
+				if (pkthdrlen != NULL)
+					*pkthdrlen = len_cp;
+				break;
+			}
+		}
+#endif
 		mlen = min(len, m->m_len - off);
 		if (seglimit) {
 			/*

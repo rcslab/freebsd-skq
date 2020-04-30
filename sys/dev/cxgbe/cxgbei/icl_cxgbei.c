@@ -47,6 +47,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/file.h>
 #include <sys/kernel.h>
 #include <sys/kthread.h>
+#include <sys/ktr.h>
 #include <sys/lock.h>
 #include <sys/mbuf.h>
 #include <sys/mutex.h>
@@ -99,7 +100,8 @@ __FBSDID("$FreeBSD$");
 #include "tom/t4_tom.h"
 #include "cxgbei.h"
 
-SYSCTL_NODE(_kern_icl, OID_AUTO, cxgbei, CTLFLAG_RD, 0, "Chelsio iSCSI offload");
+SYSCTL_NODE(_kern_icl, OID_AUTO, cxgbei, CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
+    "Chelsio iSCSI offload");
 static int coalesce = 1;
 SYSCTL_INT(_kern_icl_cxgbei, OID_AUTO, coalesce, CTLFLAG_RWTUN,
 	&coalesce, 0, "Try to coalesce PDUs before sending");
@@ -696,7 +698,7 @@ icl_cxgbei_conn_handoff(struct icl_conn *ic, int fd)
 			    ISCSI_DATA_DIGEST_SIZE;
 		}
 		so->so_options |= SO_NO_DDP;
-		toep->ulp_mode = ULP_MODE_ISCSI;
+		toep->params.ulp_mode = ULP_MODE_ISCSI;
 		toep->ulpcb = icc;
 
 		send_iscsi_flowc_wr(icc->sc, toep, ci->max_tx_pdu_len);

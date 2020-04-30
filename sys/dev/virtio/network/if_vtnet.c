@@ -51,7 +51,9 @@ __FBSDID("$FreeBSD$");
 
 #include <vm/uma.h>
 
+#include <net/debugnet.h>
 #include <net/ethernet.h>
+#include <net/pfil.h>
 #include <net/if.h>
 #include <net/if_var.h>
 #include <net/if_arp.h>
@@ -69,8 +71,6 @@ __FBSDID("$FreeBSD$");
 #include <netinet6/ip6_var.h>
 #include <netinet/udp.h>
 #include <netinet/tcp.h>
-#include <netinet/sctp.h>
-#include <netinet/netdump/netdump.h>
 
 #include <machine/bus.h>
 #include <machine/resource.h>
@@ -231,10 +231,11 @@ static void	vtnet_disable_interrupts(struct vtnet_softc *);
 
 static int	vtnet_tunable_int(struct vtnet_softc *, const char *, int);
 
-NETDUMP_DEFINE(vtnet);
+DEBUGNET_DEFINE(vtnet);
 
 /* Tunables. */
-static SYSCTL_NODE(_hw, OID_AUTO, vtnet, CTLFLAG_RD, 0, "VNET driver parameters");
+static SYSCTL_NODE(_hw, OID_AUTO, vtnet, CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
+    "VNET driver parameters");
 static int vtnet_csum_disable = 0;
 TUNABLE_INT("hw.vtnet.csum_disable", &vtnet_csum_disable);
 SYSCTL_INT(_hw_vtnet, OID_AUTO, csum_disable, CTLFLAG_RDTUN,
@@ -326,6 +327,10 @@ MODULE_DEPEND(vtnet, virtio, 1, 1, 1);
 MODULE_DEPEND(vtnet, netmap, 1, 1, 1);
 #endif /* DEV_NETMAP */
 
+VIRTIO_SIMPLE_PNPTABLE(vtnet, VIRTIO_ID_NETWORK, "VirtIO Networking Adapter");
+VIRTIO_SIMPLE_PNPINFO(virtio_mmio, vtnet);
+VIRTIO_SIMPLE_PNPINFO(virtio_pci, vtnet);
+
 static int
 vtnet_modevent(module_t mod, int type, void *unused)
 {
@@ -334,10 +339,21 @@ vtnet_modevent(module_t mod, int type, void *unused)
 
 	switch (type) {
 	case MOD_LOAD:
-		if (loaded++ == 0)
+		if (loaded++ == 0) {
 			vtnet_tx_header_zone = uma_zcreate("vtnet_tx_hdr",
 				sizeof(struct vtnet_tx_header),
 				NULL, NULL, NULL, NULL, 0, 0);
+#ifdef DEBUGNET
+			/*
+			 * We need to allocate from this zone in the transmit path, so ensure
+			 * that we have at least one item per header available.
+			 * XXX add a separate zone like we do for mbufs? otherwise we may alloc
+			 * buckets
+			 */
+			uma_zone_reserve(vtnet_tx_header_zone, DEBUGNET_MAX_IN_FLIGHT * 2);
+			uma_prealloc(vtnet_tx_header_zone, DEBUGNET_MAX_IN_FLIGHT * 2);
+#endif
+		}
 		break;
 	case MOD_QUIESCE:
 		if (uma_zone_get_cur(vtnet_tx_header_zone) > 0)
@@ -362,13 +378,7 @@ vtnet_modevent(module_t mod, int type, void *unused)
 static int
 vtnet_probe(device_t dev)
 {
-
-	if (virtio_get_device_type(dev) != VIRTIO_ID_NETWORK)
-		return (ENXIO);
-
-	device_set_desc(dev, "VirtIO Networking Adapter");
-
-	return (BUS_PROBE_DEFAULT);
+	return (VIRTIO_SIMPLE_PROBE(dev, vtnet));
 }
 
 static int
@@ -708,7 +718,7 @@ vtnet_init_rxq(struct vtnet_softc *sc, int id)
 	if (rxq->vtnrx_sg == NULL)
 		return (ENOMEM);
 
-	TASK_INIT(&rxq->vtnrx_intrtask, 0, vtnet_rxq_tq_intr, rxq);
+	NET_TASK_INIT(&rxq->vtnrx_intrtask, 0, vtnet_rxq_tq_intr, rxq);
 	rxq->vtnrx_tq = taskqueue_create(rxq->vtnrx_name, M_NOWAIT,
 	    taskqueue_thread_enqueue, &rxq->vtnrx_tq);
 
@@ -927,6 +937,7 @@ static int
 vtnet_setup_interface(struct vtnet_softc *sc)
 {
 	device_t dev;
+	struct pfil_head_args pa;
 	struct ifnet *ifp;
 
 	dev = sc->vtnet_dev;
@@ -940,7 +951,8 @@ vtnet_setup_interface(struct vtnet_softc *sc)
 	if_initname(ifp, device_get_name(dev), device_get_unit(dev));
 	ifp->if_baudrate = IF_Gbps(10);	/* Approx. */
 	ifp->if_softc = sc;
-	ifp->if_flags = IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST;
+	ifp->if_flags = IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST |
+	    IFF_KNOWSEPOCH;
 	ifp->if_init = vtnet_init;
 	ifp->if_ioctl = vtnet_ioctl;
 	ifp->if_get_counter = vtnet_get_counter;
@@ -1028,7 +1040,13 @@ vtnet_setup_interface(struct vtnet_softc *sc)
 	vtnet_set_rx_process_limit(sc);
 	vtnet_set_tx_intr_threshold(sc);
 
-	NETDUMP_SET(ifp, vtnet);
+	DEBUGNET_SET(ifp, vtnet);
+
+	pa.pa_version = PFIL_VERSION;
+	pa.pa_flags = PFIL_IN;
+	pa.pa_type = PFIL_TYPE_ETHERNET;
+	pa.pa_headname = ifp->if_xname;
+	sc->vtnet_pfil = pfil_head_register(&pa);
 
 	return (0);
 }
@@ -1525,9 +1543,6 @@ vtnet_rxq_csum_by_offset(struct vtnet_rxq *rxq, struct mbuf *m,
 		m->m_pkthdr.csum_flags |= CSUM_DATA_VALID | CSUM_PSEUDO_HDR;
 		m->m_pkthdr.csum_data = 0xFFFF;
 		break;
-	case offsetof(struct sctphdr, checksum):
-		m->m_pkthdr.csum_flags |= CSUM_SCTP_VALID;
-		break;
 	default:
 		sc->vtnet_stats.rx_csum_bad_offset++;
 		return (1);
@@ -1584,11 +1599,6 @@ vtnet_rxq_csum_by_parse(struct vtnet_rxq *rxq, struct mbuf *m,
 			return (1);
 		m->m_pkthdr.csum_flags |= CSUM_DATA_VALID | CSUM_PSEUDO_HDR;
 		m->m_pkthdr.csum_data = 0xFFFF;
-		break;
-	case IPPROTO_SCTP:
-		if (__predict_false(m->m_len < offset + sizeof(struct sctphdr)))
-			return (1);
-		m->m_pkthdr.csum_flags |= CSUM_SCTP_VALID;
 		break;
 	default:
 		/*
@@ -1773,9 +1783,11 @@ vtnet_rxq_eof(struct vtnet_rxq *rxq)
 	struct vtnet_softc *sc;
 	struct ifnet *ifp;
 	struct virtqueue *vq;
-	struct mbuf *m;
+	struct mbuf *m, *mr;
 	struct virtio_net_hdr_mrg_rxbuf *mhdr;
 	int len, deq, nbufs, adjsz, count;
+	pfil_return_t pfil;
+	bool pfil_done;
 
 	sc = rxq->vtnrx_sc;
 	vq = rxq->vtnrx_vq;
@@ -1812,6 +1824,35 @@ vtnet_rxq_eof(struct vtnet_rxq *rxq)
 			adjsz = sizeof(struct virtio_net_hdr_mrg_rxbuf);
 		}
 
+		/*
+		 * If we have enough data in first mbuf, run it through
+		 * pfil as a memory buffer before dequeueing the rest.
+		 */
+		if (PFIL_HOOKED_IN(sc->vtnet_pfil) &&
+		    len - adjsz >= ETHER_HDR_LEN + max_protohdr) {
+			pfil = pfil_run_hooks(sc->vtnet_pfil,
+			    m->m_data + adjsz, ifp,
+			    (len - adjsz) | PFIL_MEMPTR | PFIL_IN, NULL);
+			switch (pfil) {
+			case PFIL_REALLOCED:
+				mr = pfil_mem2mbuf(m->m_data + adjsz);
+				vtnet_rxq_input(rxq, mr, hdr);
+				/* FALLTHROUGH */
+			case PFIL_DROPPED:
+			case PFIL_CONSUMED:
+				vtnet_rxq_discard_buf(rxq, m);
+				if (nbufs > 1)
+					vtnet_rxq_discard_merged_bufs(rxq,
+					    nbufs);
+				continue;
+			default:
+				KASSERT(pfil == PFIL_PASS,
+				    ("Filter returned %d!\n", pfil));
+			};
+			pfil_done = true;
+		} else
+			pfil_done = false;
+
 		if (vtnet_rxq_replace_buf(rxq, m, len) != 0) {
 			rxq->vtnrx_stats.vrxs_iqdrops++;
 			vtnet_rxq_discard_buf(rxq, m);
@@ -1841,6 +1882,19 @@ vtnet_rxq_eof(struct vtnet_rxq *rxq)
 		 */
 		memcpy(hdr, mtod(m, void *), sizeof(struct virtio_net_hdr));
 		m_adj(m, adjsz);
+
+		if (PFIL_HOOKED_IN(sc->vtnet_pfil) && pfil_done == false) {
+			pfil = pfil_run_hooks(sc->vtnet_pfil, &m, ifp, PFIL_IN,
+			    NULL);
+			switch (pfil) {
+			case PFIL_DROPPED:
+			case PFIL_CONSUMED:
+				continue;
+			default:
+				KASSERT(pfil == PFIL_PASS,
+				    ("Filter returned %d!\n", pfil));
+			}
+		}
 
 		vtnet_rxq_input(rxq, m, hdr);
 
@@ -3296,6 +3350,34 @@ vtnet_rx_filter(struct vtnet_softc *sc)
 		    ifp->if_flags & IFF_ALLMULTI ? "enable" : "disable");
 }
 
+static u_int
+vtnet_copy_ifaddr(void *arg, struct sockaddr_dl *sdl, u_int ucnt)
+{
+	struct vtnet_softc *sc = arg;
+
+	if (memcmp(LLADDR(sdl), sc->vtnet_hwaddr, ETHER_ADDR_LEN) == 0)
+		return (0);
+
+	if (ucnt < VTNET_MAX_MAC_ENTRIES)
+		bcopy(LLADDR(sdl),
+		    &sc->vtnet_mac_filter->vmf_unicast.macs[ucnt],
+		    ETHER_ADDR_LEN);
+
+	return (1);
+}
+
+static u_int
+vtnet_copy_maddr(void *arg, struct sockaddr_dl *sdl, u_int mcnt)
+{
+	struct vtnet_mac_filter *filter = arg;
+
+	if (mcnt < VTNET_MAX_MAC_ENTRIES)
+		bcopy(LLADDR(sdl), &filter->vmf_multicast.macs[mcnt],
+		    ETHER_ADDR_LEN);
+
+	return (1);
+}
+
 static void
 vtnet_rx_filter_mac(struct vtnet_softc *sc)
 {
@@ -3304,42 +3386,23 @@ vtnet_rx_filter_mac(struct vtnet_softc *sc)
 	struct sglist_seg segs[4];
 	struct sglist sg;
 	struct ifnet *ifp;
-	struct ifaddr *ifa;
-	struct ifmultiaddr *ifma;
-	int ucnt, mcnt, promisc, allmulti, error;
+	bool promisc, allmulti;
+	u_int ucnt, mcnt;
+	int error;
 	uint8_t ack;
 
 	ifp = sc->vtnet_ifp;
 	filter = sc->vtnet_mac_filter;
-	ucnt = 0;
-	mcnt = 0;
-	promisc = 0;
-	allmulti = 0;
 
 	VTNET_CORE_LOCK_ASSERT(sc);
 	KASSERT(sc->vtnet_flags & VTNET_FLAG_CTRL_RX,
 	    ("%s: CTRL_RX feature not negotiated", __func__));
 
 	/* Unicast MAC addresses: */
-	if_addr_rlock(ifp);
-	CK_STAILQ_FOREACH(ifa, &ifp->if_addrhead, ifa_link) {
-		if (ifa->ifa_addr->sa_family != AF_LINK)
-			continue;
-		else if (memcmp(LLADDR((struct sockaddr_dl *)ifa->ifa_addr),
-		    sc->vtnet_hwaddr, ETHER_ADDR_LEN) == 0)
-			continue;
-		else if (ucnt == VTNET_MAX_MAC_ENTRIES) {
-			promisc = 1;
-			break;
-		}
+	ucnt = if_foreach_lladdr(ifp, vtnet_copy_ifaddr, sc);
+	promisc = (ucnt > VTNET_MAX_MAC_ENTRIES);
 
-		bcopy(LLADDR((struct sockaddr_dl *)ifa->ifa_addr),
-		    &filter->vmf_unicast.macs[ucnt], ETHER_ADDR_LEN);
-		ucnt++;
-	}
-	if_addr_runlock(ifp);
-
-	if (promisc != 0) {
+	if (promisc) {
 		filter->vmf_unicast.nentries = 0;
 		if_printf(ifp, "more than %d MAC addresses assigned, "
 		    "falling back to promiscuous mode\n",
@@ -3348,22 +3411,10 @@ vtnet_rx_filter_mac(struct vtnet_softc *sc)
 		filter->vmf_unicast.nentries = ucnt;
 
 	/* Multicast MAC addresses: */
-	if_maddr_rlock(ifp);
-	CK_STAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
-		if (ifma->ifma_addr->sa_family != AF_LINK)
-			continue;
-		else if (mcnt == VTNET_MAX_MAC_ENTRIES) {
-			allmulti = 1;
-			break;
-		}
+	mcnt = if_foreach_llmaddr(ifp, vtnet_copy_maddr, filter);
+	allmulti = (mcnt > VTNET_MAX_MAC_ENTRIES);
 
-		bcopy(LLADDR((struct sockaddr_dl *)ifma->ifma_addr),
-		    &filter->vmf_multicast.macs[mcnt], ETHER_ADDR_LEN);
-		mcnt++;
-	}
-	if_maddr_runlock(ifp);
-
-	if (allmulti != 0) {
+	if (allmulti) {
 		filter->vmf_multicast.nentries = 0;
 		if_printf(ifp, "more than %d multicast MAC addresses "
 		    "assigned, falling back to all-multicast mode\n",
@@ -3371,7 +3422,7 @@ vtnet_rx_filter_mac(struct vtnet_softc *sc)
 	} else
 		filter->vmf_multicast.nentries = mcnt;
 
-	if (promisc != 0 && allmulti != 0)
+	if (promisc && allmulti)
 		goto out;
 
 	hdr.class = VIRTIO_NET_CTRL_MAC;
@@ -3701,7 +3752,7 @@ vtnet_setup_rxq_sysctl(struct sysctl_ctx_list *ctx,
 
 	snprintf(namebuf, sizeof(namebuf), "rxq%d", rxq->vtnrx_id);
 	node = SYSCTL_ADD_NODE(ctx, child, OID_AUTO, namebuf,
-	    CTLFLAG_RD, NULL, "Receive Queue");
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "Receive Queue");
 	list = SYSCTL_CHILDREN(node);
 
 	stats = &rxq->vtnrx_stats;
@@ -3734,7 +3785,7 @@ vtnet_setup_txq_sysctl(struct sysctl_ctx_list *ctx,
 
 	snprintf(namebuf, sizeof(namebuf), "txq%d", txq->vtntx_id);
 	node = SYSCTL_ADD_NODE(ctx, child, OID_AUTO, namebuf,
-	    CTLFLAG_RD, NULL, "Transmit Queue");
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "Transmit Queue");
 	list = SYSCTL_CHILDREN(node);
 
 	stats = &txq->vtntx_stats;
@@ -3983,9 +4034,9 @@ vtnet_tunable_int(struct vtnet_softc *sc, const char *knob, int def)
 	return (def);
 }
 
-#ifdef NETDUMP
+#ifdef DEBUGNET
 static void
-vtnet_netdump_init(struct ifnet *ifp, int *nrxr, int *ncl, int *clsize)
+vtnet_debugnet_init(struct ifnet *ifp, int *nrxr, int *ncl, int *clsize)
 {
 	struct vtnet_softc *sc;
 
@@ -3993,27 +4044,18 @@ vtnet_netdump_init(struct ifnet *ifp, int *nrxr, int *ncl, int *clsize)
 
 	VTNET_CORE_LOCK(sc);
 	*nrxr = sc->vtnet_max_vq_pairs;
-	*ncl = NETDUMP_MAX_IN_FLIGHT;
+	*ncl = DEBUGNET_MAX_IN_FLIGHT;
 	*clsize = sc->vtnet_rx_clsize;
 	VTNET_CORE_UNLOCK(sc);
-
-	/*
-	 * We need to allocate from this zone in the transmit path, so ensure
-	 * that we have at least one item per header available.
-	 * XXX add a separate zone like we do for mbufs? otherwise we may alloc
-	 * buckets
-	 */
-	uma_zone_reserve(vtnet_tx_header_zone, NETDUMP_MAX_IN_FLIGHT * 2);
-	uma_prealloc(vtnet_tx_header_zone, NETDUMP_MAX_IN_FLIGHT * 2);
 }
 
 static void
-vtnet_netdump_event(struct ifnet *ifp __unused, enum netdump_ev event __unused)
+vtnet_debugnet_event(struct ifnet *ifp __unused, enum debugnet_ev event __unused)
 {
 }
 
 static int
-vtnet_netdump_transmit(struct ifnet *ifp, struct mbuf *m)
+vtnet_debugnet_transmit(struct ifnet *ifp, struct mbuf *m)
 {
 	struct vtnet_softc *sc;
 	struct vtnet_txq *txq;
@@ -4032,7 +4074,7 @@ vtnet_netdump_transmit(struct ifnet *ifp, struct mbuf *m)
 }
 
 static int
-vtnet_netdump_poll(struct ifnet *ifp, int count)
+vtnet_debugnet_poll(struct ifnet *ifp, int count)
 {
 	struct vtnet_softc *sc;
 	int i;
@@ -4047,4 +4089,4 @@ vtnet_netdump_poll(struct ifnet *ifp, int count)
 		(void)vtnet_rxq_eof(&sc->vtnet_rxqs[i]);
 	return (0);
 }
-#endif /* NETDUMP */
+#endif /* DEBUGNET */

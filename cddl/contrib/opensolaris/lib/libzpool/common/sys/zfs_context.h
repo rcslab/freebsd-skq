@@ -330,9 +330,13 @@ typedef cond_t kcondvar_t;
 extern void cv_init(kcondvar_t *cv, char *name, int type, void *arg);
 extern void cv_destroy(kcondvar_t *cv);
 extern void cv_wait(kcondvar_t *cv, kmutex_t *mp);
+extern int cv_wait_sig(kcondvar_t *cv, kmutex_t *mp);
 extern clock_t cv_timedwait(kcondvar_t *cv, kmutex_t *mp, clock_t abstime);
+#define	cv_timedwait_sig(cvp, mp, t)	cv_timedwait(cvp, mp, t)
 extern clock_t cv_timedwait_hires(kcondvar_t *cvp, kmutex_t *mp, hrtime_t tim,
     hrtime_t res, int flag);
+#define	cv_timedwait_sig_hires(cvp, mp, t, r, f) \
+    cv_timedwait_hires(cvp, mp, t, r, f)
 extern void cv_signal(kcondvar_t *cv);
 extern void cv_broadcast(kcondvar_t *cv);
 
@@ -522,7 +526,7 @@ extern int fop_getattr(vnode_t *vp, vattr_t *vap);
 #define	VN_RELE_ASYNC(vp, taskq)	vn_close(vp, 0, NULL, NULL)
 
 #define	vn_lock(vp, type)
-#define	VOP_UNLOCK(vp, type)
+#define	VOP_UNLOCK(vp)
 
 extern int vn_open(char *path, int x1, int oflags, int mode, vnode_t **vpp,
     int x2, int x3);

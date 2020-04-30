@@ -8,7 +8,7 @@
  *
  * 1. Copyright Notice
  *
- * Some or all of this work - Copyright (c) 1999 - 2019, Intel Corp.
+ * Some or all of this work - Copyright (c) 1999 - 2020, Intel Corp.
  * All rights reserved.
  *
  * 2. License
@@ -658,7 +658,7 @@ AcpiDbExecute (
 
             /* Dump a _PLD buffer if present */
 
-            if (ACPI_COMPARE_NAME ((ACPI_CAST_PTR (ACPI_NAMESPACE_NODE,
+            if (ACPI_COMPARE_NAMESEG ((ACPI_CAST_PTR (ACPI_NAMESPACE_NODE,
                 AcpiGbl_DbMethodInfo.Method)->Name.Ascii),
                 METHOD_NAME__PLD))
             {

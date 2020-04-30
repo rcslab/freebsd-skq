@@ -159,7 +159,8 @@ struct seq_softc {
  * we currently own.
  */
 
-SYSCTL_NODE(_hw_midi, OID_AUTO, seq, CTLFLAG_RD, 0, "Midi sequencer");
+SYSCTL_NODE(_hw_midi, OID_AUTO, seq, CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
+    "Midi sequencer");
 
 int					seq_debug;
 /* XXX: should this be moved into debug.midi? */
@@ -912,7 +913,7 @@ mseq_read(struct cdev *i_dev, struct uio *uio, int ioflag)
 				goto err1;
 
 			retval = cv_wait_sig(&scp->in_cv, &scp->seq_lock);
-			if (retval == EINTR)
+			if (retval != 0)
 				goto err1;
 		}
 
@@ -977,7 +978,7 @@ mseq_write(struct cdev *i_dev, struct uio *uio, int ioflag)
 		         * We slept, maybe things have changed since last
 		         * dying check
 		         */
-			if (retval == EINTR)
+			if (retval != 0)
 				goto err0;
 #if 0
 			/*

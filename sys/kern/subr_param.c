@@ -137,8 +137,9 @@ SYSCTL_ULONG(_kern, OID_AUTO, maxssiz, CTLFLAG_RWTUN | CTLFLAG_NOFETCH, &maxssiz
     "Maximum stack size");
 SYSCTL_ULONG(_kern, OID_AUTO, sgrowsiz, CTLFLAG_RWTUN | CTLFLAG_NOFETCH, &sgrowsiz, 0,
     "Amount to grow stack on a stack fault");
-SYSCTL_PROC(_kern, OID_AUTO, vm_guest, CTLFLAG_RD | CTLTYPE_STRING,
-    NULL, 0, sysctl_kern_vm_guest, "A",
+SYSCTL_PROC(_kern, OID_AUTO, vm_guest,
+    CTLFLAG_RD | CTLTYPE_STRING | CTLFLAG_MPSAFE, NULL, 0,
+    sysctl_kern_vm_guest, "A",
     "Virtual machine guest detected?");
 
 /*
@@ -146,14 +147,16 @@ SYSCTL_PROC(_kern, OID_AUTO, vm_guest, CTLFLAG_RD | CTLTYPE_STRING,
  * corresponding enum VM_GUEST members.
  */
 static const char *const vm_guest_sysctl_names[] = {
-	"none",
-	"generic",
-	"xen",
-	"hv",
-	"vmware",
-	"kvm",
-	"bhyve",
-	NULL
+	[VM_GUEST_NO] = "none",
+	[VM_GUEST_VM] = "generic",
+	[VM_GUEST_XEN] = "xen",
+	[VM_GUEST_HV] = "hv",
+	[VM_GUEST_VMWARE] = "vmware",
+	[VM_GUEST_KVM] = "kvm",
+	[VM_GUEST_BHYVE] = "bhyve",
+	[VM_GUEST_VBOX] = "vbox",
+	[VM_GUEST_PARALLELS] = "parallels",
+	[VM_LAST] = NULL
 };
 CTASSERT(nitems(vm_guest_sysctl_names) - 1 == VM_LAST);
 
@@ -164,7 +167,7 @@ void
 init_param1(void)
 {
 
-#if !defined(__mips__) && !defined(__arm64__) && !defined(__sparc64__)
+#if !defined(__mips__) && !defined(__arm64__)
 	TUNABLE_INT_FETCH("kern.kstack_pages", &kstack_pages);
 #endif
 	hz = -1;

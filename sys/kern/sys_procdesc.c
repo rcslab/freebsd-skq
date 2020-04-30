@@ -60,7 +60,6 @@
  *
  * Open questions:
  *
- * - How to handle ptrace(2)?
  * - Will we want to add a pidtoprocdesc(2) system call to allow process
  *   descriptors to be created for processes without pdfork(2)?
  */
@@ -416,7 +415,13 @@ procdesc_close(struct file *fp, struct thread *td)
 			 * terminate with prejudice.
 			 */
 			p->p_sigparent = SIGCHLD;
-			proc_reparent(p, p->p_reaper, true);
+			if ((p->p_flag & P_TRACED) == 0) {
+				proc_reparent(p, p->p_reaper, true);
+			} else {
+				proc_clear_orphan(p);
+				p->p_oppid = p->p_reaper->p_pid;
+				proc_add_orphan(p, p->p_reaper);
+			}
 			if ((pd->pd_flags & PDF_DAEMON) == 0)
 				kern_psignal(p, SIGKILL);
 			PROC_UNLOCK(p);

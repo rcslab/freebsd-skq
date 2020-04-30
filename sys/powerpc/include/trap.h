@@ -130,7 +130,7 @@
 /* Macros to extract register information */
 #define EXC_ALI_RST(dsisr) ((dsisr >> 5) & 0x1f)   /* source or target */
 #define EXC_ALI_RA(dsisr) (dsisr & 0x1f)
-#define	EXC_ALI_SPE_REG(instr)	((instr >> 21) & 0x1f)
+#define	EXC_ALI_INST_RST(instr)	((instr >> 21) & 0x1f)
 
 /*
  * SRR1 bits for program exception traps. These identify what caused
@@ -147,14 +147,16 @@
 #define EXC_DTRACE	0x7ffff808
 
 /* Magic pointer to store TOC base and other info for trap handlers on ppc64 */
-#define TRAP_GENTRAP	0x1f0
-#define TRAP_TOCBASE	0x1f8
+#define	TRAP_ENTRY	0x1e8
+#define	TRAP_GENTRAP	0x1f0
+#define	TRAP_TOCBASE	0x1f8
 
 #ifndef LOCORE
 struct	trapframe;
-struct	pcb;
+struct	thread;
+extern int	(*hmi_handler)(struct trapframe *);
 void    trap(struct trapframe *);
-int	ppc_instr_emulate(struct trapframe *, struct pcb *);
+int	ppc_instr_emulate(struct trapframe *, struct thread *);
 #endif
 
 #endif	/* _POWERPC_TRAP_H_ */

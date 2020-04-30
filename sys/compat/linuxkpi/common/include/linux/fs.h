@@ -129,25 +129,25 @@ do {									\
 		pgsigio(*(queue), (sig), 0);				\
 } while (0)
 
-typedef int (*filldir_t)(void *, const char *, int, loff_t, u64, unsigned);
+typedef int (*filldir_t)(void *, const char *, int, off_t, u64, unsigned);
 
 struct file_operations {
 	struct module *owner;
-	ssize_t (*read)(struct file *, char __user *, size_t, loff_t *);
-	ssize_t (*write)(struct file *, const char __user *, size_t, loff_t *);
-	unsigned int (*poll) (struct file *, struct poll_table_struct *);
-	long (*unlocked_ioctl)(struct file *, unsigned int, unsigned long);
-	long (*compat_ioctl)(struct file *, unsigned int, unsigned long);
-	int (*mmap)(struct file *, struct vm_area_struct *);
+	ssize_t (*read)(struct linux_file *, char __user *, size_t, off_t *);
+	ssize_t (*write)(struct linux_file *, const char __user *, size_t, off_t *);
+	unsigned int (*poll) (struct linux_file *, struct poll_table_struct *);
+	long (*unlocked_ioctl)(struct linux_file *, unsigned int, unsigned long);
+	long (*compat_ioctl)(struct linux_file *, unsigned int, unsigned long);
+	int (*mmap)(struct linux_file *, struct vm_area_struct *);
 	int (*open)(struct inode *, struct file *);
-	int (*release)(struct inode *, struct file *);
-	int (*fasync)(int, struct file *, int);
+	int (*release)(struct inode *, struct linux_file *);
+	int (*fasync)(int, struct linux_file *, int);
 
 /* Although not supported in FreeBSD, to align with Linux code
  * we are adding llseek() only when it is mapped to no_llseek which returns
  * an illegal seek error
  */
-	loff_t (*llseek)(struct file *, loff_t, int);
+	off_t (*llseek)(struct linux_file *, off_t, int);
 #if 0
 	/* We do not support these methods.  Don't permit them to compile. */
 	loff_t (*llseek)(struct file *, loff_t, int);
@@ -301,26 +301,5 @@ call_mmap(struct linux_file *file, struct vm_area_struct *vma)
 
 	return (file->f_op->mmap(file, vma));
 }
-
-/* Shared memory support */
-unsigned long linux_invalidate_mapping_pages(vm_object_t, pgoff_t, pgoff_t);
-struct page *linux_shmem_read_mapping_page_gfp(vm_object_t, int, gfp_t);
-struct linux_file *linux_shmem_file_setup(const char *, loff_t, unsigned long);
-void linux_shmem_truncate_range(vm_object_t, loff_t, loff_t);
-
-#define	invalidate_mapping_pages(...) \
-  linux_invalidate_mapping_pages(__VA_ARGS__)
-
-#define	shmem_read_mapping_page(...) \
-  linux_shmem_read_mapping_page_gfp(__VA_ARGS__, 0)
-
-#define	shmem_read_mapping_page_gfp(...) \
-  linux_shmem_read_mapping_page_gfp(__VA_ARGS__)
-
-#define	shmem_file_setup(...) \
-  linux_shmem_file_setup(__VA_ARGS__)
-
-#define	shmem_truncate_range(...) \
-  linux_shmem_truncate_range(__VA_ARGS__)
 
 #endif /* _LINUX_FS_H_ */

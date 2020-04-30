@@ -206,16 +206,12 @@ void oce_get_pci_capabilities(POCE_SOFTC sc)
 {
 	uint32_t val;
 
-#if __FreeBSD_version >= 1000000
-	#define pci_find_extcap pci_find_cap
-#endif
-
-	if (pci_find_extcap(sc->dev, PCIY_PCIX, &val) == 0) {
+	if (pci_find_cap(sc->dev, PCIY_PCIX, &val) == 0) {
 		if (val != 0) 
 			sc->flags |= OCE_FLAGS_PCIX;
 	}
 
-	if (pci_find_extcap(sc->dev, PCIY_EXPRESS, &val) == 0) {
+	if (pci_find_cap(sc->dev, PCIY_EXPRESS, &val) == 0) {
 		if (val != 0) {
 			uint16_t link_status =
 			    pci_read_config(sc->dev, val + 0x12, 2);
@@ -226,12 +222,12 @@ void oce_get_pci_capabilities(POCE_SOFTC sc)
 		}
 	}
 
-	if (pci_find_extcap(sc->dev, PCIY_MSI, &val) == 0) {
+	if (pci_find_cap(sc->dev, PCIY_MSI, &val) == 0) {
 		if (val != 0)
 			sc->flags |= OCE_FLAGS_MSI_CAPABLE;
 	}
 
-	if (pci_find_extcap(sc->dev, PCIY_MSIX, &val) == 0) {
+	if (pci_find_cap(sc->dev, PCIY_MSIX, &val) == 0) {
 		if (val != 0) {
 			val = pci_msix_count(sc->dev);
 			sc->flags |= OCE_FLAGS_MSIX_CAPABLE;
@@ -544,6 +540,20 @@ oce_hw_intr_disable(POCE_SOFTC sc)
 }
 
 
+static u_int
+oce_copy_maddr(void *arg, struct sockaddr_dl *sdl, u_int cnt)
+{
+	struct mbx_set_common_iface_multicast *req = arg;
+
+	if (req->params.req.num_mac == OCE_MAX_MC_FILTER_SIZE)
+		return (0);
+
+	bcopy(LLADDR(sdl), &req->params.req.mac[req->params.req.num_mac++],
+	    ETHER_ADDR_LEN);
+
+	return (1);
+}
+
 
 /**
  * @brief		Function for hardware update multicast filter
@@ -553,7 +563,6 @@ int
 oce_hw_update_multicast(POCE_SOFTC sc)
 {
 	struct ifnet    *ifp = sc->ifp;
-	struct ifmultiaddr *ifma;
 	struct mbx_set_common_iface_multicast *req = NULL;
 	OCE_DMA_MEM dma;
 	int rc = 0;
@@ -566,29 +575,15 @@ oce_hw_update_multicast(POCE_SOFTC sc)
 	req = OCE_DMAPTR(&dma, struct mbx_set_common_iface_multicast);
 	bzero(req, sizeof(struct mbx_set_common_iface_multicast));
 
-#if __FreeBSD_version > 800000
-	if_maddr_rlock(ifp);
-#endif
-	CK_STAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
-		if (ifma->ifma_addr->sa_family != AF_LINK)
-			continue;
-
-		if (req->params.req.num_mac == OCE_MAX_MC_FILTER_SIZE) {
-			/*More multicast addresses than our hardware table
-			  So Enable multicast promiscus in our hardware to
-			  accept all multicat packets
-			*/
-			req->params.req.promiscuous = 1;
-			break;
-		}
-		bcopy(LLADDR((struct sockaddr_dl *)ifma->ifma_addr),
-			&req->params.req.mac[req->params.req.num_mac],
-			ETH_ADDR_LEN);
-		req->params.req.num_mac = req->params.req.num_mac + 1;
+	if_foreach_llmaddr(ifp, oce_copy_maddr, req);
+	if (req->params.req.num_mac == OCE_MAX_MC_FILTER_SIZE) {
+		/*More multicast addresses than our hardware table
+		  So Enable multicast promiscus in our hardware to
+		  accept all multicat packets
+		*/
+		req->params.req.promiscuous = 1;
 	}
-#if __FreeBSD_version > 800000
-	if_maddr_runlock(ifp);
-#endif
+
 	req->params.req.if_id = sc->if_id;
 	rc = oce_update_multicast(sc, &dma);
 	oce_dma_free(sc, &dma);

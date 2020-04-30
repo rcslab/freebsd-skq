@@ -1,4 +1,4 @@
-.\" Copyright (c) 2005-2011 Pawel Jakub Dawidek <pawel@dawidek.net>
+.\" Copyright (c) 2005-2019 Pawel Jakub Dawidek <pawel@dawidek.net>
 .\" All rights reserved.
 .\"
 .\" Redistribution and use in source and binary forms, with or without
@@ -24,7 +24,7 @@
 .\"
 .\" $FreeBSD$
 .\"
-.Dd July 24, 2018
+.Dd April 14, 2020
 .Dt GELI 8
 .Os
 .Sh NAME
@@ -51,7 +51,7 @@ utility:
 .Pp
 .Nm
 .Cm init
-.Op Fl bdgPTv
+.Op Fl bdgPRTv
 .Op Fl a Ar aalgo
 .Op Fl B Ar backupfile
 .Op Fl e Ar ealgo
@@ -81,7 +81,7 @@ utility:
 .Cm detach
 .Nm
 .Cm onetime
-.Op Fl dT
+.Op Fl dRT
 .Op Fl a Ar aalgo
 .Op Fl e Ar ealgo
 .Op Fl l Ar keylen
@@ -89,7 +89,7 @@ utility:
 .Ar prov
 .Nm
 .Cm configure
-.Op Fl bBdDgGtT
+.Op Fl bBdDgGrRtT
 .Ar prov ...
 .Nm
 .Cm setkey
@@ -172,14 +172,11 @@ will make use of it automatically.
 Supports many cryptographic algorithms (currently
 .Nm AES-XTS ,
 .Nm AES-CBC ,
-.Nm Blowfish-CBC ,
-.Nm Camellia-CBC
 and
-.Nm 3DES-CBC ) .
+.Nm Camellia-CBC ) .
 .It
 Can optionally perform data authentication (integrity verification) utilizing
 one of the following algorithms:
-.Nm HMAC/MD5 ,
 .Nm HMAC/SHA1 ,
 .Nm HMAC/RIPEMD160 ,
 .Nm HMAC/SHA256 ,
@@ -259,7 +256,6 @@ For example, when using 4096 bytes sector and
 .Nm HMAC/SHA256
 algorithm, 89% of the original provider storage will be available for use.
 Currently supported algorithms are:
-.Nm HMAC/MD5 ,
 .Nm HMAC/SHA1 ,
 .Nm HMAC/RIPEMD160 ,
 .Nm HMAC/SHA256 ,
@@ -303,9 +299,7 @@ Encryption algorithm to use.
 Currently supported algorithms are:
 .Nm AES-XTS ,
 .Nm AES-CBC ,
-.Nm Blowfish-CBC ,
 .Nm Camellia-CBC ,
-.Nm 3DES-CBC ,
 and
 .Nm NULL .
 The default and recommended algorithm is
@@ -359,11 +353,6 @@ key length.
 .Em 128 ,
 192,
 256
-.It Nm Blowfish-CBC
-.Em 128
-+ n * 32, for n=[0..10]
-.It Nm 3DES-CBC
-.Em 192
 .El
 .It Fl P
 Do not use a passphrase as a component of the User Key.
@@ -375,6 +364,18 @@ Change decrypted provider's sector size.
 Increasing the sector size allows increased performance,
 because encryption/decryption which requires an initialization vector
 is done per sector; fewer sectors means less computational work.
+.It Fl R
+Turn off automatic expansion.
+By default, if the underlying provider grows, the encrypted provider will
+grow automatically too.
+The metadata will be moved to the new location.
+If automatic expansion if turned off and the underlying provider changes
+size, attaching encrypted provider will no longer be possible as the metadata
+will no longer be located in the last sector.
+In this case
+.Nm GELI
+will only log the previous size of the underlying provider, so metadata can
+be found easier, if resize was done by mistake.
 .It Fl T
 Don't pass through
 .Dv BIO_DELETE
@@ -506,6 +507,11 @@ Change decrypted provider's sector size.
 For more information, see the description of the
 .Cm init
 subcommand.
+.It Fl R
+Turn off automatic expansion.
+For more information, see the description of the
+.Cm init
+subcommand.
 .It Fl T
 Disable TRIM/UNMAP passthru.
 For more information, see the description of the
@@ -540,6 +546,13 @@ The boot loader prompts for the passphrase and loads
 from the encrypted partition.
 .It Fl G
 Deactivate booting from this encrypted root partition.
+.It Fl r
+Turn on automatic expansion.
+For more information, see the description of the
+.Cm init
+subcommand.
+.It Fl R
+Turn off automatic expansion.
 .It Fl t
 Enable TRIM/UNMAP passthru.
 For more information, see the description of the
@@ -931,7 +944,7 @@ Reenter new passphrase:
 Encrypted swap partition setup:
 .Bd -literal -offset indent
 # dd if=/dev/random of=/dev/ada0s1b bs=1m
-# geli onetime -d -e 3des ada0s1b
+# geli onetime -d ada0s1b
 # swapon /dev/ada0s1b.eli
 .Ed
 .Pp
@@ -976,6 +989,35 @@ geli_da1s3a_keyfile_load="YES"
 geli_da1s3a_keyfile_type="da1s3a:geli_keyfile"
 geli_da1s3a_keyfile_name="/boot/keys/da1s3a.key"
 .Ed
+.Pp
+By convention, these loader variables are called
+.Sm off
+.Va geli_ No < Ar device No > Va _load .
+.Sm on
+However, the actual name prefix before
+.Va _load , _type ,
+or
+.Va _name
+does not matter.
+At boot time, the
+.Nm
+module searches through all
+.Sm off
+.No < Va prefix No > Va _type No -like
+.Sm on
+variables that have a value of
+.Sm off
+.Dq < Ar device No > :geli_keyfile .
+.Sm on
+The paths to keyfiles are then extracted from
+.Sm off
+.No < Ar prefix No > Va _name
+.Sm on
+variables.
+In the example above,
+.Ar prefix
+is
+.Dq Li geli_da1s3a_keyfile .
 .Pp
 Not only configure encryption, but also data integrity verification using
 .Nm HMAC/SHA256 .
@@ -1110,7 +1152,7 @@ utility appeared in
 .Fx 6.0 .
 Support for the
 .Nm Camellia
-block cipher is implemented by Yoshisato Yanagisawa in
+block cipher was implemented by Yoshisato Yanagisawa in
 .Fx 7.0 .
 .Pp
 Highest

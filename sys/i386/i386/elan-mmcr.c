@@ -48,6 +48,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/systm.h>
 #include <sys/kernel.h>
 #include <sys/conf.h>
+#include <sys/eventhandler.h>
 #include <sys/sysctl.h>
 #include <sys/syslog.h>
 #include <sys/timetc.h>
@@ -220,8 +221,10 @@ sysctl_machdep_elan_gpio_config(SYSCTL_HANDLER_ARGS)
 	return (0);
 }
 
-SYSCTL_OID(_machdep, OID_AUTO, elan_gpio_config, CTLTYPE_STRING | CTLFLAG_RW,
-    NULL, 0, sysctl_machdep_elan_gpio_config, "A", "Elan CPU GPIO pin config");
+SYSCTL_OID(_machdep, OID_AUTO, elan_gpio_config,
+    CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_NEEDGIANT, NULL, 0,
+    sysctl_machdep_elan_gpio_config, "A",
+    "Elan CPU GPIO pin config");
 
 #ifdef CPU_ELAN_PPS
 static void
@@ -320,8 +323,10 @@ sysctl_machdep_elan_freq(SYSCTL_HANDLER_ARGS)
 	return (error);
 }
 
-SYSCTL_PROC(_machdep, OID_AUTO, elan_freq, CTLTYPE_UINT | CTLFLAG_RW,
-    0, sizeof (u_int), sysctl_machdep_elan_freq, "IU", "");
+SYSCTL_PROC(_machdep, OID_AUTO, elan_freq,
+    CTLTYPE_UINT | CTLFLAG_RW | CTLFLAG_NEEDGIANT, 0, sizeof (u_int),
+    sysctl_machdep_elan_freq, "IU",
+    "");
 
 /*
  * Positively identifying the Elan can only be done through the PCI id of

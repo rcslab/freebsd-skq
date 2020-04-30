@@ -41,16 +41,13 @@
 #ifdef _KERNEL
 #include <sys/systm.h>
 
-extern vm_paddr_t dump_avail[];
-extern vm_paddr_t phys_avail[];
-
 extern char *_tmppt;	/* poor name! */
 
 extern vm_offset_t virtual_avail;
 extern vm_offset_t virtual_end;
 
 void *pmap_kenter_temporary(vm_paddr_t, int);
-#define	pmap_page_is_write_mapped(m)	(((m)->aflags & PGA_WRITEABLE) != 0)
+#define	pmap_page_is_write_mapped(m)	(((m)->a.flags & PGA_WRITEABLE) != 0)
 void pmap_page_set_memattr(vm_page_t, vm_memattr_t);
 
 void *pmap_mapdev(vm_paddr_t, vm_size_t);
@@ -77,6 +74,8 @@ pmap_vmspace_copy(pmap_t dst_pmap __unused, pmap_t src_pmap __unused)
 
 	return (0);
 }
+
+#define	PMAP_ENTER_QUICK_LOCKED	0x10000000
 
 #endif	/* _KERNEL */
 #endif	/* !_MACHINE_PMAP_H_ */

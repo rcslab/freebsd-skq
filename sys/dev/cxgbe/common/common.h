@@ -62,10 +62,21 @@ enum {
 };
 
 enum {
-	FEC_NONE      = 0,
-	FEC_RS        = 1 << 0,
-	FEC_BASER_RS  = 1 << 1,
-	FEC_AUTO      = 1 << 5,		/* M_FW_PORT_CAP32_FEC + 1 */
+	/*
+	 * Real FECs.  In the same order as the FEC portion of caps32 so that
+	 * the code can do (fec & M_FW_PORT_CAP32_FEC) to get all the real FECs.
+	 */
+	FEC_RS        = 1 << 0,	/* Reed-Solomon */
+	FEC_BASER_RS  = 1 << 1,	/* BASE-R, aka Firecode */
+	FEC_NONE      = 1 << 2,	/* no FEC */
+
+	/*
+	 * Pseudo FECs that translate to real FECs.  The firmware knows nothing
+	 * about these and they start at M_FW_PORT_CAP32_FEC + 1.  AUTO should
+	 * be set all by itself.
+	 */
+	FEC_AUTO      = 1 << 5,
+	FEC_MODULE    = 1 << 6,	/* FEC suggested by the cable/transceiver. */
 };
 
 enum t4_bar2_qtype { T4_BAR2_QTYPE_EGRESS, T4_BAR2_QTYPE_INGRESS };
@@ -375,8 +386,9 @@ struct adapter_params {
 
 	uint32_t mps_bg_map;	/* rx buffer group map for all ports (upto 4) */
 
-	bool ulptx_memwrite_dsgl;        /* use of T5 DSGL allowed */
-	bool fr_nsmr_tpte_wr_support;    /* FW support for FR_NSMR_TPTE_WR */
+	bool ulptx_memwrite_dsgl;	/* use of T5 DSGL allowed */
+	bool fr_nsmr_tpte_wr_support;	/* FW support for FR_NSMR_TPTE_WR */
+	bool viid_smt_extn_support;	/* FW returns vin, vfvld & smt index? */
 };
 
 #define CHELSIO_T4		0x4
@@ -408,20 +420,20 @@ struct trace_params {
 
 struct link_config {
 	/* OS-specific code owns all the requested_* fields. */
-	int8_t requested_aneg;		/* link autonegotiation */
-	int8_t requested_fc;		/* flow control */
-	int8_t requested_fec;		/* FEC */
-	u_int requested_speed;		/* speed (Mbps) */
+	int8_t requested_aneg;	/* link autonegotiation */
+	int8_t requested_fc;	/* flow control */
+	int8_t requested_fec;	/* FEC */
+	u_int requested_speed;	/* speed (Mbps) */
 
-	uint32_t supported;		/* link capabilities */
-	uint32_t advertising;		/* advertised capabilities */
-	uint32_t lp_advertising;	/* peer advertised capabilities */
-	uint32_t fec_hint;		/* use this fec */
-	u_int speed;			/* actual link speed (Mbps) */
-	int8_t fc;			/* actual link flow control */
-	int8_t fec;			/* actual FEC */
-	bool link_ok;			/* link up? */
-	uint8_t link_down_rc;		/* link down reason */
+	uint32_t pcaps;		/* link capabilities */
+	uint32_t acaps;		/* advertised capabilities */
+	uint32_t lpacaps;	/* peer advertised capabilities */
+	u_int speed;		/* actual link speed (Mbps) */
+	int8_t fc;		/* actual link flow control */
+	int8_t fec_hint;	/* cable/transceiver recommended fec */
+	int8_t fec;		/* actual FEC */
+	bool link_ok;		/* link up? */
+	uint8_t link_down_rc;	/* link down reason */
 };
 
 #include "adapter.h"
@@ -756,10 +768,11 @@ int t4_cfg_pfvf(struct adapter *adap, unsigned int mbox, unsigned int pf,
 int t4_alloc_vi_func(struct adapter *adap, unsigned int mbox,
 		     unsigned int port, unsigned int pf, unsigned int vf,
 		     unsigned int nmac, u8 *mac, u16 *rss_size,
+		     uint8_t *vfvld, uint16_t *vin,
 		     unsigned int portfunc, unsigned int idstype);
 int t4_alloc_vi(struct adapter *adap, unsigned int mbox, unsigned int port,
 		unsigned int pf, unsigned int vf, unsigned int nmac, u8 *mac,
-		u16 *rss_size);
+		u16 *rss_size, uint8_t *vfvld, uint16_t *vin);
 int t4_free_vi(struct adapter *adap, unsigned int mbox,
 	       unsigned int pf, unsigned int vf,
 	       unsigned int viid);
@@ -770,7 +783,7 @@ int t4_alloc_mac_filt(struct adapter *adap, unsigned int mbox, unsigned int viid
 		      bool free, unsigned int naddr, const u8 **addr, u16 *idx,
 		      u64 *hash, bool sleep_ok);
 int t4_change_mac(struct adapter *adap, unsigned int mbox, unsigned int viid,
-		  int idx, const u8 *addr, bool persist, bool add_smt);
+		  int idx, const u8 *addr, bool persist, uint16_t *smt_idx);
 int t4_set_addr_hash(struct adapter *adap, unsigned int mbox, unsigned int viid,
 		     bool ucast, u64 vec, bool sleep_ok);
 int t4_enable_vi_params(struct adapter *adap, unsigned int mbox,
@@ -879,7 +892,7 @@ port_top_speed(const struct port_info *pi)
 {
 
 	/* Mbps -> Gbps */
-	return (fwcap_to_speed(pi->link_cfg.supported) / 1000);
+	return (fwcap_to_speed(pi->link_cfg.pcaps) / 1000);
 }
 
 #endif /* __CHELSIO_COMMON_H */

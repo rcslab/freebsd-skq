@@ -97,7 +97,8 @@ __FBSDID("$FreeBSD$");
 
 #include "opt_gdb.h"
 
-static SYSCTL_NODE(_hw_usb, OID_AUTO, ucom, CTLFLAG_RW, 0, "USB ucom");
+static SYSCTL_NODE(_hw_usb, OID_AUTO, ucom, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "USB ucom");
 
 static int ucom_pps_mode;
 
@@ -796,7 +797,8 @@ ucom_open(struct tty *tp)
 	    &sc->sc_start_task[0].hdr, 
 	    &sc->sc_start_task[1].hdr);
 
-	ucom_modem(tp, SER_DTR | SER_RTS, 0);
+	if (sc->sc_tty == NULL || (sc->sc_tty->t_termios.c_cflag & CNO_RTSDTR) == 0)
+		ucom_modem(tp, SER_DTR | SER_RTS, 0);
 
 	ucom_ring(sc, 0);
 

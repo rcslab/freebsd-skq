@@ -150,6 +150,7 @@ static const char *swapnames[] = {
 };
 static int swap_stats[nitems(swapnames)];
 
+static int has_swap;
 
 /* these are for keeping track of the proc array */
 
@@ -210,6 +211,10 @@ static long *pcpu_cp_old;
 static long *pcpu_cp_diff;
 static int *pcpu_cpu_states;
 
+/* Battery units and states */
+static int battery_units;
+static int battery_life;
+
 static int compare_swap(const void *a, const void *b);
 static int compare_jid(const void *a, const void *b);
 static int compare_pid(const void *a, const void *b);
@@ -248,12 +253,12 @@ update_layout(void)
 	y_mem = 3;
 	y_arc = 4;
 	y_carc = 5;
-	y_swap = 4 + arc_enabled + carc_enabled;
-	y_idlecursor = 5 + arc_enabled + carc_enabled;
-	y_message = 5 + arc_enabled + carc_enabled;
-	y_header = 6 + arc_enabled + carc_enabled;
-	y_procs = 7 + arc_enabled + carc_enabled;
-	Header_lines = 7 + arc_enabled + carc_enabled;
+	y_swap = 3 + arc_enabled + carc_enabled + has_swap;
+	y_idlecursor = 4 + arc_enabled + carc_enabled + has_swap;
+	y_message = 4 + arc_enabled + carc_enabled + has_swap;
+	y_header = 5 + arc_enabled + carc_enabled + has_swap;
+	y_procs = 6 + arc_enabled + carc_enabled + has_swap;
+	Header_lines = 6 + arc_enabled + carc_enabled + has_swap;
 
 	if (pcpu_stats) {
 		y_mem += ncpus - 1;
@@ -273,7 +278,7 @@ machine_init(struct statics *statics)
 {
 	int i, j, empty, pagesize;
 	uint64_t arc_size;
-	int carc_en;
+	int carc_en, nswapdev;
 	size_t size;
 
 	size = sizeof(smpmode);
@@ -297,6 +302,11 @@ machine_init(struct statics *statics)
 	kd = kvm_open(NULL, _PATH_DEVNULL, NULL, O_RDONLY, "kvm_open");
 	if (kd == NULL)
 		return (-1);
+
+	size = sizeof(nswapdev);
+	if (sysctlbyname("vm.nswapdev", &nswapdev, &size, NULL,
+		0) == 0 && nswapdev != 0)
+			has_swap = 1;
 
 	GETSYSCTL("kern.ccpu", ccpu);
 
@@ -332,7 +342,10 @@ machine_init(struct statics *statics)
 		statics->carc_names = carcnames;
 	else
 		statics->carc_names = NULL;
-	statics->swap_names = swapnames;
+	if (has_swap)
+		statics->swap_names = swapnames;
+	else
+		statics->swap_names = NULL;
 	statics->order_names = ordernames;
 
 	/* Allocate state for per-CPU stats. */
@@ -363,6 +376,12 @@ machine_init(struct statics *statics)
 	pcpu_cp_diff = calloc(ncpus * CPUSTATES, sizeof(long));
 	pcpu_cpu_states = calloc(ncpus * CPUSTATES, sizeof(int));
 	statics->ncpus = ncpus;
+
+	/* Allocate state of battery units reported via ACPI. */
+	battery_units = 0;
+	size = sizeof(int);
+	sysctlbyname("hw.acpi.battery.units", &battery_units, &size, NULL, 0);
+	statics->nbatteries = battery_units;
 
 	update_layout();
 
@@ -570,6 +589,12 @@ get_system_info(struct system_info *si)
 	} else {
 		si->boottime.tv_sec = -1;
 	}
+
+	battery_life = 0;
+	if (battery_units > 0) {
+		GETSYSCTL("hw.acpi.battery.life", battery_life);
+	}
+	si->battery = battery_life;
 }
 
 #define NOPROC	((void *)-1)
@@ -994,7 +1019,7 @@ format_next_process(struct handle * xhandle, char *(*get_userid)(int), int flags
 				len = (argbuflen - (dst - argbuf) - 1) / 4;
 				strvisx(dst, src,
 				    MIN(strlen(src), len),
-				    VIS_NL | VIS_CSTYLE);
+				    VIS_NL | VIS_CSTYLE | VIS_OCTAL | VIS_SAFE);
 				while (*dst != '\0')
 					dst++;
 				if ((argbuflen - (dst - argbuf) - 1) / 4 > 0)
@@ -1093,7 +1118,7 @@ format_next_process(struct handle * xhandle, char *(*get_userid)(int), int flags
 		sbuf_printf(procbuf, "%6s ", format_time(cputime));
 		sbuf_printf(procbuf, "%6.2f%% ", ps.wcpu ? 100.0 * weighted_cpu(PCTCPU(pp), pp) : 100.0 * PCTCPU(pp));
 	}
-	sbuf_printf(procbuf, "%s", printable(cmdbuf));
+	sbuf_printf(procbuf, "%s", cmdbuf);
 	free(cmdbuf);
 	return (sbuf_data(procbuf));
 }

@@ -1506,6 +1506,7 @@ bwi_stop_locked(struct bwi_softc *sc, int statechg)
 void
 bwi_intr(void *xsc)
 {
+	struct epoch_tracker et;
 	struct bwi_softc *sc = xsc;
 	struct bwi_mac *mac;
 	uint32_t intr_status;
@@ -1625,7 +1626,9 @@ bwi_intr(void *xsc)
 		device_printf(sc->sc_dev, "intr noise\n");
 
 	if (txrx_intr_status[0] & BWI_TXRX_INTR_RX) {
+		NET_EPOCH_ENTER(et);
 		rx_data = sc->sc_rxeof(sc);
+		NET_EPOCH_EXIT(et);
 		if (sc->sc_flags & BWI_F_STOP) {
 			BWI_UNLOCK(sc);
 			return;
@@ -1729,15 +1732,6 @@ bwi_set_channel(struct ieee80211com *ic)
 	bwi_rf_set_chan(mac, ieee80211_chan2ieee(ic, c), 0);
 
 	sc->sc_rates = ieee80211_get_ratetable(c);
-
-	/*
-	 * Setup radio tap channel freq and flags
-	 */
-	sc->sc_tx_th.wt_chan_freq = sc->sc_rx_th.wr_chan_freq =
-		htole16(c->ic_freq);
-	sc->sc_tx_th.wt_chan_flags = sc->sc_rx_th.wr_chan_flags =
-		htole16(c->ic_flags & 0xffff);
-
 	BWI_UNLOCK(sc);
 }
 

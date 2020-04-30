@@ -252,14 +252,13 @@ dwc_txstart_locked(struct dwc_softc *sc)
 
 	ifp = sc->ifp;
 
-	if (ifp->if_drv_flags & IFF_DRV_OACTIVE) {
+	if (ifp->if_drv_flags & IFF_DRV_OACTIVE)
 		return;
-	}
 
 	enqueued = 0;
 
 	for (;;) {
-		if (sc->txcount == (TX_DESC_COUNT-1)) {
+		if (sc->txcount == (TX_DESC_COUNT - 1)) {
 			ifp->if_drv_flags |= IFF_DRV_OACTIVE;
 			break;
 		}
@@ -268,7 +267,7 @@ dwc_txstart_locked(struct dwc_softc *sc)
 		if (m == NULL)
 			break;
 		if (dwc_setup_txbuf(sc, sc->tx_idx_head, &m) != 0) {
-			IFQ_DRV_PREPEND(&ifp->if_snd, m);
+			 IFQ_DRV_PREPEND(&ifp->if_snd, m);
 			break;
 		}
 		BPF_MTAP(ifp, m);
@@ -469,7 +468,7 @@ dwc_setup_rxdesc(struct dwc_softc *sc, int idx, bus_addr_t paddr)
 
 	sc->rxdesc_ring[idx].addr = (uint32_t)paddr;
 	nidx = next_rxidx(sc, idx);
-	sc->rxdesc_ring[idx].addr_next = sc->rxdesc_ring_paddr +	\
+	sc->rxdesc_ring[idx].addr_next = sc->rxdesc_ring_paddr +
 	    (nidx * sizeof(struct dwc_hwdesc));
 	if (sc->mactype == DWC_GMAC_ALT_DESC)
 		sc->rxdesc_ring[idx].tdes1 = DDESC_CNTL_CHAINED | RX_MAX_PACKET;
@@ -493,9 +492,8 @@ dwc_setup_rxbuf(struct dwc_softc *sc, int idx, struct mbuf *m)
 
 	error = bus_dmamap_load_mbuf_sg(sc->rxbuf_tag, sc->rxbuf_map[idx].map,
 	    m, &seg, &nsegs, 0);
-	if (error != 0) {
+	if (error != 0)
 		return (error);
-	}
 
 	KASSERT(nsegs == 1, ("%s: %d segments returned!", __func__, nsegs));
 
@@ -581,13 +579,37 @@ bitreverse(uint8_t x)
 	return (nibbletab[x & 0xf] << 4) | nibbletab[x >> 4];
 }
 
+struct dwc_hash_maddr_ctx {
+	struct dwc_softc *sc;
+	uint32_t hash[8];
+};
+
+static u_int
+dwc_hash_maddr(void *arg, struct sockaddr_dl *sdl, u_int cnt)
+{
+	struct dwc_hash_maddr_ctx *ctx = arg;
+	uint32_t crc, hashbit, hashreg;
+	uint8_t val;
+
+	crc = ether_crc32_le(LLADDR(sdl), ETHER_ADDR_LEN);
+	/* Take lower 8 bits and reverse it */
+	val = bitreverse(~crc & 0xff);
+	if (ctx->sc->mactype == DWC_GMAC_ALT_DESC)
+		val >>= 2; /* Only need lower 6 bits */
+	hashreg = (val >> 5);
+	hashbit = (val & 31);
+	ctx->hash[hashreg] |= (1 << hashbit);
+
+	return (1);
+}
+
 static void
 dwc_setup_rxfilter(struct dwc_softc *sc)
 {
-	struct ifmultiaddr *ifma;
+	struct dwc_hash_maddr_ctx ctx;
 	struct ifnet *ifp;
-	uint8_t *eaddr, val;
-	uint32_t crc, ffval, hashbit, hashreg, hi, lo, hash[8];
+	uint8_t *eaddr;
+	uint32_t ffval, hi, lo;
 	int nhash, i;
 
 	DWC_ASSERT_LOCKED(sc);
@@ -601,27 +623,13 @@ dwc_setup_rxfilter(struct dwc_softc *sc)
 	if ((ifp->if_flags & IFF_ALLMULTI) != 0) {
 		ffval = (FRAME_FILTER_PM);
 		for (i = 0; i < nhash; i++)
-			hash[i] = ~0;
+			ctx.hash[i] = ~0;
 	} else {
 		ffval = (FRAME_FILTER_HMC);
 		for (i = 0; i < nhash; i++)
-			hash[i] = 0;
-		if_maddr_rlock(ifp);
-		CK_STAILQ_FOREACH(ifma, &sc->ifp->if_multiaddrs, ifma_link) {
-			if (ifma->ifma_addr->sa_family != AF_LINK)
-				continue;
-			crc = ether_crc32_le(LLADDR((struct sockaddr_dl *)
-				ifma->ifma_addr), ETHER_ADDR_LEN);
-
-			/* Take lower 8 bits and reverse it */
-			val = bitreverse(~crc & 0xff);
-			if (sc->mactype == DWC_GMAC_ALT_DESC)
-				val >>= nhash; /* Only need lower 6 bits */
-			hashreg = (val >> 5);
-			hashbit = (val & 31);
-			hash[hashreg] |= (1 << hashbit);
-		}
-		if_maddr_runlock(ifp);
+			ctx.hash[i] = 0;
+		ctx.sc = sc;
+		if_foreach_llmaddr(ifp, dwc_hash_maddr, &ctx);
 	}
 
 	/*
@@ -641,11 +649,11 @@ dwc_setup_rxfilter(struct dwc_softc *sc)
 	WRITE4(sc, MAC_ADDRESS_HIGH(0), hi);
 	WRITE4(sc, MAC_FRAME_FILTER, ffval);
 	if (sc->mactype == DWC_GMAC_ALT_DESC) {
-		WRITE4(sc, GMAC_MAC_HTLOW, hash[0]);
-		WRITE4(sc, GMAC_MAC_HTHIGH, hash[1]);
+		WRITE4(sc, GMAC_MAC_HTLOW, ctx.hash[0]);
+		WRITE4(sc, GMAC_MAC_HTHIGH, ctx.hash[1]);
 	} else {
 		for (i = 0; i < nhash; i++)
-			WRITE4(sc, HASH_TABLE_REG(i), hash[i]);
+			WRITE4(sc, HASH_TABLE_REG(i), ctx.hash[i]);
 	}
 }
 
@@ -1074,16 +1082,13 @@ dwc_reset(device_t dev)
 	if (OF_hasprop(node, "snps,reset-active-low"))
 		pin_value = GPIO_PIN_HIGH;
 
-	if (flags & GPIO_ACTIVE_LOW)
-		pin_value = !pin_value;
-
 	GPIO_PIN_SETFLAGS(gpio, pin, GPIO_PIN_OUTPUT);
 	GPIO_PIN_SET(gpio, pin, pin_value);
-	DELAY(delay_prop[0]);
+	DELAY(delay_prop[0] * 5);
 	GPIO_PIN_SET(gpio, pin, !pin_value);
-	DELAY(delay_prop[1]);
+	DELAY(delay_prop[1] * 5);
 	GPIO_PIN_SET(gpio, pin, pin_value);
-	DELAY(delay_prop[2]);
+	DELAY(delay_prop[2] * 5);
 
 	return (0);
 }
@@ -1160,10 +1165,6 @@ dwc_attach(device_t dev)
 		device_printf(dev, "could not allocate resources\n");
 		return (ENXIO);
 	}
-
-	/* Memory interface */
-	sc->bst = rman_get_bustag(sc->res[0]);
-	sc->bsh = rman_get_bushandle(sc->res[0]);
 
 	/* Read MAC before reset */
 	if (dwc_get_hwaddr(sc, macaddr)) {

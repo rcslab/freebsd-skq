@@ -92,7 +92,7 @@ static int	zfs_env_count;
 SLIST_HEAD(zfs_be_list, zfs_be_entry) zfs_be_head = SLIST_HEAD_INITIALIZER(zfs_be_head);
 struct zfs_be_list *zfs_be_headp;
 struct zfs_be_entry {
-	const char *name;
+	char *name;
 	SLIST_ENTRY(zfs_be_entry) entries;
 } *zfs_be, *zfs_be_tmp;
 
@@ -110,9 +110,10 @@ zfs_open(const char *upath, struct open_file *f)
 		return (EINVAL);
 
 	/* allocate file system specific data structure */
-	fp = malloc(sizeof(struct file));
-	bzero(fp, sizeof(struct file));
-	f->f_fsdata = (void *)fp;
+	fp = calloc(1, sizeof(struct file));
+	if (fp == NULL)
+		return (ENOMEM);
+	f->f_fsdata = fp;
 
 	rc = zfs_lookup(mount, upath, &fp->f_dnode);
 	fp->f_seekp = 0;
@@ -129,9 +130,7 @@ zfs_close(struct open_file *f)
 	struct file *fp = (struct file *)f->f_fsdata;
 
 	dnode_cache_obj = NULL;
-	f->f_fsdata = (void *)0;
-	if (fp == (struct file *)0)
-		return (0);
+	f->f_fsdata = NULL;
 
 	free(fp);
 	return (0);
@@ -250,7 +249,9 @@ zfs_readdir(struct open_file *f, struct dirent *d)
 				return (rc);
 
 			fp->f_seekp = bsize;
-			fp->f_zap_leaf = (zap_leaf_phys_t *)malloc(bsize);
+			fp->f_zap_leaf = malloc(bsize);
+			if (fp->f_zap_leaf == NULL)
+				return (ENOMEM);
 			rc = dnode_read(spa, &fp->f_dnode,
 					fp->f_seekp,
 					fp->f_zap_leaf,
@@ -418,15 +419,17 @@ vdev_read(vdev_t *vdev, void *priv, off_t offset, void *buf, size_t bytes)
 
 	/* Return of partial sector data requires a bounce buffer. */
 	if ((head > 0) || do_tail_read) {
-		bouncebuf = zfs_alloc(secsz);
+		bouncebuf = malloc(secsz);
 		if (bouncebuf == NULL) {
 			printf("vdev_read: out of memory\n");
 			return (ENOMEM);
 		}
 	}
 
-	if (lseek(fd, start_sec * secsz, SEEK_SET) == -1)
-		return (errno);
+	if (lseek(fd, start_sec * secsz, SEEK_SET) == -1) {
+		ret = errno;
+		goto error;
+	}
 
 	/* Partial data return from first sector */
 	if (head > 0) {
@@ -461,8 +464,7 @@ vdev_read(vdev_t *vdev, void *priv, off_t offset, void *buf, size_t bytes)
 
 	ret = 0;
 error:
-	if (bouncebuf != NULL)
-		zfs_free(bouncebuf, secsz);
+	free(bouncebuf);
 	return (ret);
 }
 
@@ -588,7 +590,7 @@ zfs_probe_dev(const char *devname, uint64_t *pool_guid)
 		int slice = dev->d_slice;
 
 		free(dev);
-		if (partition != -1 && slice != -1) {
+		if (partition != D_PARTNONE && slice != D_SLICENONE) {
 			ret = zfs_probe(pa.fd, pool_guid);
 			if (ret == 0)
 				return (0);
@@ -667,7 +669,10 @@ zfs_dev_open(struct open_file *f, ...)
 	if (!spa)
 		return (ENXIO);
 	mount = malloc(sizeof(*mount));
-	rv = zfs_mount(spa, dev->root_guid, mount);
+	if (mount == NULL)
+		rv = ENOMEM;
+	else
+		rv = zfs_mount(spa, dev->root_guid, mount);
 	if (rv != 0) {
 		free(mount);
 		return (rv);
@@ -767,11 +772,16 @@ zfs_fmtdev(void *vdev)
 	if (dev->dd.d_dev->dv_type != DEVT_ZFS)
 		return (buf);
 
-	if (dev->pool_guid == 0) {
-		spa = STAILQ_FIRST(&zfs_pools);
+	/* Do we have any pools? */
+	spa = STAILQ_FIRST(&zfs_pools);
+	if (spa == NULL)
+		return (buf);
+
+	if (dev->pool_guid == 0)
 		dev->pool_guid = spa->spa_guid;
-	} else
+	else
 		spa = spa_find_by_guid(dev->pool_guid);
+
 	if (spa == NULL) {
 		printf("ZFS: can't find pool by guid\n");
 		return (buf);
@@ -896,6 +906,7 @@ zfs_bootenv_initial(const char *name)
 	while (!SLIST_EMPTY(&zfs_be_head)) {
 		zfs_be = SLIST_FIRST(&zfs_be_head);
 		SLIST_REMOVE_HEAD(&zfs_be_head, entries);
+		free(zfs_be->name);
 		free(zfs_be);
 	}
 
@@ -963,6 +974,7 @@ zfs_bootenv(const char *name)
 	while (!SLIST_EMPTY(&zfs_be_head)) {
 		zfs_be = SLIST_FIRST(&zfs_be_head);
 		SLIST_REMOVE_HEAD(&zfs_be_head, entries);
+		free(zfs_be->name);
 		free(zfs_be);
 	}
 
@@ -982,7 +994,11 @@ zfs_belist_add(const char *name, uint64_t value __unused)
 	if (zfs_be == NULL) {
 		return (ENOMEM);
 	}
-	zfs_be->name = name;
+	zfs_be->name = strdup(name);
+	if (zfs_be->name == NULL) {
+		free(zfs_be);
+		return (ENOMEM);
+	}
 	SLIST_INSERT_HEAD(&zfs_be_head, zfs_be, entries);
 	zfs_env_count++;
 

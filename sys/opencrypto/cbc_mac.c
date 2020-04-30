@@ -82,9 +82,6 @@ AES_CBC_MAC_Reinit(struct aes_cbc_mac_ctx *ctx, const uint8_t *nonce, uint16_t n
 	uint8_t *bp = b0, flags = 0;
 	uint8_t L = 0;
 	uint64_t dataLength = ctx->cryptDataLength;
-	
-	KASSERT(ctx->authDataLength != 0 || ctx->cryptDataLength != 0,
-	    ("Auth Data and Data lengths cannot both be 0"));
 
 	KASSERT(nonceLen >= 7 && nonceLen <= 13,
 	    ("nonceLen must be between 7 and 13 bytes"));
@@ -124,23 +121,31 @@ AES_CBC_MAC_Reinit(struct aes_cbc_mac_ctx *ctx, const uint8_t *nonce, uint16_t n
 	rijndaelEncrypt(ctx->keysched, ctx->rounds, b0, ctx->block);
 	/* If there is auth data, we need to set up the staging block */
 	if (ctx->authDataLength) {
+		size_t addLength;
 		if (ctx->authDataLength < ((1<<16) - (1<<8))) {
 			uint16_t sizeVal = htobe16(ctx->authDataLength);
 			bcopy(&sizeVal, ctx->staging_block, sizeof(sizeVal));
-			ctx->blockIndex = sizeof(sizeVal);
+			addLength = sizeof(sizeVal);
 		} else if (ctx->authDataLength < (1ULL<<32)) {
 			uint32_t sizeVal = htobe32(ctx->authDataLength);
 			ctx->staging_block[0] = 0xff;
 			ctx->staging_block[1] = 0xfe;
 			bcopy(&sizeVal, ctx->staging_block+2, sizeof(sizeVal));
-			ctx->blockIndex = 2 + sizeof(sizeVal);
+			addLength = 2 + sizeof(sizeVal);
 		} else {
 			uint64_t sizeVal = htobe64(ctx->authDataLength);
 			ctx->staging_block[0] = 0xff;
 			ctx->staging_block[1] = 0xff;
 			bcopy(&sizeVal, ctx->staging_block+2, sizeof(sizeVal));
-			ctx->blockIndex = 2 + sizeof(sizeVal);
+			addLength = 2 + sizeof(sizeVal);
 		}
+		ctx->blockIndex = addLength;
+		/*
+		 * The length descriptor goes into the AAD buffer, so we
+		 * need to account for it.
+		 */
+		ctx->authDataLength += addLength;
+		ctx->authDataCount = addLength;
 	}
 }
 
@@ -181,10 +186,9 @@ AES_CBC_MAC_Update(struct aes_cbc_mac_ctx *ctx, const uint8_t *data,
 			ctx->authDataCount += copy_amt;
 			ctx->blockIndex += copy_amt;
 			ctx->blockIndex %= sizeof(ctx->staging_block);
-			if (ctx->authDataCount == ctx->authDataLength)
-				length = 0;
+
 			if (ctx->blockIndex == 0 ||
-			    ctx->authDataCount >= ctx->authDataLength) {
+			    ctx->authDataCount == ctx->authDataLength) {
 				/*
 				 * We're done with this block, so we
 				 * xor staging_block with block, and then
@@ -193,8 +197,17 @@ AES_CBC_MAC_Update(struct aes_cbc_mac_ctx *ctx, const uint8_t *data,
 				xor_and_encrypt(ctx, ctx->staging_block, ctx->block);
 				bzero(ctx->staging_block, sizeof(ctx->staging_block));
 				ctx->blockIndex = 0;
+				if (ctx->authDataCount >= ctx->authDataLength)
+					break;
 			}
 		}
+		/*
+		 * We'd like to be able to check length == 0 and return
+		 * here, but the way OCF calls us, length is always
+		 * blksize (16, in this case).  So we have to count on
+		 * the fact that OCF calls us separately for the AAD and
+		 * for the real data.
+		 */
 		return (0);
 	}
 	/*

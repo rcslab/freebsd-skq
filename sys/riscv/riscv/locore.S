@@ -53,25 +53,43 @@
 	.text
 	.globl _start
 _start:
+	/* Set the global pointer */
+.option push
+.option norelax
+	lla	gp, __global_pointer$
+.option pop
+
 	/* Get the physical address kernel loaded to */
-	la	t0, virt_map
+	lla	t0, virt_map
 	ld	t1, 0(t0)
 	sub	t1, t1, t0
 	li	t2, KERNBASE
 	sub	s9, t2, t1	/* s9 = physmem base */
-	mv	s10, a0		/* s10 = hart id */
-	mv	s11, a1		/* s11 = dtbp */
 
-	/* Direct secondary cores to mpentry */
-	bnez	s10, mpentry
+	/*
+	 * a0 = hart id
+	 * a1 = dtbp
+	 */
+
+	/* Pick a hart to run the boot process. */
+	lla	t0, hart_lottery
+	li	t1, 1
+	amoadd.w t0, t1, 0(t0)
+
+	/*
+	 * We must jump to mpentry in the non-BSP case because the offset is
+	 * too large to fit in a 12-bit branch immediate.
+	 */
+	beqz	t0, 1f
+	j	mpentry
 
 	/*
 	 * Page tables
 	 */
-
+1:
 	/* Add L1 entry for kernel */
-	la	s1, pagetable_l1
-	la	s2, pagetable_l2	/* Link to next level PN */
+	lla	s1, pagetable_l1
+	lla	s2, pagetable_l2	/* Link to next level PN */
 	srli	s2, s2, PAGE_SHIFT
 
 	li	a5, KERNBASE
@@ -88,7 +106,7 @@ _start:
 	sd	t6, (t0)
 
 	/* Level 2 superpages (512 x 2MiB) */
-	la	s1, pagetable_l2
+	lla	s1, pagetable_l2
 	srli	t4, s9, 21		/* Div physmem base by 2 MiB */
 	li	t2, 512			/* Build 512 entries */
 	add	t3, t4, t2
@@ -104,8 +122,8 @@ _start:
 	bltu	t4, t3, 2b
 
 	/* Create an L1 page for early devmap */
-	la	s1, pagetable_l1
-	la	s2, pagetable_l2_devmap	/* Link to next level PN */
+	lla	s1, pagetable_l1
+	lla	s2, pagetable_l2_devmap	/* Link to next level PN */
 	srli	s2, s2, PAGE_SHIFT
 
 	li	a5, (VM_MAX_KERNEL_ADDRESS - L2_SIZE)
@@ -122,8 +140,8 @@ _start:
 	sd	t6, (t0)
 
 	/* Create an L2 page superpage for DTB */
-	la	s1, pagetable_l2_devmap
-	mv	s2, s11
+	lla	s1, pagetable_l2_devmap
+	mv	s2, a1
 	srli	s2, s2, PAGE_SHIFT
 
 	li	t0, (PTE_KERN)
@@ -140,14 +158,14 @@ _start:
 	/* Page tables END */
 
 	/* Setup supervisor trap vector */
-	la	t0, va
+	lla	t0, va
 	sub	t0, t0, s9
 	li	t1, KERNBASE
 	add	t0, t0, t1
 	csrw	stvec, t0
 
 	/* Set page tables base register */
-	la	s2, pagetable_l1
+	lla	s2, pagetable_l1
 	srli	s2, s2, PAGE_SHIFT
 	li	t0, SATP_MODE_SV39
 	or	s2, s2, t0
@@ -156,6 +174,11 @@ _start:
 
 	.align 2
 va:
+	/* Set the global pointer again, this time with the virtual address. */
+.option push
+.option norelax
+	lla	gp, __global_pointer$
+.option pop
 
 	/* Setup supervisor trap vector */
 	la	t0, cpu_exception_handler
@@ -168,29 +191,34 @@ va:
 	/* Initialize stack pointer */
 	la	s3, initstack_end
 	mv	sp, s3
-	addi	sp, sp, -PCB_SIZE
 
-	/* Clear BSS  */
-	la	a0, _C_LABEL(__bss_start)
+	/* Allocate space for thread0 PCB and riscv_bootparams */
+	addi	sp, sp, -(PCB_SIZE + RISCV_BOOTPARAMS_SIZE) & ~STACKALIGNBYTES
+
+	/* Clear BSS */
+	la	s0, _C_LABEL(__bss_start)
 	la	s1, _C_LABEL(_end)
 1:
-	sd	zero, 0(a0)
-	addi	a0, a0, 8
-	bltu	a0, s1, 1b
+	sd	zero, 0(s0)
+	addi	s0, s0, 8
+	bltu	s0, s1, 1b
+
+#ifdef SMP
+	/* Store boot hart id. */
+	la	t0, boot_hart
+	sw	a0, 0(t0)
+#endif
 
 	/* Fill riscv_bootparams */
-	addi	sp, sp, -40
-
 	la	t0, pagetable_l1
-	sd	t0, 0(sp) /* kern_l1pt */
-	sd	s9, 8(sp) /* kern_phys */
+	sd	t0, RISCV_BOOTPARAMS_KERN_L1PT(sp)
+	sd	s9, RISCV_BOOTPARAMS_KERN_PHYS(sp)
 
-	la	t0, initstack_end
-	sd	t0, 16(sp) /* kern_stack */
+	la	t0, initstack
+	sd	t0, RISCV_BOOTPARAMS_KERN_STACK(sp)
 
-	li	t0, (VM_MAX_KERNEL_ADDRESS - 2 * L2_SIZE)
-	sd	t0, 24(sp) /* dtbp_virt */
-	sd	s11, 32(sp) /* dtbp_phys */
+	li	t0, (VM_EARLY_DTB_ADDRESS)
+	sd	t0, RISCV_BOOTPARAMS_DTBP_VIRT(sp)
 
 	mv	a0, sp
 	call	_C_LABEL(initriscv)	/* Off we go */
@@ -233,15 +261,11 @@ pagetable_l2:
 pagetable_l2_devmap:
 	.space	PAGE_SIZE
 
-        .align 3
-virt_map:
-        .quad   virt_map
-
-	/* Not in use, but required for linking. */
 	.align 3
-	.globl __global_pointer$
-__global_pointer$:
-	.space	8
+virt_map:
+	.quad   virt_map
+hart_lottery:
+	.space	4
 
 	.globl init_pt_va
 init_pt_va:
@@ -267,7 +291,7 @@ ENTRY(mpentry)
 	li	t1, 4
 	mulw	t1, t1, a0
 	/* Get the pointer */
-	la	t0, __riscv_boot_ap
+	lla	t0, __riscv_boot_ap
 	add	t0, t0, t1
 
 1:
@@ -276,23 +300,18 @@ ENTRY(mpentry)
 	beqz	t1, 1b
 
 	/* Setup stack pointer */
-	la	t0, secondary_stacks
-	li	t1, (PAGE_SIZE * KSTACK_PAGES)
-	mulw	t1, t1, s10
-	add	t0, t0, t1
-	sub	t0, t0, s9
-	li	t1, KERNBASE
-	add	sp, t0, t1
+	lla	t0, bootstack
+	ld	sp, 0(t0)
 
 	/* Setup supervisor trap vector */
-	la	t0, mpva
+	lla	t0, mpva
 	sub	t0, t0, s9
 	li	t1, KERNBASE
 	add	t0, t0, t1
 	csrw	stvec, t0
 
 	/* Set page tables base register */
-	la	s2, pagetable_l1
+	lla	s2, pagetable_l1
 	srli	s2, s2, PAGE_SHIFT
 	li	t0, SATP_MODE_SV39
 	or	s2, s2, t0
@@ -301,6 +320,12 @@ ENTRY(mpentry)
 
 	.align 2
 mpva:
+	/* Set the global pointer again, this time with the virtual address. */
+.option push
+.option norelax
+	lla	gp, __global_pointer$
+.option pop
+
 	/* Setup supervisor trap vector */
 	la	t0, cpu_exception_handler
 	csrw	stvec, t0

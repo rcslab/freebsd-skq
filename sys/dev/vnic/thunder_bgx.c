@@ -502,9 +502,8 @@ bgx_add_dmac_addr(uint64_t dmac, int node, int bgx_idx, int lmac)
 	bgx_idx += node * MAX_BGX_PER_CN88XX;
 	bgx = bgx_vnic[bgx_idx];
 
-	if (!bgx) {
-		device_printf(bgx->dev,
-		    "BGX%d not yet initialized, ignoring DMAC addition\n",
+	if (bgx == NULL) {
+		printf("BGX%d not yet initialized, ignoring DMAC addition\n",
 		    bgx_idx);
 		return;
 	}
@@ -1053,7 +1052,7 @@ bgx_init_hw(struct bgx *bgx)
 static void
 bgx_get_qlm_mode(struct bgx *bgx)
 {
-	device_t dev = bgx->dev;;
+	device_t dev = bgx->dev;
 	int lmac_type;
 	int train_en;
 

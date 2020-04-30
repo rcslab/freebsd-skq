@@ -834,8 +834,8 @@ freebsd32_gettimeofday(struct thread *td,
 		error = copyout(&atv32, uap->tp, sizeof (atv32));
 	}
 	if (error == 0 && uap->tzp != NULL) {
-		rtz.tz_minuteswest = tz_minuteswest;
-		rtz.tz_dsttime = tz_dsttime;
+		rtz.tz_minuteswest = 0;
+		rtz.tz_dsttime = 0;
 		error = copyout(&rtz, uap->tzp, sizeof (rtz));
 	}
 	return (error);
@@ -1160,8 +1160,8 @@ freebsd32_copy_msg_out(struct msghdr *msg, struct mbuf *control)
 				cm = NULL;
 			}
 
-			msg->msg_controllen += FREEBSD32_ALIGN(sizeof(*cm)) +
-			    datalen_out;
+			msg->msg_controllen +=
+			    FREEBSD32_CMSG_SPACE(datalen_out);
 		}
 	}
 	if (len == 0 && m != NULL) {
@@ -2256,6 +2256,32 @@ freebsd32___sysctl(struct thread *td, struct freebsd32___sysctl_args *uap)
 }
 
 int
+freebsd32___sysctlbyname(struct thread *td,
+    struct freebsd32___sysctlbyname_args *uap)
+{
+	size_t oldlen, rv;
+	int error;
+	uint32_t tmp;
+
+	if (uap->oldlenp != NULL) {
+		error = fueword32(uap->oldlenp, &tmp);
+		oldlen = tmp;
+	} else {
+		error = oldlen = 0;
+	}
+	if (error != 0)
+		return (EFAULT);
+	error = kern___sysctlbyname(td, uap->name, uap->namelen, uap->old,
+	    &oldlen, uap->new, uap->newlen, &rv, SCTL_MASK32, 1);
+	if (error != 0)
+		return (error);
+	if (uap->oldlenp != NULL)
+		error = suword32(uap->oldlenp, rv);
+
+	return (error);
+}
+
+int
 freebsd32_jail(struct thread *td, struct freebsd32_jail_args *uap)
 {
 	uint32_t version;
@@ -2625,7 +2651,7 @@ freebsd32_user_clock_nanosleep(struct thread *td, clockid_t clock_id,
 {
 	struct timespec32 rmt32, rqt32;
 	struct timespec rmt, rqt;
-	int error;
+	int error, error2;
 
 	error = copyin(ua_rqtp, &rqt32, sizeof(rqt32));
 	if (error)
@@ -2634,18 +2660,13 @@ freebsd32_user_clock_nanosleep(struct thread *td, clockid_t clock_id,
 	CP(rqt32, rqt, tv_sec);
 	CP(rqt32, rqt, tv_nsec);
 
-	if (ua_rmtp != NULL && (flags & TIMER_ABSTIME) == 0 &&
-	    !useracc(ua_rmtp, sizeof(rmt32), VM_PROT_WRITE))
-		return (EFAULT);
 	error = kern_clock_nanosleep(td, clock_id, flags, &rqt, &rmt);
 	if (error == EINTR && ua_rmtp != NULL && (flags & TIMER_ABSTIME) == 0) {
-		int error2;
-
 		CP(rmt, rmt32, tv_sec);
 		CP(rmt, rmt32, tv_nsec);
 
 		error2 = copyout(&rmt32, ua_rmtp, sizeof(rmt32));
-		if (error2)
+		if (error2 != 0)
 			error = error2;
 	}
 	return (error);
@@ -3093,19 +3114,18 @@ syscall32_helper_unregister(struct syscall_helper_data *sd)
 	return (kern_syscall_helper_unregister(freebsd32_sysent, sd));
 }
 
-register_t *
-freebsd32_copyout_strings(struct image_params *imgp)
+int
+freebsd32_copyout_strings(struct image_params *imgp, uintptr_t *stack_base)
 {
 	int argc, envc, i;
 	u_int32_t *vectp;
 	char *stringp;
-	uintptr_t destp;
-	u_int32_t *stack_base;
+	uintptr_t destp, ustringp;
 	struct freebsd32_ps_strings *arginfo;
 	char canary[sizeof(long) * 8];
 	int32_t pagesizes32[MAXPAGESIZES];
 	size_t execpath_len;
-	int szsigcode;
+	int error, szsigcode;
 
 	/*
 	 * Calculate string base and vector table pointers.
@@ -3117,6 +3137,7 @@ freebsd32_copyout_strings(struct image_params *imgp)
 		execpath_len = 0;
 	arginfo = (struct freebsd32_ps_strings *)curproc->p_sysent->
 	    sv_psstrings;
+	imgp->ps_strings = arginfo;
 	if (imgp->proc->p_sysent->sv_sigcode_base == 0)
 		szsigcode = *(imgp->proc->p_sysent->sv_szsigcode);
 	else
@@ -3129,8 +3150,10 @@ freebsd32_copyout_strings(struct image_params *imgp)
 	if (szsigcode != 0) {
 		destp -= szsigcode;
 		destp = rounddown2(destp, sizeof(uint32_t));
-		copyout(imgp->proc->p_sysent->sv_sigcode, (void *)destp,
+		error = copyout(imgp->proc->p_sysent->sv_sigcode, (void *)destp,
 		    szsigcode);
+		if (error != 0)
+			return (error);
 	}
 
 	/*
@@ -3138,8 +3161,10 @@ freebsd32_copyout_strings(struct image_params *imgp)
 	 */
 	if (execpath_len != 0) {
 		destp -= execpath_len;
-		imgp->execpathp = destp;
-		copyout(imgp->execpath, (void *)destp, execpath_len);
+		imgp->execpathp = (void *)destp;
+		error = copyout(imgp->execpath, imgp->execpathp, execpath_len);
+		if (error != 0)
+			return (error);
 	}
 
 	/*
@@ -3147,8 +3172,10 @@ freebsd32_copyout_strings(struct image_params *imgp)
 	 */
 	arc4rand(canary, sizeof(canary), 0);
 	destp -= sizeof(canary);
-	imgp->canary = destp;
-	copyout(canary, (void *)destp, sizeof(canary));
+	imgp->canary = (void *)destp;
+	error = copyout(canary, imgp->canary, sizeof(canary));
+	if (error != 0)
+		return (error);
 	imgp->canarylen = sizeof(canary);
 
 	/*
@@ -3158,22 +3185,32 @@ freebsd32_copyout_strings(struct image_params *imgp)
 		pagesizes32[i] = (uint32_t)pagesizes[i];
 	destp -= sizeof(pagesizes32);
 	destp = rounddown2(destp, sizeof(uint32_t));
-	imgp->pagesizes = destp;
-	copyout(pagesizes32, (void *)destp, sizeof(pagesizes32));
+	imgp->pagesizes = (void *)destp;
+	error = copyout(pagesizes32, imgp->pagesizes, sizeof(pagesizes32));
+	if (error != 0)
+		return (error);
 	imgp->pagesizeslen = sizeof(pagesizes32);
 
+	/*
+	 * Allocate room for the argument and environment strings.
+	 */
 	destp -= ARG_MAX - imgp->args->stringspace;
 	destp = rounddown2(destp, sizeof(uint32_t));
+	ustringp = destp;
 
-	vectp = (uint32_t *)destp;
+	if (imgp->sysent->sv_stackgap != NULL)
+		imgp->sysent->sv_stackgap(imgp, &destp);
+
 	if (imgp->auxargs) {
 		/*
 		 * Allocate room on the stack for the ELF auxargs
 		 * array.  It has up to AT_COUNT entries.
 		 */
-		vectp -= howmany(AT_COUNT * sizeof(Elf32_Auxinfo),
-		    sizeof(*vectp));
+		destp -= AT_COUNT * sizeof(Elf32_Auxinfo);
+		destp = rounddown2(destp, sizeof(uint32_t));
 	}
+
+	vectp = (uint32_t *)destp;
 
 	/*
 	 * Allocate room for the argv[] and env vectors including the
@@ -3184,7 +3221,7 @@ freebsd32_copyout_strings(struct image_params *imgp)
 	/*
 	 * vectp also becomes our initial stack base
 	 */
-	stack_base = vectp;
+	*stack_base = (uintptr_t)vectp;
 
 	stringp = imgp->args->begin_argv;
 	argc = imgp->args->argc;
@@ -3192,44 +3229,63 @@ freebsd32_copyout_strings(struct image_params *imgp)
 	/*
 	 * Copy out strings - arguments and environment.
 	 */
-	copyout(stringp, (void *)destp, ARG_MAX - imgp->args->stringspace);
+	error = copyout(stringp, (void *)ustringp,
+	    ARG_MAX - imgp->args->stringspace);
+	if (error != 0)
+		return (error);
 
 	/*
 	 * Fill in "ps_strings" struct for ps, w, etc.
 	 */
-	suword32(&arginfo->ps_argvstr, (u_int32_t)(intptr_t)vectp);
-	suword32(&arginfo->ps_nargvstr, argc);
+	imgp->argv = vectp;
+	if (suword32(&arginfo->ps_argvstr, (u_int32_t)(intptr_t)vectp) != 0 ||
+	    suword32(&arginfo->ps_nargvstr, argc) != 0)
+		return (EFAULT);
 
 	/*
 	 * Fill in argument portion of vector table.
 	 */
 	for (; argc > 0; --argc) {
-		suword32(vectp++, (u_int32_t)(intptr_t)destp);
+		if (suword32(vectp++, ustringp) != 0)
+			return (EFAULT);
 		while (*stringp++ != 0)
-			destp++;
-		destp++;
+			ustringp++;
+		ustringp++;
 	}
 
 	/* a null vector table pointer separates the argp's from the envp's */
-	suword32(vectp++, 0);
+	if (suword32(vectp++, 0) != 0)
+		return (EFAULT);
 
-	suword32(&arginfo->ps_envstr, (u_int32_t)(intptr_t)vectp);
-	suword32(&arginfo->ps_nenvstr, envc);
+	imgp->envv = vectp;
+	if (suword32(&arginfo->ps_envstr, (u_int32_t)(intptr_t)vectp) != 0 ||
+	    suword32(&arginfo->ps_nenvstr, envc) != 0)
+		return (EFAULT);
 
 	/*
 	 * Fill in environment portion of vector table.
 	 */
 	for (; envc > 0; --envc) {
-		suword32(vectp++, (u_int32_t)(intptr_t)destp);
+		if (suword32(vectp++, ustringp) != 0)
+			return (EFAULT);
 		while (*stringp++ != 0)
-			destp++;
-		destp++;
+			ustringp++;
+		ustringp++;
 	}
 
 	/* end of vector table is a null pointer */
-	suword32(vectp, 0);
+	if (suword32(vectp, 0) != 0)
+		return (EFAULT);
 
-	return ((register_t *)stack_base);
+	if (imgp->auxargs) {
+		vectp++;
+		error = imgp->sysent->sv_copyout_auxargs(imgp,
+		    (uintptr_t)vectp);
+		if (error != 0)
+			return (error);
+	}
+
+	return (0);
 }
 
 int
@@ -3327,9 +3383,15 @@ freebsd32_procctl(struct thread *td, struct freebsd32_procctl_args *uap)
 	} x32;
 	int error, error1, flags, signum;
 
+	if (uap->com >= PROC_PROCCTL_MD_MIN)
+		return (cpu_procctl(td, uap->idtype, PAIR32TO64(id_t, uap->id),
+		    uap->com, PTRIN(uap->data)));
+
 	switch (uap->com) {
 	case PROC_ASLR_CTL:
+	case PROC_PROTMAX_CTL:
 	case PROC_SPROTECT:
+	case PROC_STACKGAP_CTL:
 	case PROC_TRACE_CTL:
 	case PROC_TRAPCAP_CTL:
 		error = copyin(PTRIN(uap->data), &flags, sizeof(flags));
@@ -3361,6 +3423,8 @@ freebsd32_procctl(struct thread *td, struct freebsd32_procctl_args *uap)
 		data = &x.rk;
 		break;
 	case PROC_ASLR_STATUS:
+	case PROC_PROTMAX_STATUS:
+	case PROC_STACKGAP_STATUS:
 	case PROC_TRACE_STATUS:
 	case PROC_TRAPCAP_STATUS:
 		data = &flags;
@@ -3390,6 +3454,8 @@ freebsd32_procctl(struct thread *td, struct freebsd32_procctl_args *uap)
 			error = error1;
 		break;
 	case PROC_ASLR_STATUS:
+	case PROC_PROTMAX_STATUS:
+	case PROC_STACKGAP_STATUS:
 	case PROC_TRACE_STATUS:
 	case PROC_TRAPCAP_STATUS:
 		if (error == 0)

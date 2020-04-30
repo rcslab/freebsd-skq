@@ -87,12 +87,12 @@ static struct sysentvec elf32_freebsd_sysvec = {
 	.sv_coredump	= elf32_coredump,
 	.sv_imgact_try	= NULL,
 	.sv_minsigstksz	= MINSIGSTKSZ,
-	.sv_pagesize	= PAGE_SIZE,
 	.sv_minuser	= FREEBSD32_MINUSER,
 	.sv_maxuser	= FREEBSD32_MAXUSER,
 	.sv_usrstack	= FREEBSD32_USRSTACK,
 	.sv_psstrings	= FREEBSD32_PS_STRINGS,
 	.sv_stackprot	= VM_PROT_READ | VM_PROT_WRITE,
+	.sv_copyout_auxargs = elf32_freebsd_copyout_auxargs,
 	.sv_copyout_strings = freebsd32_copyout_strings,
 	.sv_setregs	= freebsd32_setregs,
 	.sv_fixlimit	= NULL, // XXX
@@ -116,7 +116,7 @@ static Elf32_Brandinfo freebsd32_brand_info = {
 	.emul_path	= NULL,
 	.interp_path	= "/libexec/ld-elf.so.1",
 	.sysvec		= &elf32_freebsd_sysvec,
-	.interp_newpath	= NULL,
+	.interp_newpath	= "/libexec/ld-elf32.so.1",
 	.brand_note	= &elf32_freebsd_brandnote,
 	.flags		= BI_CAN_EXEC_DYN | BI_BRAND_NOTE,
 	.header_supported= elf32_arm_abi_supported,
@@ -131,7 +131,7 @@ elf32_arm_abi_supported(struct image_params *imgp)
 	const Elf32_Ehdr *hdr;
 
 	/* Check if we support AArch32 */
-	if (ID_AA64PFR0_EL0(READ_SPECIALREG(id_aa64pfr0_el1)) !=
+	if (ID_AA64PFR0_EL0_VAL(READ_SPECIALREG(id_aa64pfr0_el1)) !=
 	    ID_AA64PFR0_EL0_64_32)
 		return (FALSE);
 
@@ -232,7 +232,7 @@ freebsd32_set_syscall_retval(struct thread *td, int error)
 
 static void
 freebsd32_setregs(struct thread *td, struct image_params *imgp,
-   u_long stack)
+   uintptr_t stack)
 {
 	struct trapframe *tf = td->td_frame;
 

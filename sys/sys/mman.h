@@ -55,6 +55,14 @@
 #define	PROT_READ	0x01	/* pages can be read */
 #define	PROT_WRITE	0x02	/* pages can be written */
 #define	PROT_EXEC	0x04	/* pages can be executed */
+#if __BSD_VISIBLE
+#define	_PROT_ALL	(PROT_READ | PROT_WRITE | PROT_EXEC)
+#define	PROT_EXTRACT(prot)	((prot) & _PROT_ALL)
+
+#define	_PROT_MAX_SHIFT	16
+#define	PROT_MAX(prot)		((prot) << _PROT_MAX_SHIFT)
+#define	PROT_MAX_EXTRACT(prot)	(((prot) >> _PROT_MAX_SHIFT) & _PROT_ALL)
+#endif
 
 /*
  * Flags contain sharing type and options.
@@ -110,6 +118,15 @@
 #define	MAP_ALIGNMENT_SHIFT	24
 #define	MAP_ALIGNMENT_MASK	MAP_ALIGNED(0xff)
 #define	MAP_ALIGNED_SUPER	MAP_ALIGNED(1) /* align on a superpage */
+
+/*
+ * Flags provided to shm_rename
+ */
+/* Don't overwrite dest, if it exists */
+#define SHM_RENAME_NOREPLACE	(1 << 0)
+/* Atomically swap src and dest */
+#define SHM_RENAME_EXCHANGE	(1 << 1)
+
 #endif /* __BSD_VISIBLE */
 
 #if __POSIX_VISIBLE >= 199309
@@ -168,6 +185,36 @@
  * Anonymous object constant for shm_open().
  */
 #define	SHM_ANON		((char *)1)
+
+/*
+ * shmflags for shm_open2()
+ */
+#define	SHM_ALLOW_SEALING		0x00000001
+
+/*
+ * Flags for memfd_create().
+ */
+#define	MFD_CLOEXEC			0x00000001
+#define	MFD_ALLOW_SEALING		0x00000002
+
+/* UNSUPPORTED */
+#define	MFD_HUGETLB			0x00000004
+
+#define	MFD_HUGE_MASK			0xFC000000
+#define	MFD_HUGE_SHIFT			26
+#define	MFD_HUGE_64KB			(16 << MFD_HUGE_SHIFT)
+#define	MFD_HUGE_512KB			(19 << MFD_HUGE_SHIFT)
+#define	MFD_HUGE_1MB			(20 << MFD_HUGE_SHIFT)
+#define	MFD_HUGE_2MB			(21 << MFD_HUGE_SHIFT)
+#define	MFD_HUGE_8MB			(23 << MFD_HUGE_SHIFT)
+#define	MFD_HUGE_16MB			(24 << MFD_HUGE_SHIFT)
+#define	MFD_HUGE_32MB			(25 << MFD_HUGE_SHIFT)
+#define	MFD_HUGE_256MB			(28 << MFD_HUGE_SHIFT)
+#define	MFD_HUGE_512MB			(29 << MFD_HUGE_SHIFT)
+#define	MFD_HUGE_1GB			(30 << MFD_HUGE_SHIFT)
+#define	MFD_HUGE_2GB			(31 << MFD_HUGE_SHIFT)
+#define	MFD_HUGE_16GB			(34 << MFD_HUGE_SHIFT)
+
 #endif /* __BSD_VISIBLE */
 
 /*
@@ -230,6 +277,8 @@ struct shmfd {
 
 	struct rangelock shm_rl;
 	struct mtx	shm_mtx;
+
+	int		shm_seals;
 };
 #endif
 
@@ -274,6 +323,10 @@ int	mlockall(int);
 int	munlockall(void);
 int	shm_open(const char *, int, mode_t);
 int	shm_unlink(const char *);
+#endif
+#if __BSD_VISIBLE
+int	memfd_create(const char *, unsigned int);
+int	shm_rename(const char *, const char *, int);
 #endif
 __END_DECLS
 

@@ -1,6 +1,5 @@
 /*
  * Copyright 2017 Emmanuel Vadot <manu@freebsd.org>
- * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
@@ -32,10 +31,13 @@ __FBSDID("$FreeBSD$");
 #include <sys/kernel.h>
 #include <sys/bus.h>
 #include <sys/module.h>
+#include <sys/queue.h>
+#include <sys/taskqueue.h>
 
 #include <machine/bus.h>
 
 #include <dev/mmc/bridge.h>
+#include <dev/mmc/mmc_fdt_helpers.h>
 
 #include <dev/ofw/ofw_bus_subr.h>
 
@@ -49,12 +51,12 @@ __FBSDID("$FreeBSD$");
 
 enum RKTYPE {
 	RK2928 = 1,
-	RK3328,
+	RK3288,
 };
 
 static struct ofw_compat_data compat_data[] = {
 	{"rockchip,rk2928-dw-mshc",	RK2928},
-	{"rockchip,rk3328-dw-mshc",	RK3328},
+	{"rockchip,rk3288-dw-mshc",	RK3288},
 	{NULL,				0},
 };
 
@@ -134,6 +136,7 @@ static device_method_t rockchip_dwmmc_methods[] = {
 	/* bus interface */
 	DEVMETHOD(device_probe, rockchip_dwmmc_probe),
 	DEVMETHOD(device_attach, rockchip_dwmmc_attach),
+	DEVMETHOD(device_detach, dwmmc_detach),
 
 	DEVMETHOD_END
 };

@@ -195,8 +195,17 @@ pmc_intel_initialize(void)
 			cputype = PMC_CPU_INTEL_HASWELL;
 			nclasses = 5;
 			break;
+		case 0x37:
+		case 0x4A:
 		case 0x4D:      /* Per Intel document 330061-001 01/2014. */
+		case 0x5A:
+		case 0x5D:
 			cputype = PMC_CPU_INTEL_ATOM_SILVERMONT;
+			nclasses = 3;
+			break;
+		case 0x5C:	/* Per Intel document 325462-071US 10/2019. */
+		case 0x5F:
+			cputype = PMC_CPU_INTEL_ATOM_GOLDMONT;
 			nclasses = 3;
 			break;
 		}
@@ -226,6 +235,7 @@ pmc_intel_initialize(void)
 		 */
 	case PMC_CPU_INTEL_ATOM:
 	case PMC_CPU_INTEL_ATOM_SILVERMONT:
+	case PMC_CPU_INTEL_ATOM_GOLDMONT:
 	case PMC_CPU_INTEL_BROADWELL:
 	case PMC_CPU_INTEL_BROADWELL_XEON:
 	case PMC_CPU_INTEL_SKYLAKE_XEON:
@@ -289,6 +299,7 @@ pmc_intel_finalize(struct pmc_mdep *md)
 	switch (md->pmd_cputype) {
 	case PMC_CPU_INTEL_ATOM:
 	case PMC_CPU_INTEL_ATOM_SILVERMONT:
+	case PMC_CPU_INTEL_ATOM_GOLDMONT:
 	case PMC_CPU_INTEL_BROADWELL:
 	case PMC_CPU_INTEL_BROADWELL_XEON:
 	case PMC_CPU_INTEL_SKYLAKE_XEON:

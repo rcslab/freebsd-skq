@@ -125,6 +125,7 @@ static boolean_t scan_ds_queue_contains(dsl_scan_t *scn, uint64_t dsobj,
 static void scan_ds_queue_insert(dsl_scan_t *scn, uint64_t dsobj, uint64_t txg);
 static void scan_ds_queue_remove(dsl_scan_t *scn, uint64_t dsobj);
 static void scan_ds_queue_sync(dsl_scan_t *scn, dmu_tx_t *tx);
+static uint64_t dsl_scan_count_leaves(vdev_t *vd);
 
 extern int zfs_vdev_async_write_active_min_dirty_percent;
 
@@ -136,12 +137,6 @@ extern int zfs_vdev_async_write_active_min_dirty_percent;
  */
 int zfs_scan_strict_mem_lim = B_FALSE;
 
-/*
- * Maximum number of parallelly executing I/Os per top-level vdev.
- * Tune with care. Very high settings (hundreds) are known to trigger
- * some firmware bugs and resets on certain SSDs.
- */
-int zfs_top_maxinflight = 32;		/* maximum I/Os per top-level */
 unsigned int zfs_resilver_delay = 2;	/* number of ticks to delay resilver -- 2 is a good number */
 unsigned int zfs_scrub_delay = 4;	/* number of ticks to delay scrub -- 4 is a good number */
 unsigned int zfs_scan_idle = 50;	/* idle window in clock ticks */
@@ -185,8 +180,6 @@ boolean_t zfs_no_scrub_io = B_FALSE; /* set to disable scrub i/o */
 boolean_t zfs_no_scrub_prefetch = B_FALSE; /* set to disable scrub prefetch */
 
 SYSCTL_DECL(_vfs_zfs);
-SYSCTL_UINT(_vfs_zfs, OID_AUTO, top_maxinflight, CTLFLAG_RWTUN,
-    &zfs_top_maxinflight, 0, "Maximum I/Os per top-level vdev");
 SYSCTL_UINT(_vfs_zfs, OID_AUTO, resilver_delay, CTLFLAG_RWTUN,
     &zfs_resilver_delay, 0, "Number of ticks to delay resilver");
 SYSCTL_UINT(_vfs_zfs, OID_AUTO, scrub_delay, CTLFLAG_RWTUN,
@@ -318,7 +311,7 @@ struct dsl_scan_io_queue {
 
 /* private data for dsl_scan_prefetch_cb() */
 typedef struct scan_prefetch_ctx {
-	refcount_t spc_refcnt;		/* refcount for memory management */
+	zfs_refcount_t spc_refcnt;	/* refcount for memory management */
 	dsl_scan_t *spc_scn;		/* dsl_scan_t for the pool */
 	boolean_t spc_root;		/* is this prefetch for an objset? */
 	uint8_t spc_indblkshift;	/* dn_indblkshift of current dnode */
@@ -439,7 +432,14 @@ dsl_scan_init(dsl_pool_t *dp, uint64_t txg)
 	scn->scn_async_destroying = spa_feature_is_active(dp->dp_spa,
 	    SPA_FEATURE_ASYNC_DESTROY);
 
-	bcopy(&scn->scn_phys, &scn->scn_phys_cached, sizeof (scn->scn_phys));
+	/*
+	 * Calculate the max number of in-flight bytes for pool-wide
+	 * scanning operations (minimum 1MB). Limits for the issuing
+	 * phase are done per top-level vdev and are handled separately.
+	 */
+	scn->scn_maxinflight_bytes = MAX(zfs_scan_vdev_limit *
+	    dsl_scan_count_leaves(spa->spa_root_vdev), 1ULL << 20);
+
 	avl_create(&scn->scn_queue, scan_ds_queue_compare, sizeof (scan_ds_t),
 	    offsetof(scan_ds_t, sds_node));
 	avl_create(&scn->scn_prefetch_queue, scan_prefetch_queue_compare,
@@ -496,6 +496,8 @@ dsl_scan_init(dsl_pool_t *dp, uint64_t txg)
 			    (longlong_t)scn->scn_restart_txg);
 		}
 	}
+
+	bcopy(&scn->scn_phys, &scn->scn_phys_cached, sizeof (scn->scn_phys));
 
 	/* reload the queue into the in-core state */
 	if (scn->scn_phys.scn_queue_obj != 0) {
@@ -919,6 +921,7 @@ dsl_scrub_pause_resume_sync(void *arg, dmu_tx_t *tx)
 		/* can't pause a scrub when there is no in-progress scrub */
 		spa->spa_scan_pass_scrub_pause = gethrestime_sec();
 		scn->scn_phys.scn_flags |= DSF_SCRUB_PAUSED;
+		scn->scn_phys_cached.scn_flags |= DSF_SCRUB_PAUSED;
 		dsl_scan_sync_state(scn, tx, SYNC_CACHED);
 		spa_event_notify(spa, NULL, NULL, ESC_ZFS_SCRUB_PAUSED);
 	} else {
@@ -933,6 +936,7 @@ dsl_scrub_pause_resume_sync(void *arg, dmu_tx_t *tx)
 			    gethrestime_sec() - spa->spa_scan_pass_scrub_pause;
 			spa->spa_scan_pass_scrub_pause = 0;
 			scn->scn_phys.scn_flags &= ~DSF_SCRUB_PAUSED;
+			scn->scn_phys_cached.scn_flags &= ~DSF_SCRUB_PAUSED;
 			dsl_scan_sync_state(scn, tx, SYNC_CACHED);
 		}
 	}
@@ -1101,10 +1105,13 @@ scan_ds_queue_sync(dsl_scan_t *scn, dmu_tx_t *tx)
 static boolean_t
 dsl_scan_should_clear(dsl_scan_t *scn)
 {
+	spa_t *spa = scn->scn_dp->dp_spa;
 	vdev_t *rvd = scn->scn_dp->dp_spa->spa_root_vdev;
-	uint64_t mlim_hard, mlim_soft, mused;
-	uint64_t alloc = metaslab_class_get_alloc(spa_normal_class(
-	    scn->scn_dp->dp_spa));
+	uint64_t alloc, mlim_hard, mlim_soft, mused;
+
+	alloc = metaslab_class_get_alloc(spa_normal_class(spa));
+	alloc += metaslab_class_get_alloc(spa_special_class(spa));
+	alloc += metaslab_class_get_alloc(spa_dedup_class(spa));
 
 	mlim_hard = MAX((physmem / zfs_scan_mem_lim_fact) * PAGESIZE,
 	    zfs_scan_mem_lim_min);
@@ -1326,8 +1333,8 @@ scan_prefetch_queue_compare(const void *a, const void *b)
 static void
 scan_prefetch_ctx_rele(scan_prefetch_ctx_t *spc, void *tag)
 {
-	if (refcount_remove(&spc->spc_refcnt, tag) == 0) {
-		refcount_destroy(&spc->spc_refcnt);
+	if (zfs_refcount_remove(&spc->spc_refcnt, tag) == 0) {
+		zfs_refcount_destroy(&spc->spc_refcnt);
 		kmem_free(spc, sizeof (scan_prefetch_ctx_t));
 	}
 }
@@ -1338,8 +1345,8 @@ scan_prefetch_ctx_create(dsl_scan_t *scn, dnode_phys_t *dnp, void *tag)
 	scan_prefetch_ctx_t *spc;
 
 	spc = kmem_alloc(sizeof (scan_prefetch_ctx_t), KM_SLEEP);
-	refcount_create(&spc->spc_refcnt);
-	refcount_add(&spc->spc_refcnt, tag);
+	zfs_refcount_create(&spc->spc_refcnt);
+	zfs_refcount_add(&spc->spc_refcnt, tag);
 	spc->spc_scn = scn;
 	if (dnp != NULL) {
 		spc->spc_datablkszsec = dnp->dn_datablkszsec;
@@ -1357,7 +1364,7 @@ scan_prefetch_ctx_create(dsl_scan_t *scn, dnode_phys_t *dnp, void *tag)
 static void
 scan_prefetch_ctx_add_ref(scan_prefetch_ctx_t *spc, void *tag)
 {
-	refcount_add(&spc->spc_refcnt, tag);
+	zfs_refcount_add(&spc->spc_refcnt, tag);
 }
 
 static boolean_t
@@ -1526,7 +1533,6 @@ dsl_scan_prefetch_thread(void *arg)
 	dsl_scan_t *scn = arg;
 	spa_t *spa = scn->scn_dp->dp_spa;
 	vdev_t *rvd = spa->spa_root_vdev;
-	uint64_t maxinflight = rvd->vdev_children * zfs_top_maxinflight;
 	scan_prefetch_issue_ctx_t *spic;
 
 	/* loop until we are told to stop */
@@ -2014,16 +2020,17 @@ ds_clone_swapped_bookmark(dsl_dataset_t *ds1, dsl_dataset_t *ds2,
 }
 
 /*
- * Called when a parent dataset and its clone are swapped. If we were
+ * Called when an origin dataset and its clone are swapped.  If we were
  * currently traversing the dataset, we need to switch to traversing the
- * newly promoted parent.
+ * newly promoted clone.
  */
 void
 dsl_scan_ds_clone_swapped(dsl_dataset_t *ds1, dsl_dataset_t *ds2, dmu_tx_t *tx)
 {
 	dsl_pool_t *dp = ds1->ds_dir->dd_pool;
 	dsl_scan_t *scn = dp->dp_scan;
-	uint64_t mintxg;
+	uint64_t mintxg1, mintxg2;
+	boolean_t ds1_queued, ds2_queued;
 
 	if (!dsl_scan_is_running(scn))
 		return;
@@ -2031,44 +2038,81 @@ dsl_scan_ds_clone_swapped(dsl_dataset_t *ds1, dsl_dataset_t *ds2, dmu_tx_t *tx)
 	ds_clone_swapped_bookmark(ds1, ds2, &scn->scn_phys.scn_bookmark);
 	ds_clone_swapped_bookmark(ds1, ds2, &scn->scn_phys_cached.scn_bookmark);
 
-	if (scan_ds_queue_contains(scn, ds1->ds_object, &mintxg)) {
-		scan_ds_queue_remove(scn, ds1->ds_object);
-		scan_ds_queue_insert(scn, ds2->ds_object, mintxg);
+	/*
+	 * Handle the in-memory scan queue.
+	 */
+	ds1_queued = scan_ds_queue_contains(scn, ds1->ds_object, &mintxg1);
+	ds2_queued = scan_ds_queue_contains(scn, ds2->ds_object, &mintxg2);
+
+	/* Sanity checking. */
+	if (ds1_queued) {
+		ASSERT3U(mintxg1, ==, dsl_dataset_phys(ds1)->ds_prev_snap_txg);
+		ASSERT3U(mintxg1, ==, dsl_dataset_phys(ds2)->ds_prev_snap_txg);
 	}
-	if (scan_ds_queue_contains(scn, ds2->ds_object, &mintxg)) {
-		scan_ds_queue_remove(scn, ds2->ds_object);
-		scan_ds_queue_insert(scn, ds1->ds_object, mintxg);
+	if (ds2_queued) {
+		ASSERT3U(mintxg2, ==, dsl_dataset_phys(ds1)->ds_prev_snap_txg);
+		ASSERT3U(mintxg2, ==, dsl_dataset_phys(ds2)->ds_prev_snap_txg);
 	}
 
-	if (zap_lookup_int_key(dp->dp_meta_objset, scn->scn_phys.scn_queue_obj,
-	    ds1->ds_object, &mintxg) == 0) {
-		int err;
-		ASSERT3U(mintxg, ==, dsl_dataset_phys(ds1)->ds_prev_snap_txg);
-		ASSERT3U(mintxg, ==, dsl_dataset_phys(ds2)->ds_prev_snap_txg);
-		VERIFY3U(0, ==, zap_remove_int(dp->dp_meta_objset,
+	if (ds1_queued && ds2_queued) {
+		/*
+		 * If both are queued, we don't need to do anything.
+		 * The swapping code below would not handle this case correctly,
+		 * since we can't insert ds2 if it is already there. That's
+		 * because scan_ds_queue_insert() prohibits a duplicate insert
+		 * and panics.
+		 */
+	} else if (ds1_queued) {
+		scan_ds_queue_remove(scn, ds1->ds_object);
+		scan_ds_queue_insert(scn, ds2->ds_object, mintxg1);
+	} else if (ds2_queued) {
+		scan_ds_queue_remove(scn, ds2->ds_object);
+		scan_ds_queue_insert(scn, ds1->ds_object, mintxg2);
+	}
+
+	/*
+	 * Handle the on-disk scan queue.
+	 * The on-disk state is an out-of-date version of the in-memory state,
+	 * so the in-memory and on-disk values for ds1_queued and ds2_queued may
+	 * be different. Therefore we need to apply the swap logic to the
+	 * on-disk state independently of the in-memory state.
+	 */
+	ds1_queued = zap_lookup_int_key(dp->dp_meta_objset,
+	    scn->scn_phys.scn_queue_obj, ds1->ds_object, &mintxg1) == 0;
+	ds2_queued = zap_lookup_int_key(dp->dp_meta_objset,
+	    scn->scn_phys.scn_queue_obj, ds2->ds_object, &mintxg2) == 0;
+
+	/* Sanity checking. */
+	if (ds1_queued) {
+		ASSERT3U(mintxg1, ==, dsl_dataset_phys(ds1)->ds_prev_snap_txg);
+		ASSERT3U(mintxg1, ==, dsl_dataset_phys(ds2)->ds_prev_snap_txg);
+	}
+	if (ds2_queued) {
+		ASSERT3U(mintxg2, ==, dsl_dataset_phys(ds1)->ds_prev_snap_txg);
+		ASSERT3U(mintxg2, ==, dsl_dataset_phys(ds2)->ds_prev_snap_txg);
+	}
+
+	if (ds1_queued && ds2_queued) {
+		/*
+		 * If both are queued, we don't need to do anything.
+		 * Alternatively, we could check for EEXIST from
+		 * zap_add_int_key() and back out to the original state, but
+		 * that would be more work than checking for this case upfront.
+		 */
+	} else if (ds1_queued) {
+		VERIFY3S(0, ==, zap_remove_int(dp->dp_meta_objset,
 		    scn->scn_phys.scn_queue_obj, ds1->ds_object, tx));
-		err = zap_add_int_key(dp->dp_meta_objset,
-		    scn->scn_phys.scn_queue_obj, ds2->ds_object, mintxg, tx);
-		VERIFY(err == 0 || err == EEXIST);
-		if (err == EEXIST) {
-			/* Both were there to begin with */
-			VERIFY(0 == zap_add_int_key(dp->dp_meta_objset,
-			    scn->scn_phys.scn_queue_obj,
-			    ds1->ds_object, mintxg, tx));
-		}
+		VERIFY3S(0, ==, zap_add_int_key(dp->dp_meta_objset,
+		    scn->scn_phys.scn_queue_obj, ds2->ds_object, mintxg1, tx));
 		zfs_dbgmsg("clone_swap ds %llu; in queue; "
 		    "replacing with %llu",
 		    (u_longlong_t)ds1->ds_object,
 		    (u_longlong_t)ds2->ds_object);
-	}
-	if (zap_lookup_int_key(dp->dp_meta_objset, scn->scn_phys.scn_queue_obj,
-	    ds2->ds_object, &mintxg) == 0) {
-		ASSERT3U(mintxg, ==, dsl_dataset_phys(ds1)->ds_prev_snap_txg);
-		ASSERT3U(mintxg, ==, dsl_dataset_phys(ds2)->ds_prev_snap_txg);
-		VERIFY3U(0, ==, zap_remove_int(dp->dp_meta_objset,
+	} else if (ds2_queued) {
+		VERIFY3S(0, ==, zap_remove_int(dp->dp_meta_objset,
 		    scn->scn_phys.scn_queue_obj, ds2->ds_object, tx));
-		VERIFY(0 == zap_add_int_key(dp->dp_meta_objset,
-		    scn->scn_phys.scn_queue_obj, ds1->ds_object, mintxg, tx));
+		VERIFY3S(0, ==, zap_add_int_key(dp->dp_meta_objset,
+		    scn->scn_phys.scn_queue_obj, ds1->ds_object, mintxg2, tx));
 		zfs_dbgmsg("clone_swap ds %llu; in queue; "
 		    "replacing with %llu",
 		    (u_longlong_t)ds2->ds_object,
@@ -2312,7 +2356,21 @@ dsl_scan_ddt_entry(dsl_scan_t *scn, enum zio_checksum checksum,
 	zbookmark_phys_t zb = { 0 };
 	int p;
 
-	if (scn->scn_phys.scn_state != DSS_SCANNING)
+	if (!dsl_scan_is_running(scn))
+		return;
+
+	/*
+	 * This function is special because it is the only thing
+	 * that can add scan_io_t's to the vdev scan queues from
+	 * outside dsl_scan_sync(). For the most part this is ok
+	 * as long as it is called from within syncing context.
+	 * However, dsl_scan_sync() expects that no new sio's will
+	 * be added between when all the work for a scan is done
+	 * and the next txg when the scan is actually marked as
+	 * completed. This check ensures we do not issue new sio's
+	 * during this period.
+	 */
+	if (scn->scn_done_txg != 0)
 		return;
 
 	for (p = 0; p < DDT_PHYS_TYPES; p++, ddp++) {
@@ -3295,7 +3353,7 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 		uint64_t nr_leaves = dsl_scan_count_leaves(spa->spa_root_vdev);
 
 		/*
-		 * Calculate the max number of in-flight bytes for pool-wide
+		 * Recalculate the max number of in-flight bytes for pool-wide
 		 * scanning operations (minimum 1MB). Limits for the issuing
 		 * phase are done per top-level vdev and are handled separately.
 		 */
@@ -3366,6 +3424,8 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 				   (longlong_t)tx->tx_txg);
 		}
 	} else if (scn->scn_is_sorted && scn->scn_bytes_pending != 0) {
+		ASSERT(scn->scn_clearing);
+
 		/* need to issue scrubbing IOs from per-vdev queues */
 		scn->scn_zio_root = zio_root(dp->dp_spa, NULL,
 		    NULL, ZIO_FLAG_CANFAIL);
@@ -3651,6 +3711,8 @@ scan_exec_io(dsl_pool_t *dp, const blkptr_t *bp, int zio_flags,
 	size_t size = BP_GET_PSIZE(bp);
 	abd_t *data = abd_alloc_for_io(size, B_FALSE);
 	unsigned int scan_delay = 0;
+
+	ASSERT3U(scn->scn_maxinflight_bytes, >, 0);
 
 	if (queue == NULL) {
 		mutex_enter(&spa->spa_scrub_lock);

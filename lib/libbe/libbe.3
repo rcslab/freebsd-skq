@@ -2,7 +2,6 @@
 .\" SPDX-License-Identifier: BSD-2-Clause-FreeBSD
 .\"
 .\" Copyright (c) 2017 Kyle Kneitinger
-.\" All rights reserved.
 .\" Copyright (c) 2018 Kyle Evans <kevans@FreeBSD.org>
 .\"
 .\" Redistribution and use in source and binary forms, with or without
@@ -28,7 +27,7 @@
 .\"
 .\" $FreeBSD$
 .\"
-.Dd February 12, 2019
+.Dd October 16, 2019
 .Dt LIBBE 3
 .Os
 .Sh NAME
@@ -59,8 +58,14 @@
 .Ft const char * Ns
 .Fn be_root_path "libbe_handle_t *hdl"
 .Pp
+.Ft bool Ns
+.Fn be_is_auto_snapshot_name "libbe_handle_t *hdl" "const char *snap"
+.Pp
 .Ft int
 .Fn be_create "libbe_handle_t *hdl" "const char *be_name"
+.Pp
+.Ft int
+.Fn be_create_depth "libbe_handle_t *hdl" "const char *be_name" "const char *snap" "int depth"
 .Pp
 .Ft int
 .Fn be_create_from_existing "libbe_handle_t *hdl" "const char *be_name" "const char *be_origin"
@@ -211,21 +216,43 @@ The
 function returns the boot environment root path.
 .Pp
 The
+.Fn be_is_auto_snapshot_name
+function is used to determine if the given snapshot name matches the format that
+the
+.Fn be_snapshot
+function will use by default if it is not given a snapshot name to use.
+It returns
+.Dv true
+if the name matches the format, and
+.Dv false
+if it does not.
+.Pp
+The
 .Fn be_create
 function creates a boot environment with the given name.
-It will be created from a snapshot of the currently booted boot environment.
+The new boot environment will be created from a recursive snapshot of the
+currently booted boot environment.
+.Pp
+The
+.Fn be_create_depth
+function creates a boot environment with the given name from an existing
+snapshot.
+The depth parameter specifies the depth of recursion that will be cloned from
+the existing snapshot.
+A depth of '0' is no recursion and '-1' is unlimited (i.e., a recursive boot
+environment).
 .Pp
 The
 .Fn be_create_from_existing
 function creates a boot environment with the given name from the name of an
 existing boot environment.
-A snapshot will be made of the base boot environment, and the new boot
-environment will be created from that.
+A recursive snapshot will be made of the origin boot environment, and the new
+boot environment will be created from that.
 .Pp
 The
 .Fn be_create_from_existing_snap
-function creates a boot environment with the given name from an existing
-snapshot.
+function creates a recursive boot environment with the given name from an
+existing snapshot.
 .Pp
 The
 .Fn be_rename

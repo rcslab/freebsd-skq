@@ -81,7 +81,8 @@ __FBSDID("$FreeBSD$");
 #ifdef USB_DEBUG
 static int umcs_debug = 0;
 
-static SYSCTL_NODE(_hw_usb, OID_AUTO, umcs, CTLFLAG_RW, 0, "USB umcs quadport serial adapter");
+static SYSCTL_NODE(_hw_usb, OID_AUTO, umcs, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "USB umcs quadport serial adapter");
 SYSCTL_INT(_hw_usb_umcs, OID_AUTO, debug, CTLFLAG_RWTUN, &umcs_debug, 0, "Debug level");
 #endif					/* USB_DEBUG */
 
@@ -499,7 +500,9 @@ umcs7840_cfg_open(struct ucom_softc *ucom)
 	 * Enable DTR/RTS on modem control, enable modem interrupts --
 	 * documented
 	 */
-	sc->sc_ports[pn].sc_mcr = MCS7840_UART_MCR_DTR | MCS7840_UART_MCR_RTS | MCS7840_UART_MCR_IE;
+	sc->sc_ports[pn].sc_mcr = MCS7840_UART_MCR_IE;
+	if (ucom->sc_tty == NULL || (ucom->sc_tty->t_termios.c_cflag & CNO_RTSDTR) == 0)
+		sc->sc_ports[pn].sc_mcr |= MCS7840_UART_MCR_DTR | MCS7840_UART_MCR_RTS;
 	if (umcs7840_set_UART_reg_sync(sc, pn, MCS7840_UART_REG_MCR, sc->sc_ports[pn].sc_mcr))
 		return;
 

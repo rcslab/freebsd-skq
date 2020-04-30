@@ -40,11 +40,6 @@ CONTRIBDIR=	${SRCTOP}/contrib/tzdata/
 MK_ZONEINFO_LEAPSECONDS_SUPPORT= yes
 .endif
 
-.if defined(OLDTIMEZONES)
-.warning "Using backwards compatibility variable for OLDTIMEZONES; please use WITH_ZONEINFO_OLD_TIMEZONES_SUPPORT instead"
-MK_ZONEINFO_OLD_TIMEZONES_SUPPORT= yes
-.endif
-
 .if ${MK_ZONEINFO_LEAPSECONDS_SUPPORT} != "no"
 LEAPFILE=	-L ${CONTRIBDIR}leapseconds
 .else
@@ -53,11 +48,8 @@ LEAPFILE=
 
 TZFILES=	africa antarctica asia australasia etcetera europe \
 		factory northamerica southamerica
-POSIXRULES=	America/New_York
-
-.if ${MK_ZONEINFO_OLD_TIMEZONES_SUPPORT} != "no"
 TZFILES+=	backward systemv
-.endif
+POSIXRULES=	America/New_York
 
 TZFILES:=	${TZFILES:S/^/${CONTRIBDIR}/}
 
@@ -78,10 +70,7 @@ TZBUILDSUBDIRS=	\
 		Indian \
 		Pacific \
 		SystemV
-
-.if ${MK_ZONEINFO_OLD_TIMEZONES_SUPPORT} != "no"
 TZBUILDSUBDIRS+= US Mexico Chile Canada Brazil
-.endif
 
 .if !defined(_SKIP_BUILD)
 all: zoneinfo
@@ -115,6 +104,8 @@ install-zoneinfo:
 .endfor
 	${INSTALL} ${TAG_ARGS} -o ${BINOWN} -g ${BINGRP} -m ${NOBINMODE} \
 	    ${CONTRIBDIR}/zone.tab ${DESTDIR}/usr/share/zoneinfo/
+	${INSTALL} ${TAG_ARGS} -o ${BINOWN} -g ${BINGRP} -m ${NOBINMODE} \
+	    ${CONTRIBDIR}/zone1970.tab ${DESTDIR}/usr/share/zoneinfo/
 
 afterinstall:
 #

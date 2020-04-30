@@ -90,6 +90,7 @@ static const struct {
 	{0x06221b21, 0x00, "ASMedia ASM106x",	AHCI_Q_NOCCS|AHCI_Q_NOAUX},
 	{0x06241b21, 0x00, "ASMedia ASM106x",	AHCI_Q_NOCCS|AHCI_Q_NOAUX},
 	{0x06251b21, 0x00, "ASMedia ASM106x",	AHCI_Q_NOCCS|AHCI_Q_NOAUX},
+	{0x79011d94, 0x00, "Hygon KERNCZ",	0},
 	{0x26528086, 0x00, "Intel ICH6",	AHCI_Q_NOFORCE},
 	{0x26538086, 0x00, "Intel ICH6M",	AHCI_Q_NOFORCE},
 	{0x26818086, 0x00, "Intel ESB2",	0},
@@ -212,6 +213,10 @@ static const struct {
 	{0x9c078086, 0x00, "Intel Lynx Point-LP (RAID)",	0},
 	{0x9c0e8086, 0x00, "Intel Lynx Point-LP (RAID)",	0},
 	{0x9c0f8086, 0x00, "Intel Lynx Point-LP (RAID)",	0},
+	{0x9c838086, 0x00, "Intel Wildcat Point-LP",	0},
+	{0x9c858086, 0x00, "Intel Wildcat Point-LP (RAID)",	0},
+	{0x9c878086, 0x00, "Intel Wildcat Point-LP (RAID)",	0},
+	{0x9c8f8086, 0x00, "Intel Wildcat Point-LP (RAID)",	0},
 	{0x9d038086, 0x00, "Intel Sunrise Point-LP",	0},
 	{0x9d058086, 0x00, "Intel Sunrise Point-LP (RAID)",	0},
 	{0x9d078086, 0x00, "Intel Sunrise Point-LP (RAID)",	0},
@@ -232,6 +237,8 @@ static const struct {
 	{0xa2828086, 0x00, "Intel Union Point",	0},
 	{0xa2868086, 0x00, "Intel Union Point (RAID)",	0},
 	{0xa28e8086, 0x00, "Intel Union Point (RAID)",	0},
+	{0xa3528086, 0x00, "Intel Cannon Lake",	0},
+	{0xa3538086, 0x00, "Intel Cannon Lake",	0},
 	{0x23238086, 0x00, "Intel DH89xxCC",	0},
 	{0x2360197b, 0x00, "JMicron JMB360",	0},
 	{0x2361197b, 0x00, "JMicron JMB361",	AHCI_Q_NOFORCE | AHCI_Q_1CH},
@@ -240,6 +247,7 @@ static const struct {
 	{0x2365197b, 0x00, "JMicron JMB365",	AHCI_Q_NOFORCE},
 	{0x2366197b, 0x00, "JMicron JMB366",	AHCI_Q_NOFORCE},
 	{0x2368197b, 0x00, "JMicron JMB368",	AHCI_Q_NOFORCE},
+	{0x0585197b, 0x00, "JMicron JMB58x",	0},
 	{0x611111ab, 0x00, "Marvell 88SE6111",	AHCI_Q_NOFORCE | AHCI_Q_NOPMP |
 	    AHCI_Q_1CH | AHCI_Q_EDGEIS},
 	{0x612111ab, 0x00, "Marvell 88SE6121",	AHCI_Q_NOFORCE | AHCI_Q_NOPMP |
@@ -392,6 +400,7 @@ ahci_probe(device_t dev)
 		     !(ahci_ids[i].quirks & AHCI_Q_NOFORCE)))) {
 			/* Do not attach JMicrons with single PCI function. */
 			if (pci_get_vendor(dev) == 0x197b &&
+			    (ahci_ids[i].quirks & AHCI_Q_NOFORCE) &&
 			    (pci_read_config(dev, 0xdf, 1) & 0x40) == 0)
 				return (ENXIO);
 			snprintf(buf, sizeof(buf), "%s AHCI SATA controller",
@@ -492,6 +501,48 @@ ahci_pci_attach(device_t dev)
 	if (!(ctlr->r_mem = bus_alloc_resource_any(dev, SYS_RES_MEMORY,
 	    &ctlr->r_rid, RF_ACTIVE)))
 		return ENXIO;
+
+	/*
+	 * Intel RAID hardware can remap NVMe devices inside its BAR.
+	 * Try to detect this. Either we have to add the device
+	 * here, or the user has to change the mode in the BIOS
+	 * from RST to AHCI.
+	 */
+	if (pci_get_vendor(dev) == 0x8086) {
+		uint32_t vscap;
+
+		vscap = ATA_INL(ctlr->r_mem, AHCI_VSCAP);
+		if (vscap & 1) {
+			uint32_t cap = ATA_INL(ctlr->r_mem, 0x800); /* Intel's REMAP CAP */
+			int i;
+
+			ctlr->remap_offset = 0x4000;
+			ctlr->remap_size = 0x4000;
+
+			/*
+			 * Check each of the devices that might be remapped to
+			 * make sure they are an nvme device. At the present,
+			 * nvme are the only known devices remapped.
+			 */
+			for (i = 0; i < 3; i++) {
+				if (cap & (1 << i) &&
+				    (ATA_INL(ctlr->r_mem, 0x880 + i * 0x80) ==
+				     ((PCIC_STORAGE << 16) |
+				      (PCIS_STORAGE_NVM << 8) |
+				      PCIP_STORAGE_NVM_ENTERPRISE_NVMHCI_1_0))) {
+					ctlr->remapped_devices++;
+				}
+			}
+
+			/* If we have any remapped device, disable MSI */
+			if (ctlr->remapped_devices > 0) {
+				device_printf(dev, "Detected %d nvme remapped devices\n",
+				    ctlr->remapped_devices);
+				ctlr->quirks |= (AHCI_Q_NOMSIX | AHCI_Q_NOMSI);
+			}
+		}
+	}
+
 
 	if (ctlr->quirks & AHCI_Q_NOMSIX)
 		msix_count = 0;

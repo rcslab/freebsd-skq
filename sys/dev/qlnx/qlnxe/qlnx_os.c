@@ -232,10 +232,9 @@ MODULE_DEPEND(if_qlnxev, ether, 1, 1, 1);
 
 MALLOC_DEFINE(M_QLNXBUF, "qlnxbuf", "Buffers for qlnx driver");
 
-
-static char qlnx_dev_str[128];
-static char qlnx_ver_str[VER_SIZE];
-static char qlnx_name_str[NAME_SIZE];
+char qlnx_dev_str[128];
+char qlnx_ver_str[VER_SIZE];
+char qlnx_name_str[NAME_SIZE];
 
 /*
  * Some PCI Configuration Space Related Defines
@@ -277,7 +276,8 @@ static char qlnx_name_str[NAME_SIZE];
 
 
 
-SYSCTL_NODE(_hw, OID_AUTO, qlnxe, CTLFLAG_RD, 0, "qlnxe driver parameters");
+SYSCTL_NODE(_hw, OID_AUTO, qlnxe, CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
+    "qlnxe driver parameters");
 
 /* Number of Queues: 0 (Auto) or 1 to 32 (fixed queue number) */
 static int qlnxe_queue_count = QLNX_DEFAULT_RSS;
@@ -1550,7 +1550,7 @@ qlnx_add_sp_stats_sysctls(qlnx_host_t *ha)
 	children = SYSCTL_CHILDREN(device_get_sysctl_tree(ha->pci_dev));
 
 	ctx_oid = SYSCTL_ADD_NODE(ctx, children, OID_AUTO, "spstat",
-			CTLFLAG_RD, NULL, "spstat");
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "spstat");
         children = SYSCTL_CHILDREN(ctx_oid);
 
 	SYSCTL_ADD_QUAD(ctx, children,
@@ -1575,7 +1575,7 @@ qlnx_add_fp_stats_sysctls(qlnx_host_t *ha)
 	children = SYSCTL_CHILDREN(device_get_sysctl_tree(ha->pci_dev));
 
 	ctx_oid = SYSCTL_ADD_NODE(ctx, children, OID_AUTO, "fpstat",
-			CTLFLAG_RD, NULL, "fpstat");
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "fpstat");
 	children = SYSCTL_CHILDREN(ctx_oid);
 
 	for (i = 0; i < ha->num_rss; i++) {
@@ -1584,7 +1584,7 @@ qlnx_add_fp_stats_sysctls(qlnx_host_t *ha)
 		snprintf(name_str, sizeof(name_str), "%d", i);
 
 		ctx_oid = SYSCTL_ADD_NODE(ctx, children, OID_AUTO, name_str,
-			CTLFLAG_RD, NULL, name_str);
+		    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, name_str);
 		node_children = SYSCTL_CHILDREN(ctx_oid);
 
 		/* Tx Related */
@@ -1850,7 +1850,7 @@ qlnx_add_hw_stats_sysctls(qlnx_host_t *ha)
 	children = SYSCTL_CHILDREN(device_get_sysctl_tree(ha->pci_dev));
 
 	ctx_oid = SYSCTL_ADD_NODE(ctx, children, OID_AUTO, "hwstat",
-			CTLFLAG_RD, NULL, "hwstat");
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "hwstat");
         children = SYSCTL_CHILDREN(ctx_oid);
 
 	SYSCTL_ADD_QUAD(ctx, children,
@@ -2311,23 +2311,21 @@ qlnx_add_sysctls(qlnx_host_t *ha)
 		"tx_coalesce_usecs");
 
 	SYSCTL_ADD_PROC(ctx, children,
-		OID_AUTO, "trigger_dump", (CTLTYPE_INT | CTLFLAG_RW),
-		(void *)ha, 0,
-		qlnx_trigger_dump_sysctl, "I", "trigger_dump");
+	    OID_AUTO, "trigger_dump",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_NEEDGIANT,
+	    (void *)ha, 0, qlnx_trigger_dump_sysctl, "I", "trigger_dump");
 
 	SYSCTL_ADD_PROC(ctx, children,
-		OID_AUTO, "set_rx_coalesce_usecs",
-		(CTLTYPE_INT | CTLFLAG_RW),
-		(void *)ha, 0,
-		qlnx_set_rx_coalesce, "I",
-		"rx interrupt coalesce period microseconds");
+	    OID_AUTO, "set_rx_coalesce_usecs",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_NEEDGIANT,
+	    (void *)ha, 0, qlnx_set_rx_coalesce, "I",
+	    "rx interrupt coalesce period microseconds");
 
 	SYSCTL_ADD_PROC(ctx, children,
-		OID_AUTO, "set_tx_coalesce_usecs",
-		(CTLTYPE_INT | CTLFLAG_RW),
-		(void *)ha, 0,
-		qlnx_set_tx_coalesce, "I",
-		"tx interrupt coalesce period microseconds");
+	    OID_AUTO, "set_tx_coalesce_usecs",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_NEEDGIANT,
+	    (void *)ha, 0, qlnx_set_tx_coalesce, "I",
+	    "tx interrupt coalesce period microseconds");
 
 	ha->rx_pkt_threshold = 128;
         SYSCTL_ADD_UINT(ctx, children,
@@ -2645,42 +2643,36 @@ qlnx_hw_set_multi(qlnx_host_t *ha, uint8_t *mta, uint32_t mcnt,
 }
 
 
-#define QLNX_MCAST_ADDRS_SIZE (QLNX_MAX_NUM_MULTICAST_ADDRS * ETHER_HDR_LEN)
+static u_int
+qlnx_copy_maddr(void *arg, struct sockaddr_dl *sdl, u_int mcnt)
+{
+	uint8_t *mta = arg;
+
+	if (mcnt == QLNX_MAX_NUM_MULTICAST_ADDRS)
+		return (0);
+
+	bcopy(LLADDR(sdl), &mta[mcnt * ETHER_HDR_LEN], ETHER_HDR_LEN);
+
+	return (1);
+}
+
 static int
 qlnx_set_multi(qlnx_host_t *ha, uint32_t add_multi)
 {
-	uint8_t			mta[QLNX_MCAST_ADDRS_SIZE];
-	struct ifmultiaddr	*ifma;
-	int			mcnt = 0;
-	struct ifnet		*ifp = ha->ifp;
-	int			ret = 0;
+	uint8_t		mta[QLNX_MAX_NUM_MULTICAST_ADDRS * ETHER_HDR_LEN];
+	struct ifnet	*ifp = ha->ifp;
+	u_int		mcnt;
 
 	if (qlnx_vf_device(ha) == 0)
 		return (0);
 
-	if_maddr_rlock(ifp);
-
-	CK_STAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
-
-		if (ifma->ifma_addr->sa_family != AF_LINK)
-			continue;
-
-		if (mcnt == QLNX_MAX_NUM_MULTICAST_ADDRS)
-			break;
-
-		bcopy(LLADDR((struct sockaddr_dl *) ifma->ifma_addr),
-			&mta[mcnt * ETHER_HDR_LEN], ETHER_HDR_LEN);
-
-		mcnt++;
-	}
-
-	if_maddr_runlock(ifp);
+	mcnt = if_foreach_llmaddr(ifp, qlnx_copy_maddr, mta);
 
 	QLNX_LOCK(ha);
 	qlnx_hw_set_multi(ha, mta, mcnt, add_multi);
 	QLNX_UNLOCK(ha);
 
-	return (ret);
+	return (0);
 }
 
 static int

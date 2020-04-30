@@ -4,22 +4,19 @@
 
 CONFDIR=	/etc/rc.d
 CONFGROUPS=	CONFS
-#PACKAGE=rc
+CONFSPACKAGE=	rc
 
 CONFS=	DAEMON \
 	FILESYSTEMS \
 	LOGIN \
 	NETWORKING \
 	SERVERS \
-	abi \
 	addswap \
 	adjkerntz \
 	archdep \
 	bgfsck \
 	${_blacklistd} \
-	${_bluetooth} \
 	bridge \
-	${_bthidd} \
 	cfumass \
 	cleanvar \
 	cleartmp \
@@ -40,16 +37,11 @@ CONFS=	DAEMON \
 	gptboot \
 	growfs \
 	gssd \
-	${_hcsecd} \
 	hostid \
 	hostid_save \
 	hostname \
 	iovctl \
 	ip6addrctl \
-	ipfilter \
-	ipfs \
-	ipmon \
-	ipnat \
 	ipsec \
 	${_kadmind} \
 	${_kdc} \
@@ -58,6 +50,7 @@ CONFS=	DAEMON \
 	kldxref \
 	${_kpasswdd} \
 	ldconfig \
+	linux \
 	local \
 	localpkg \
 	lockd \
@@ -81,9 +74,9 @@ CONFS=	DAEMON \
 	nfsuserd \
 	nisdomain \
 	${_nscd} \
-	nsswitch \
 	ntpdate \
 	${_opensm} \
+	os-release \
 	pf \
 	pflog \
 	pfsync \
@@ -114,8 +107,8 @@ CONFS=	DAEMON \
 	swaplate \
 	sysctl \
 	syslogd \
+	sysvipc \
 	tmp \
-	${_ubthidhci} \
 	ugidfw \
 	${_utx} \
 	var \
@@ -147,12 +140,6 @@ ACPIPACKAGE=	acpi
 CONFS+=		powerd
 .endif
 
-.if ${MK_AMD} != "no"
-CONFGROUPS+=	AMD
-AMD+=		amd
-AMDPACKAGE=	amd
-.endif
-
 .if ${MK_APM} != "no"
 CONFGROUPS+=	APM
 APM+=		apm
@@ -179,12 +166,14 @@ _blacklistd+=	blacklistd
 .endif
 
 .if ${MK_BLUETOOTH} != "no"
-_bluetooth=	bluetooth
-_bthidd=	bthidd
-_hcsecd=	hcsecd
-CONFS+=		rfcomm_pppd_server
-CONFS+=		sdpd
-_ubthidhci=	ubthidhci
+CONFGROUPS+=	BLUETOOTH
+BLUETOOTH+=	bluetooth \
+		bthidd \
+		hcsecd \
+		rfcomm_pppd_server \
+		sdpd \
+		ubthidhci
+BLUETOOTHPACKAGE=	bluetooth
 .endif
 
 .if ${MK_BOOTPARAMD} != "no"
@@ -213,6 +202,14 @@ HASTPACKAGE=	hast
 
 .if ${MK_INETD} != "no"
 CONFS+=		inetd
+.endif
+
+.if ${MK_IPFILTER} != "no"
+CONFS+=	ipfilter \
+	ipfs \
+	ipmon \
+	ipnat \
+	ippool
 .endif
 
 .if ${MK_IPFW} != "no"
@@ -322,10 +319,6 @@ ZFS+=		zfs
 ZFS+=		zfsbe
 ZFS+=		zfsd
 ZFS+=		zvol
-ZFSPACKAGE=	zfs
-DIRS+=	ETC_ZFS
-ETC_ZFS=	/etc/zfs
-ETC_ZFSPACKAGE=	zfs
 .endif
 
 .for fg in ${CONFGROUPS}

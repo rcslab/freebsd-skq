@@ -576,12 +576,16 @@ SYSCTL_INT(_hw_hn, OID_AUTO, tx_agg_pkts, CTLFLAG_RDTUN,
     &hn_tx_agg_pkts, 0, "Packet transmission aggregation packet limit");
 
 /* VF list */
-SYSCTL_PROC(_hw_hn, OID_AUTO, vflist, CTLFLAG_RD | CTLTYPE_STRING,
-    0, 0, hn_vflist_sysctl, "A", "VF list");
+SYSCTL_PROC(_hw_hn, OID_AUTO, vflist,
+    CTLFLAG_RD | CTLTYPE_STRING | CTLFLAG_NEEDGIANT, 0, 0,
+    hn_vflist_sysctl, "A",
+    "VF list");
 
 /* VF mapping */
-SYSCTL_PROC(_hw_hn, OID_AUTO, vfmap, CTLFLAG_RD | CTLTYPE_STRING,
-    0, 0, hn_vfmap_sysctl, "A", "VF mapping");
+SYSCTL_PROC(_hw_hn, OID_AUTO, vfmap,
+    CTLFLAG_RD | CTLTYPE_STRING | CTLFLAG_NEEDGIANT, 0, 0,
+    hn_vfmap_sysctl, "A",
+    "VF mapping");
 
 /* Transparent VF */
 static int			hn_xpnt_vf = 1;
@@ -1506,7 +1510,7 @@ hn_vf_rss_fixup(struct hn_softc *sc, bool reconf)
 	strlcpy(ifrk.ifrk_name, vf_ifp->if_xname, sizeof(ifrk.ifrk_name));
 	error = vf_ifp->if_ioctl(vf_ifp, SIOCGIFRSSKEY, (caddr_t)&ifrk);
 	if (error) {
-		if_printf(ifp, "%s SIOCGRSSKEY failed: %d\n",
+		if_printf(ifp, "%s SIOCGIFRSSKEY failed: %d\n",
 		    vf_ifp->if_xname, error);
 		goto done;
 	}
@@ -6630,6 +6634,38 @@ hn_synth_detach(struct hn_softc *sc)
 	/* Detach all of the channels. */
 	hn_detach_allchans(sc);
 
+	if (vmbus_current_version >= VMBUS_VERSION_WIN10 && sc->hn_rxbuf_gpadl != 0) {
+		/*
+		 * Host is post-Win2016, disconnect RXBUF from primary channel here.
+		 */
+		int error;
+
+		error = vmbus_chan_gpadl_disconnect(sc->hn_prichan,
+		    sc->hn_rxbuf_gpadl);
+		if (error) {
+			if_printf(sc->hn_ifp,
+			    "rxbuf gpadl disconn failed: %d\n", error);
+			sc->hn_flags |= HN_FLAG_RXBUF_REF;
+		}
+		sc->hn_rxbuf_gpadl = 0;
+	}
+
+	if (vmbus_current_version >= VMBUS_VERSION_WIN10 && sc->hn_chim_gpadl != 0) {
+		/*
+		 * Host is post-Win2016, disconnect chimney sending buffer from
+		 * primary channel here.
+		 */
+		int error;
+
+		error = vmbus_chan_gpadl_disconnect(sc->hn_prichan,
+		    sc->hn_chim_gpadl);
+		if (error) {
+			if_printf(sc->hn_ifp,
+			    "chim gpadl disconn failed: %d\n", error);
+			sc->hn_flags |= HN_FLAG_CHIM_REF;
+		}
+		sc->hn_chim_gpadl = 0;
+	}
 	sc->hn_flags &= ~HN_FLAG_SYNTH_ATTACHED;
 }
 

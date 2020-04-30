@@ -48,7 +48,6 @@ device		pl310			# PL310 L2 cache controller
 device		mpcore_timer
 
 device		loop
-device		random
 device		ether
 device		cgem			# Zynq-7000 gig ethernet device
 device		mii
@@ -57,6 +56,12 @@ device		rgephy			# Zybo uses Realtek RTL8211E
 device		pty
 device		uart
 device		gpio
+
+device		spibus
+device		spigen
+device		mx25l
+device		zy7_qspi		# Xilinx Zynq QSPI controller
+device		zy7_spi			# Xilinx Zynq SPI controller
 
 device		md
 device		mmc			# mmc/sd bus

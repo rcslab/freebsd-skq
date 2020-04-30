@@ -171,8 +171,8 @@ wi_write_val(struct wi_softc *sc, int rid, u_int16_t val)
 	return wi_write_rid(sc, rid, &val, sizeof(val));
 }
 
-static SYSCTL_NODE(_hw, OID_AUTO, wi, CTLFLAG_RD, 0,
-	    "Wireless driver parameters");
+static SYSCTL_NODE(_hw, OID_AUTO, wi, CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
+    "Wireless driver parameters");
 
 static	struct timeval lasttxerror;	/* time of last tx error msg */
 static	int curtxeps;			/* current tx error msgs/sec */
@@ -1254,6 +1254,7 @@ wi_sync_bssid(struct wi_softc *sc, u_int8_t new_bssid[IEEE80211_ADDR_LEN])
 static __noinline void
 wi_rx_intr(struct wi_softc *sc)
 {
+	struct epoch_tracker et;
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct wi_frame frmhdr;
 	struct mbuf *m;
@@ -1349,11 +1350,14 @@ wi_rx_intr(struct wi_softc *sc)
 	WI_UNLOCK(sc);
 
 	ni = ieee80211_find_rxnode(ic, mtod(m, struct ieee80211_frame_min *));
+
+	NET_EPOCH_ENTER(et);
 	if (ni != NULL) {
 		(void) ieee80211_input(ni, m, rssi, nf);
 		ieee80211_free_node(ni);
 	} else
 		(void) ieee80211_input_all(ic, m, rssi, nf);
+	NET_EPOCH_EXIT(et);
 
 	WI_LOCK(sc);
 }
@@ -1506,41 +1510,45 @@ finish:
 	CSR_WRITE_2(sc, WI_EVENT_ACK, WI_EV_INFO);
 }
 
+struct wi_mcast_ctx {
+	struct wi_mcast mlist;
+	int mcnt;
+};
+
+static u_int
+wi_copy_mcast(void *arg, struct sockaddr_dl *sdl, u_int count)
+{
+	struct wi_mcast_ctx *ctx = arg;
+
+	if (ctx->mcnt >= 16)
+		return (0);
+	IEEE80211_ADDR_COPY(&ctx->mlist.wi_mcast[ctx->mcnt++], LLADDR(sdl));
+
+	return (1);
+}
+
 static int
 wi_write_multi(struct wi_softc *sc)
 {
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct ieee80211vap *vap;
-	struct wi_mcast mlist;
-	int n;
+	struct wi_mcast_ctx ctx;
 
 	if (ic->ic_allmulti > 0 || ic->ic_promisc > 0) {
 allmulti:
-		memset(&mlist, 0, sizeof(mlist));
-		return wi_write_rid(sc, WI_RID_MCAST_LIST, &mlist,
-		    sizeof(mlist));
+		memset(&ctx.mlist, 0, sizeof(ctx.mlist));
+		return wi_write_rid(sc, WI_RID_MCAST_LIST, &ctx.mlist,
+		    sizeof(ctx.mlist));
 	}
 
-	n = 0;
+	ctx.mcnt = 0;
 	TAILQ_FOREACH(vap, &ic->ic_vaps, iv_next) {
-		struct ifnet *ifp;
-		struct ifmultiaddr *ifma;
-
-		ifp = vap->iv_ifp;
-		if_maddr_rlock(ifp);
-		CK_STAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
-			if (ifma->ifma_addr->sa_family != AF_LINK)
-				continue;
-			if (n >= 16)
-				goto allmulti;
-			IEEE80211_ADDR_COPY(&mlist.wi_mcast[n],
-			    (LLADDR((struct sockaddr_dl *)ifma->ifma_addr)));
-			n++;
-		}
-		if_maddr_runlock(ifp);
+		if_foreach_llmaddr(vap->iv_ifp, wi_copy_mcast, &ctx);
+		if (ctx.mcnt >= 16)
+			goto allmulti;
 	}
-	return wi_write_rid(sc, WI_RID_MCAST_LIST, &mlist,
-	    IEEE80211_ADDR_LEN * n);
+	return wi_write_rid(sc, WI_RID_MCAST_LIST, &ctx.mlist,
+	    IEEE80211_ADDR_LEN * ctx.mcnt);
 }
 
 static void

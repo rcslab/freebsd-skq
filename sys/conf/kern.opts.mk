@@ -22,6 +22,8 @@
 # They have to be listed here so we can build modules outside of the
 # src tree.
 
+KLDXREF_CMD?=	kldxref
+
 __DEFAULT_YES_OPTIONS = \
     AUTOFS \
     BHYVE \
@@ -40,7 +42,6 @@ __DEFAULT_YES_OPTIONS = \
     KERNEL_SYMBOLS \
     NETGRAPH \
     PF \
-    REPRODUCIBLE_BUILD \
     SOURCELESS_HOST \
     SOURCELESS_UCODE \
     TESTS \
@@ -50,9 +51,9 @@ __DEFAULT_YES_OPTIONS = \
 __DEFAULT_NO_OPTIONS = \
     EXTRA_TCP_STACKS \
     KERNEL_RETPOLINE \
-    NAND \
     OFED \
-    RATELIMIT
+    RATELIMIT \
+    REPRODUCIBLE_BUILD
 
 # Some options are totally broken on some architectures. We disable
 # them. If you need to enable them on an experimental basis, you
@@ -92,8 +93,8 @@ BROKEN_OPTIONS+= OFED
 BROKEN_OPTIONS+= KERNEL_RETPOLINE
 .endif
 
-# EFI doesn't exist on mips, powerpc, sparc or riscv.
-.if ${MACHINE:Mmips} || ${MACHINE:Mpowerpc} || ${MACHINE:Msparc64} || ${MACHINE:Mriscv}
+# EFI doesn't exist on mips, powerpc, or riscv.
+.if ${MACHINE:Mmips} || ${MACHINE:Mpowerpc} || ${MACHINE:Mriscv}
 BROKEN_OPTIONS+=EFI
 .endif
 

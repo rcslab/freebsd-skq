@@ -85,15 +85,16 @@ void kmeminit(void);
 
 int kernacc(void *, int, int);
 int useracc(void *, int, int);
-int vm_fault(vm_map_t, vm_offset_t, vm_prot_t, int);
+int vm_fault(vm_map_t map, vm_offset_t vaddr, vm_prot_t fault_type,
+    int fault_flags, vm_page_t *m_hold);
 void vm_fault_copy_entry(vm_map_t, vm_map_t, vm_map_entry_t, vm_map_entry_t,
     vm_ooffset_t *);
 int vm_fault_disable_pagefaults(void);
 void vm_fault_enable_pagefaults(int save);
-int vm_fault_hold(vm_map_t map, vm_offset_t vaddr, vm_prot_t fault_type,
-    int fault_flags, vm_page_t *m_hold);
 int vm_fault_quick_hold_pages(vm_map_t map, vm_offset_t addr, vm_size_t len,
     vm_prot_t prot, vm_page_t *ma, int max_count);
+int vm_fault_trap(vm_map_t map, vm_offset_t vaddr, vm_prot_t fault_type,
+    int fault_flags, int *signo, int *ucode);
 int vm_forkproc(struct thread *, struct proc *, struct thread *,
     struct vmspace *, int);
 void vm_waitproc(struct proc *);
@@ -125,6 +126,8 @@ struct sf_buf *vm_imgact_map_page(vm_object_t object, vm_ooffset_t offset);
 void vm_imgact_unmap_page(struct sf_buf *sf);
 void vm_thread_dispose(struct thread *td);
 int vm_thread_new(struct thread *td, int pages);
+void vm_thread_stack_back(struct domainset *ds, vm_offset_t kaddr,
+    vm_page_t ma[], int npages, int req_class);
 u_int vm_active_count(void);
 u_int vm_inactive_count(void);
 u_int vm_laundry_count(void);

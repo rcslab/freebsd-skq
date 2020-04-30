@@ -33,6 +33,7 @@
 #include <sys/sa.h>
 #include <sys/rrwlock.h>
 #include <sys/zfs_ioctl.h>
+#include <sys/rmlock.h>
 
 #ifdef	__cplusplus
 extern "C" {
@@ -46,8 +47,6 @@ struct zfsvfs {
 	zfsvfs_t	*z_parent;	/* parent fs */
 	objset_t	*z_os;		/* objset reference */
 	uint64_t	z_root;		/* id of root znode */
-	struct vnode	*z_rootvnode;	/* root vnode */
-	struct rmlock	z_rootvnodelock;/* protection for root vnode */
 	uint64_t	z_unlinkedobj;	/* id of unlinked zapobj */
 	uint64_t	z_max_blksz;	/* maximum block size for files */
 	uint64_t	z_fuid_obj;	/* fuid table object number */
@@ -67,7 +66,7 @@ struct zfsvfs {
 	boolean_t	z_atime;	/* enable atimes mount option */
 	boolean_t	z_unmounted;	/* unmounted */
 	rrmlock_t	z_teardown_lock;
-	krwlock_t	z_teardown_inactive_lock;
+	struct rmslock	z_teardown_inactive_lock;
 	list_t		z_all_znodes;	/* all vnodes in the fs */
 	kmutex_t	z_znodes_lock;	/* lock for z_all_znodes */
 	struct zfsctl_root	*z_ctldir;	/* .zfs directory pointer */
@@ -91,6 +90,24 @@ struct zfsvfs {
 	struct task	z_unlinked_drain_task;
 #endif
 };
+
+#define	ZFS_TRYRLOCK_TEARDOWN_INACTIVE(zfsvfs) \
+		rms_try_rlock(&(zfsvfs)->z_teardown_inactive_lock)
+
+#define	ZFS_RLOCK_TEARDOWN_INACTIVE(zfsvfs) \
+		rms_rlock(&(zfsvfs)->z_teardown_inactive_lock)
+
+#define	ZFS_RUNLOCK_TEARDOWN_INACTIVE(zfsvfs) \
+		rms_runlock(&(zfsvfs)->z_teardown_inactive_lock)
+
+#define	ZFS_WLOCK_TEARDOWN_INACTIVE(zfsvfs) \
+		rms_wlock(&(zfsvfs)->z_teardown_inactive_lock)
+
+#define	ZFS_WUNLOCK_TEARDOWN_INACTIVE(zfsvfs) \
+		rms_wunlock(&(zfsvfs)->z_teardown_inactive_lock)
+
+#define	ZFS_TEARDOWN_INACTIVE_WLOCKED(zfsvfs) \
+		rms_wowned(&(zfsvfs)->z_teardown_inactive_lock)
 
 /*
  * Normal filesystems (those not under .zfs/snapshot) have a total

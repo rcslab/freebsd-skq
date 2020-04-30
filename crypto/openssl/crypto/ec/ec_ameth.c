@@ -1,5 +1,5 @@
 /*
- * Copyright 2006-2018 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2006-2019 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the OpenSSL license (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -14,9 +14,9 @@
 #include <openssl/bn.h>
 #include <openssl/cms.h>
 #include <openssl/asn1t.h>
-#include "internal/asn1_int.h"
-#include "internal/evp_int.h"
-#include "ec_lcl.h"
+#include "crypto/asn1.h"
+#include "crypto/evp.h"
+#include "ec_local.h"
 
 #ifndef OPENSSL_NO_CMS
 static int ecdh_cms_decrypt(CMS_RecipientInfo *ri);
@@ -504,8 +504,13 @@ static int ec_pkey_ctrl(EVP_PKEY *pkey, int op, long arg1, void *arg2)
 #endif
 
     case ASN1_PKEY_CTRL_DEFAULT_MD_NID:
-        *(int *)arg2 = NID_sha256;
-        return 2;
+        if (EVP_PKEY_id(pkey) == EVP_PKEY_SM2) {
+            /* For SM2, the only valid digest-alg is SM3 */
+            *(int *)arg2 = NID_sm3;
+        } else {
+            *(int *)arg2 = NID_sha256;
+        }
+        return 1;
 
     case ASN1_PKEY_CTRL_SET1_TLS_ENCPT:
         return EC_KEY_oct2key(EVP_PKEY_get0_EC_KEY(pkey), arg2, arg1, NULL);

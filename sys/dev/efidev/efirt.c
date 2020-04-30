@@ -109,7 +109,8 @@ efi_status_to_errno(efi_status status)
 }
 
 static struct mtx efi_lock;
-static SYSCTL_NODE(_hw, OID_AUTO, efi, CTLFLAG_RWTUN, NULL, "EFI");
+static SYSCTL_NODE(_hw, OID_AUTO, efi, CTLFLAG_RWTUN | CTLFLAG_MPSAFE, NULL,
+    "EFI");
 static bool efi_poweroff = true;
 SYSCTL_BOOL(_hw_efi, OID_AUTO, poweroff, CTLFLAG_RWTUN, &efi_poweroff, 0,
     "If true, use EFI runtime services to power off in preference to ACPI");
@@ -275,6 +276,7 @@ efi_enter(void)
 {
 	struct thread *td;
 	pmap_t curpmap;
+	int error;
 
 	if (efi_runtime == NULL)
 		return (ENXIO);
@@ -283,7 +285,13 @@ efi_enter(void)
 	PMAP_LOCK(curpmap);
 	mtx_lock(&efi_lock);
 	fpu_kern_enter(td, NULL, FPU_KERN_NOCTX);
-	return (efi_arch_enter());
+	error = efi_arch_enter();
+	if (error != 0) {
+		fpu_kern_leave(td, NULL);
+		mtx_unlock(&efi_lock);
+		PMAP_UNLOCK(curpmap);
+	}
+	return (error);
 }
 
 static void

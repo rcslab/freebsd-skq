@@ -53,9 +53,15 @@ typedef uint32_t __be32;
 typedef uint64_t __le64;
 typedef uint64_t __be64;
 
+typedef uint16_t __aligned_u16 __aligned(sizeof(uint16_t));
+typedef uint32_t __aligned_u32 __aligned(sizeof(uint32_t));
+typedef uint64_t __aligned_u64 __aligned(sizeof(uint64_t));
+
+typedef unsigned short ushort;
 typedef unsigned int    uint;
+typedef unsigned long ulong;
 typedef unsigned gfp_t;
-typedef uint64_t loff_t;
+typedef off_t loff_t;
 typedef vm_paddr_t resource_size_t;
 typedef uint16_t __bitwise__ __sum16;
 typedef unsigned long pgoff_t;

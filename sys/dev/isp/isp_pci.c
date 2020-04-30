@@ -48,12 +48,6 @@ __FBSDID("$FreeBSD$");
 #include <sys/rman.h>
 #include <sys/malloc.h>
 #include <sys/uio.h>
-
-#ifdef __sparc64__
-#include <dev/ofw/openfirm.h>
-#include <machine/ofw_machdep.h>
-#endif
-
 #include <dev/isp/isp_freebsd.h>
 
 static uint32_t isp_pci_rd_reg(ispsoftc_t *, int);
@@ -493,11 +487,7 @@ isp_get_specific_options(device_t dev, int chan, ispsoftc_t *isp)
 		if (IS_FC(isp)) {
 			ISP_FC_PC(isp, chan)->default_id = 109 - chan;
 		} else {
-#ifdef __sparc64__
-			ISP_SPI_PC(isp, chan)->iid = OF_getscsinitid(dev);
-#else
 			ISP_SPI_PC(isp, chan)->iid = 7;
-#endif
 		}
 	} else {
 		if (IS_FC(isp)) {
@@ -931,6 +921,15 @@ isp_pci_attach(device_t dev)
 	return (0);
 
 bad:
+	if (isp->isp_osinfo.fw == NULL && !IS_26XX(isp)) {
+		/*
+		 * Failure to attach at boot time might have been caused
+		 * by a missing ispfw(4).  Except for for 16Gb adapters,
+		 * there's no loadable firmware for them.
+		 */
+		isp_prt(isp, ISP_LOGWARN, "See the ispfw(4) man page on "
+		    "how to load known good firmware at boot time");
+	}
 	for (i = 0; i < isp->isp_nirq; i++) {
 		(void) bus_teardown_intr(dev, pcs->irq[i].irq, pcs->irq[i].ih);
 		(void) bus_release_resource(dev, SYS_RES_IRQ, pcs->irq[i].iqd,
@@ -1910,14 +1909,21 @@ isp_pci_irqsetup(ispsoftc_t *isp)
 
 	ISP_UNLOCK(isp);
 	if (ISP_CAP_MSIX(isp)) {
-		max_irq = min(ISP_MAX_IRQS, IS_26XX(isp) ? 3 : 2);
+		max_irq = IS_26XX(isp) ? 3 : (IS_25XX(isp) ? 2 : 0);
+		resource_int_value(device_get_name(dev),
+		    device_get_unit(dev), "msix", &max_irq);
+		max_irq = imin(ISP_MAX_IRQS, max_irq);
 		pcs->msicount = imin(pci_msix_count(dev), max_irq);
 		if (pcs->msicount > 0 &&
 		    pci_alloc_msix(dev, &pcs->msicount) != 0)
 			pcs->msicount = 0;
 	}
 	if (pcs->msicount == 0) {
-		pcs->msicount = imin(pci_msi_count(dev), 1);
+		max_irq = 1;
+		resource_int_value(device_get_name(dev),
+		    device_get_unit(dev), "msi", &max_irq);
+		max_irq = imin(1, max_irq);
+		pcs->msicount = imin(pci_msi_count(dev), max_irq);
 		if (pcs->msicount > 0 &&
 		    pci_alloc_msi(dev, &pcs->msicount) != 0)
 			pcs->msicount = 0;

@@ -28,7 +28,7 @@
 .\"     @(#)mount.2	8.3 (Berkeley) 5/24/95
 .\" $FreeBSD$
 .\"
-.Dd December 1, 2017
+.Dd March 30, 2020
 .Dt MOUNT 2
 .Os
 .Sh NAME
@@ -157,6 +157,10 @@ mount even if some files are open for writing.
 Disable read clustering.
 .It Dv MNT_NOCLUSTERW
 Disable write clustering.
+.It Dv MNT_NOCOVER
+Do not mount over the root of another mount point.
+.It Dv MNT_EMPTYDIR
+Require an empty directory for the mount point directory.
 .El
 .Pp
 The flag
@@ -260,11 +264,23 @@ is not a directory.
 .It Bq Er EBUSY
 Another process currently holds a reference to
 .Fa dir .
+.It Bq Er EBUSY
+The
+.Dv MNT_NOCOVER
+option was given, and the requested mount point
+is already the root of another mount point.
 .It Bq Er EFAULT
 The
 .Fa dir
 argument
 points outside the process's allocated address space.
+.It Bq Er EIO
+An I/O error occurred while reading data from
+.Fa special .
+.It Bq Er EINTEGRITY
+The backing store for
+.Fa special
+detected corrupted data while reading.
 .El
 .Pp
 The following errors can occur for a
@@ -280,6 +296,11 @@ The
 .Fa fspec
 argument
 is not a block device.
+.It Bq Er ENOTEMPTY
+The
+.Dv MNT_EMPTYDIR
+option was specified, and the requested mount point
+is not an empty directory.
 .It Bq Er ENXIO
 The major device number of
 .Fa fspec
@@ -293,6 +314,10 @@ No space remains in the mount table.
 .It Bq Er EINVAL
 The super block for the file system had a bad magic
 number or an out of range block size.
+.It Bq Er EINTEGRITY
+The super block for the file system had a bad check hash.
+The check hash can usually be corrected by running
+.Xr fsck 8 .
 .It Bq Er ENOMEM
 Not enough memory was available to read the cylinder
 group information for the file system.

@@ -34,9 +34,12 @@ __FBSDID("$FreeBSD$");
 #include <sys/bus.h>
 #include <sys/condvar.h>
 #include <sys/conf.h>
+#include <sys/eventhandler.h>
 #include <sys/kernel.h>
+#include <sys/lock.h>
 #include <sys/malloc.h>
 #include <sys/module.h>
+#include <sys/mutex.h>
 #include <sys/poll.h>
 #include <sys/reboot.h>
 #include <sys/rman.h>
@@ -50,6 +53,10 @@ __FBSDID("$FreeBSD$");
 #else
 #include <sys/ipmi.h>
 #include <dev/ipmi/ipmivars.h>
+#endif
+
+#ifdef IPMICTL_SEND_COMMAND_32
+#include <sys/abi_compat.h>
 #endif
 
 /*
@@ -90,7 +97,7 @@ static int wd_startup_countdown = 0; /* sec */
 static int wd_pretimeout_countdown = 120; /* sec */
 static int cycle_wait = 10; /* sec */
 
-static SYSCTL_NODE(_hw, OID_AUTO, ipmi, CTLFLAG_RD, 0,
+static SYSCTL_NODE(_hw, OID_AUTO, ipmi, CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
     "IPMI driver parameters");
 SYSCTL_INT(_hw_ipmi, OID_AUTO, on, CTLFLAG_RWTUN,
 	&on, 0, "");
@@ -310,11 +317,6 @@ ipmi_handle_attn(struct ipmi_softc *sc)
 
 	return (error);
 }
-#endif
-
-#ifdef IPMICTL_SEND_COMMAND_32
-#define	PTRIN(p)	((void *)(uintptr_t)(p))
-#define	PTROUT(p)	((uintptr_t)(p))
 #endif
 
 static int

@@ -38,16 +38,19 @@ __FBSDID("$FreeBSD$");
 #include <sys/bus.h>
 #include <sys/cons.h>
 #include <sys/cpu.h>
+#include <sys/csan.h>
 #include <sys/devmap.h>
 #include <sys/efi.h>
 #include <sys/exec.h>
 #include <sys/imgact.h>
-#include <sys/kdb.h> 
+#include <sys/kdb.h>
 #include <sys/kernel.h>
+#include <sys/ktr.h>
 #include <sys/limits.h>
 #include <sys/linker.h>
 #include <sys/msgbuf.h>
 #include <sys/pcpu.h>
+#include <sys/physmem.h>
 #include <sys/proc.h>
 #include <sys/ptrace.h>
 #include <sys/reboot.h>
@@ -80,8 +83,6 @@ __FBSDID("$FreeBSD$");
 #include <machine/undefined.h>
 #include <machine/vmparam.h>
 
-#include <arm/include/physmem.h>
-
 #ifdef VFP
 #include <machine/vfp.h>
 #endif
@@ -96,6 +97,8 @@ __FBSDID("$FreeBSD$");
 #include <dev/ofw/openfirm.h>
 #endif
 
+static void get_fpcontext(struct thread *td, mcontext_t *mcp);
+static void set_fpcontext(struct thread *td, mcontext_t *mcp);
 
 enum arm64_bus arm64_bus_method = ARM64_BUS_NONE;
 
@@ -105,12 +108,10 @@ static struct trapframe proc0_tf;
 
 int early_boot = 1;
 int cold = 1;
+static int boot_el;
 
 struct kva_md_info kmi;
 
-int64_t dcache_line_size;	/* The minimum D cache line size */
-int64_t icache_line_size;	/* The minimum I cache line size */
-int64_t idcache_line_size;	/* The minimum cache line size */
 int64_t dczva_line_size;	/* The size of cache line the dc zva zeroes */
 int has_pan;
 
@@ -133,7 +134,7 @@ pan_setup(void)
 	uint64_t id_aa64mfr1;
 
 	id_aa64mfr1 = READ_SPECIALREG(id_aa64mmfr1_el1);
-	if (ID_AA64MMFR1_PAN(id_aa64mfr1) != ID_AA64MMFR1_PAN_NONE)
+	if (ID_AA64MMFR1_PAN_VAL(id_aa64mfr1) != ID_AA64MMFR1_PAN_NONE)
 		has_pan = 1;
 }
 
@@ -156,6 +157,13 @@ pan_enable(void)
 		    READ_SPECIALREG(sctlr_el1) & ~SCTLR_SPAN);
 		__asm __volatile(".inst 0xd500409f | (0x1 << 8)");
 	}
+}
+
+bool
+has_hyp(void)
+{
+
+	return (boot_el == 2);
 }
 
 static void
@@ -193,6 +201,16 @@ fill_regs(struct thread *td, struct reg *regs)
 
 	memcpy(regs->x, frame->tf_x, sizeof(regs->x));
 
+#ifdef COMPAT_FREEBSD32
+	/*
+	 * We may be called here for a 32bits process, if we're using a
+	 * 64bits debugger. If so, put PC and SPSR where it expects it.
+	 */
+	if (SV_PROC_FLAG(td->td_proc, SV_ILP32)) {
+		regs->x[15] = frame->tf_elr;
+		regs->x[16] = frame->tf_spsr;
+	}
+#endif
 	return (0);
 }
 
@@ -210,6 +228,17 @@ set_regs(struct thread *td, struct reg *regs)
 
 	memcpy(frame->tf_x, regs->x, sizeof(frame->tf_x));
 
+#ifdef COMPAT_FREEBSD32
+	if (SV_PROC_FLAG(td->td_proc, SV_ILP32)) {
+		/*
+		 * We may be called for a 32bits process if we're using
+		 * a 64bits debugger. If so, get PC and SPSR from where
+		 * it put it.
+		 */
+		frame->tf_elr = regs->x[15];
+		frame->tf_spsr = regs->x[16] & PSR_FLAGS;
+	}
+#endif
 	return (0);
 }
 
@@ -259,17 +288,60 @@ set_fpregs(struct thread *td, struct fpreg *regs)
 int
 fill_dbregs(struct thread *td, struct dbreg *regs)
 {
+	struct debug_monitor_state *monitor;
+	int count, i;
+	uint8_t debug_ver, nbkpts;
 
-	printf("ARM64TODO: fill_dbregs");
-	return (EDOOFUS);
+	memset(regs, 0, sizeof(*regs));
+
+	extract_user_id_field(ID_AA64DFR0_EL1, ID_AA64DFR0_DebugVer_SHIFT,
+	    &debug_ver);
+	extract_user_id_field(ID_AA64DFR0_EL1, ID_AA64DFR0_BRPs_SHIFT,
+	    &nbkpts);
+
+	/*
+	 * The BRPs field contains the number of breakpoints - 1. Armv8-A
+	 * allows the hardware to provide 2-16 breakpoints so this won't
+	 * overflow an 8 bit value.
+	 */
+	count = nbkpts + 1;
+
+	regs->db_info = debug_ver;
+	regs->db_info <<= 8;
+	regs->db_info |= count;
+
+	monitor = &td->td_pcb->pcb_dbg_regs;
+	if ((monitor->dbg_flags & DBGMON_ENABLED) != 0) {
+		for (i = 0; i < count; i++) {
+			regs->db_regs[i].dbr_addr = monitor->dbg_bvr[i];
+			regs->db_regs[i].dbr_ctrl = monitor->dbg_bcr[i];
+		}
+	}
+
+	return (0);
 }
 
 int
 set_dbregs(struct thread *td, struct dbreg *regs)
 {
+	struct debug_monitor_state *monitor;
+	int count;
+	int i;
 
-	printf("ARM64TODO: set_dbregs");
-	return (EDOOFUS);
+	monitor = &td->td_pcb->pcb_dbg_regs;
+	count = 0;
+	monitor->dbg_enable_count = 0;
+	for (i = 0; i < DBG_BRP_MAX; i++) {
+		/* TODO: Check these values */
+		monitor->dbg_bvr[i] = regs->db_regs[i].dbr_addr;
+		monitor->dbg_bcr[i] = regs->db_regs[i].dbr_ctrl;
+		if ((monitor->dbg_bcr[i] & 1) != 0)
+			monitor->dbg_enable_count++;
+	}
+	if (monitor->dbg_enable_count > 0)
+		monitor->dbg_flags |= DBGMON_ENABLED;
+
+	return (0);
 }
 
 #ifdef COMPAT_FREEBSD32
@@ -282,8 +354,9 @@ fill_regs32(struct thread *td, struct reg32 *regs)
 	tf = td->td_frame;
 	for (i = 0; i < 13; i++)
 		regs->r[i] = tf->tf_x[i];
-	regs->r_sp = tf->tf_sp;
-	regs->r_lr = tf->tf_lr;
+	/* For arm32, SP is r13 and LR is r14 */
+	regs->r_sp = tf->tf_x[13];
+	regs->r_lr = tf->tf_x[14];
 	regs->r_pc = tf->tf_elr;
 	regs->r_cpsr = tf->tf_spsr;
 
@@ -299,8 +372,9 @@ set_regs32(struct thread *td, struct reg32 *regs)
 	tf = td->td_frame;
 	for (i = 0; i < 13; i++)
 		tf->tf_x[i] = regs->r[i];
-	tf->tf_sp = regs->r_sp;
-	tf->tf_lr = regs->r_lr;
+	/* For arm 32, SP is r13 an LR is r14 */
+	tf->tf_x[13] = regs->r_sp;
+	tf->tf_x[14] = regs->r_lr;
 	tf->tf_elr = regs->r_pc;
 	tf->tf_spsr = regs->r_cpsr;
 
@@ -345,8 +419,8 @@ int
 ptrace_set_pc(struct thread *td, u_long addr)
 {
 
-	printf("ARM64TODO: ptrace_set_pc");
-	return (EDOOFUS);
+	td->td_frame->tf_elr = addr;
+	return (0);
 }
 
 int
@@ -368,7 +442,7 @@ ptrace_clear_single_step(struct thread *td)
 }
 
 void
-exec_setregs(struct thread *td, struct image_params *imgp, u_long stack)
+exec_setregs(struct thread *td, struct image_params *imgp, uintptr_t stack)
 {
 	struct trapframe *tf = td->td_frame;
 
@@ -405,6 +479,7 @@ get_mcontext(struct thread *td, mcontext_t *mcp, int clear_ret)
 	mcp->mc_gpregs.gp_sp = tf->tf_sp;
 	mcp->mc_gpregs.gp_lr = tf->tf_lr;
 	mcp->mc_gpregs.gp_elr = tf->tf_elr;
+	get_fpcontext(td, mcp);
 
 	return (0);
 }
@@ -417,7 +492,8 @@ set_mcontext(struct thread *td, mcontext_t *mcp)
 
 	spsr = mcp->mc_gpregs.gp_spsr;
 	if ((spsr & PSR_M_MASK) != PSR_M_EL0t ||
-	    (spsr & (PSR_AARCH32 | PSR_F | PSR_I | PSR_A | PSR_D)) != 0)
+	    (spsr & PSR_AARCH32) != 0 ||
+	    (spsr & PSR_DAIF) != (td->td_frame->tf_spsr & PSR_DAIF))
 		return (EINVAL); 
 
 	memcpy(tf->tf_x, mcp->mc_gpregs.gp_x, sizeof(tf->tf_x));
@@ -426,6 +502,7 @@ set_mcontext(struct thread *td, mcontext_t *mcp)
 	tf->tf_lr = mcp->mc_gpregs.gp_lr;
 	tf->tf_elr = mcp->mc_gpregs.gp_elr;
 	tf->tf_spsr = mcp->mc_gpregs.gp_spsr;
+	set_fpcontext(td, mcp);
 
 	return (0);
 }
@@ -566,9 +643,9 @@ spinlock_enter(void)
 		daif = intr_disable();
 		td->td_md.md_spinlock_count = 1;
 		td->td_md.md_saved_daif = daif;
+		critical_enter();
 	} else
 		td->td_md.md_spinlock_count++;
-	critical_enter();
 }
 
 void
@@ -578,11 +655,12 @@ spinlock_exit(void)
 	register_t daif;
 
 	td = curthread;
-	critical_exit();
 	daif = td->td_md.md_saved_daif;
 	td->td_md.md_spinlock_count--;
-	if (td->td_md.md_spinlock_count == 0)
+	if (td->td_md.md_spinlock_count == 0) {
+		critical_exit();
 		intr_restore(daif);
+	}
 }
 
 #ifndef	_SYS_SYSPROTO_H_
@@ -597,15 +675,12 @@ sys_sigreturn(struct thread *td, struct sigreturn_args *uap)
 	ucontext_t uc;
 	int error;
 
-	if (uap == NULL)
-		return (EFAULT);
 	if (copyin(uap->sigcntxp, &uc, sizeof(uc)))
 		return (EFAULT);
 
 	error = set_mcontext(td, &uc.uc_mcontext);
 	if (error != 0)
 		return (error);
-	set_fpcontext(td, &uc.uc_mcontext);
 
 	/* Restore signal mask. */
 	kern_sigprocmask(td, SIG_SETMASK, &uc.uc_sigmask, NULL, 0);
@@ -677,7 +752,6 @@ sendsig(sig_t catcher, ksiginfo_t *ksi, sigset_t *mask)
 	/* Fill in the frame to copy out */
 	bzero(&frame, sizeof(frame));
 	get_mcontext(td, &frame.sf_uc.uc_mcontext, 0);
-	get_fpcontext(td, &frame.sf_uc.uc_mcontext);
 	frame.sf_si = ksi->ksi_info;
 	frame.sf_uc.uc_sigmask = *mask;
 	frame.sf_uc.uc_stack = td->td_sigstk;
@@ -721,15 +795,14 @@ init_proc0(vm_offset_t kstack)
 
 	proc_linkup0(&proc0, &thread0);
 	thread0.td_kstack = kstack;
-	thread0.td_pcb = (struct pcb *)(thread0.td_kstack) - 1;
+	thread0.td_kstack_pages = KSTACK_PAGES;
+	thread0.td_pcb = (struct pcb *)(thread0.td_kstack +
+	    thread0.td_kstack_pages * PAGE_SIZE) - 1;
 	thread0.td_pcb->pcb_fpflags = 0;
 	thread0.td_pcb->pcb_fpusaved = &thread0.td_pcb->pcb_fpustate;
 	thread0.td_pcb->pcb_vfpcpu = UINT_MAX;
 	thread0.td_frame = &proc0_tf;
 	pcpup->pc_curpcb = thread0.td_pcb;
-
-	/* Set the base address of translation table 0. */
-	thread0.td_proc->p_md.md_l0addr = READ_SPECIALREG(ttbr0_el1);
 }
 
 typedef struct {
@@ -781,7 +854,7 @@ exclude_efi_map_entry(struct efi_md *p)
 		 */
 		break;
 	default:
-		arm_physmem_exclude_region(p->md_phys, p->md_pages * PAGE_SIZE,
+		physmem_exclude_region(p->md_phys, p->md_pages * PAGE_SIZE,
 		    EXFLAG_NOALLOC);
 	}
 }
@@ -812,7 +885,7 @@ add_efi_map_entry(struct efi_md *p)
 		/*
 		 * We're allowed to use any entry with these types.
 		 */
-		arm_physmem_hardware_region(p->md_phys,
+		physmem_hardware_region(p->md_phys,
 		    p->md_pages * PAGE_SIZE);
 		break;
 	}
@@ -896,6 +969,15 @@ try_load_dtb(caddr_t kmdp)
 	vm_offset_t dtbp;
 
 	dtbp = MD_FETCH(kmdp, MODINFOMD_DTBP, vm_offset_t);
+#if defined(FDT_DTB_STATIC)
+	/*
+	 * In case the device tree blob was not retrieved (from metadata) try
+	 * to use the statically embedded one.
+	 */
+	if (dtbp == 0)
+		dtbp = (vm_offset_t)&fdt_static_dtb;
+#endif
+
 	if (dtbp == (vm_offset_t)NULL) {
 		printf("ERROR loading DTB\n");
 		return;
@@ -906,6 +988,8 @@ try_load_dtb(caddr_t kmdp)
 
 	if (OF_init((void *)dtbp) != 0)
 		panic("OF_init failed with the found device tree");
+
+	parse_fdt_bootargs();
 }
 #endif
 
@@ -967,22 +1051,10 @@ bus_probe(void)
 static void
 cache_setup(void)
 {
-	int dcache_line_shift, icache_line_shift, dczva_line_shift;
-	uint32_t ctr_el0;
+	int dczva_line_shift;
 	uint32_t dczid_el0;
 
-	ctr_el0 = READ_SPECIALREG(ctr_el0);
-
-	/* Read the log2 words in each D cache line */
-	dcache_line_shift = CTR_DLINE_SIZE(ctr_el0);
-	/* Get the D cache line size */
-	dcache_line_size = sizeof(int) << dcache_line_shift;
-
-	/* And the same for the I cache */
-	icache_line_shift = CTR_ILINE_SIZE(ctr_el0);
-	icache_line_size = sizeof(int) << icache_line_shift;
-
-	idcache_line_size = MIN(dcache_line_size, icache_line_size);
+	identify_cache(READ_SPECIALREG(ctr_el0));
 
 	dczid_el0 = READ_SPECIALREG(dczid_el0);
 
@@ -1014,26 +1086,20 @@ initarm(struct arm64_bootparams *abp)
 	caddr_t kmdp;
 	bool valid;
 
-	/* Set the module data location */
-	preload_metadata = (caddr_t)(uintptr_t)(abp->modulep);
+	boot_el = abp->boot_el;
+
+	/* Parse loader or FDT boot parametes. Determine last used address. */
+	lastaddr = parse_boot_param(abp);
 
 	/* Find the kernel address */
 	kmdp = preload_search_by_type("elf kernel");
 	if (kmdp == NULL)
 		kmdp = preload_search_by_type("elf64 kernel");
 
-	boothowto = MD_FETCH(kmdp, MODINFOMD_HOWTO, int);
-	init_static_kenv(MD_FETCH(kmdp, MODINFOMD_ENVP, char *), 0);
 	link_elf_ireloc(kmdp);
-
-#ifdef FDT
 	try_load_dtb(kmdp);
-#endif
 
 	efi_systbl_phys = MD_FETCH(kmdp, MODINFOMD_FW_HANDLE, vm_paddr_t);
-
-	/* Find the address to start allocating from */
-	lastaddr = MD_FETCH(kmdp, MODINFOMD_KERNEND, vm_offset_t);
 
 	/* Load the physical memory ranges */
 	efihdr = (struct efi_map_header *)preload_search_info(kmdp,
@@ -1046,10 +1112,10 @@ initarm(struct arm64_bootparams *abp)
 		if (fdt_get_mem_regions(mem_regions, &mem_regions_sz,
 		    NULL) != 0)
 			panic("Cannot get physical memory regions");
-		arm_physmem_hardware_regions(mem_regions, mem_regions_sz);
+		physmem_hardware_regions(mem_regions, mem_regions_sz);
 	}
 	if (fdt_get_reserved_mem(mem_regions, &mem_regions_sz) == 0)
-		arm_physmem_exclude_regions(mem_regions, mem_regions_sz,
+		physmem_exclude_regions(mem_regions, mem_regions_sz,
 		    EXFLAG_NODUMP | EXFLAG_NOALLOC);
 #endif
 
@@ -1057,7 +1123,7 @@ initarm(struct arm64_bootparams *abp)
 	efifb = (struct efi_fb *)preload_search_info(kmdp,
 	    MODINFO_METADATA | MODINFOMD_EFI_FB);
 	if (efifb != NULL)
-		arm_physmem_exclude_region(efifb->fb_addr, efifb->fb_size,
+		physmem_exclude_region(efifb->fb_addr, efifb->fb_size,
 		    EXFLAG_NOALLOC);
 
 	/* Set the pcpu data, this is needed by pmap_bootstrap */
@@ -1086,7 +1152,7 @@ initarm(struct arm64_bootparams *abp)
 	/* Exclude entries neexed in teh DMAP region, but not phys_avail */
 	if (efihdr != NULL)
 		exclude_efi_map_entries(efihdr);
-	arm_physmem_init_kernel_globals();
+	physmem_init_kernel_globals();
 
 	devmap_bootstrap(0, NULL);
 
@@ -1107,13 +1173,15 @@ initarm(struct arm64_bootparams *abp)
 	kdb_init();
 	pan_enable();
 
+	kcsan_cpu_init(0);
+
 	env = kern_getenv("kernelname");
 	if (env != NULL)
 		strlcpy(kernelname, env, sizeof(kernelname));
 
 	if (boothowto & RB_VERBOSE) {
 		print_efi_map_entries(efihdr);
-		arm_physmem_print_tables();
+		physmem_print_tables();
 	}
 
 	early_boot = 0;
@@ -1124,7 +1192,7 @@ dbg_init(void)
 {
 
 	/* Clear OS lock */
-	WRITE_SPECIALREG(OSLAR_EL1, 0);
+	WRITE_SPECIALREG(oslar_el1, 0);
 
 	/* This permits DDB to use debug registers for watchpoints. */
 	dbg_monitor_init();

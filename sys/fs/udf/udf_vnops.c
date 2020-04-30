@@ -97,6 +97,7 @@ static struct vop_vector udf_vnodeops = {
 	.vop_strategy =		udf_strategy,
 	.vop_vptofh =		udf_vptofh,
 };
+VFS_VOP_VECTOR_REGISTER(udf_vnodeops);
 
 struct vop_vector udf_fifoops = {
 	.vop_default =		&fifo_specops,
@@ -108,6 +109,7 @@ struct vop_vector udf_fifoops = {
 	.vop_setattr =		udf_setattr,
 	.vop_vptofh =		udf_vptofh,
 };
+VFS_VOP_VECTOR_REGISTER(udf_fifoops);
 
 static MALLOC_DEFINE(M_UDFFID, "udf_fid", "UDF FileId structure");
 static MALLOC_DEFINE(M_UDFDS, "udf_ds", "UDF Dirstream structure");
@@ -1265,11 +1267,6 @@ udf_reclaim(struct vop_reclaim_args *a)
 
 	vp = a->a_vp;
 	unode = VTON(vp);
-
-	/*
-	 * Destroy the vm object and flush associated pages.
-	 */
-	vnode_destroy_vobject(vp);
 
 	if (unode != NULL) {
 		vfs_hash_remove(vp);

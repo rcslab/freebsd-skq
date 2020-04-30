@@ -1,7 +1,7 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
  *
- * Copyright (c) 2006 M. Warner Losh.
+ * Copyright (c) 2006 M. Warner Losh <imp@FreeBSD.org>
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -392,3 +392,4 @@ static devclass_t icee_devclass;
 DRIVER_MODULE(icee, iicbus, icee_driver, icee_devclass, 0, 0);
 MODULE_VERSION(icee, 1);
 MODULE_DEPEND(icee, iicbus, 1, 1, 1);
+IICBUS_FDT_PNP_INFO(compat_data);

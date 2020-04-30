@@ -34,7 +34,7 @@
 .\"     From: @(#)tcp.4	8.1 (Berkeley) 6/5/93
 .\" $FreeBSD$
 .\"
-.Dd August 6, 2018
+.Dd April 27, 2020
 .Dt TCP 4
 .Os
 .Sh NAME
@@ -291,8 +291,83 @@ This entry can only be specified on a per-host basis at this time.
 .Pp
 If an SADB entry cannot be found for the destination,
 the system does not send any outgoing segments and drops any inbound segments.
+.It Dv TCP_STATS
+Manage collection of connection level statistics using the
+.Xr stats 3
+framework.
 .Pp
 Each dropped segment is taken into account in the TCP protocol statistics.
+.It Dv TCP_TXTLS_ENABLE
+Enable in-kernel Transport Layer Security (TLS) for data written to this
+socket.
+The
+.Vt struct tls_so_enable
+argument defines the encryption and authentication algorithms and keys
+used to encrypt the socket data as well as the maximum TLS record
+payload size.
+.Pp
+All data written to this socket will be encapsulated in TLS records
+and subsequently encrypted.
+By default all data written to this socket is treated as application data.
+Individual TLS records with a type other than application data
+(for example, handshake messages),
+may be transmitted by invoking
+.Xr sendmsg 2
+with a custom TLS record type set in a
+.Dv TLS_SET_RECORD_TYPE
+control message.
+The payload of this control message is a single byte holding the desired
+TLS record type.
+.Pp
+At present, only a single transmit key may be set on a socket.
+As such, users of this option must disable rekeying.
+.It Dv TCP_TXTLS_MODE
+The integer argument can be used to get or set the current TLS transmit mode
+of a socket.
+Setting the mode can only used to toggle between software and NIC TLS after
+TLS has been initially enabled via the
+.Dv TCP_TXTLS_ENABLE
+option.
+The available modes are:
+.Bl -tag -width "Dv TCP_TLS_MODE_IFNET"
+.It Dv TCP_TLS_MODE_NONE
+In-kernel TLS framing and encryption is not enabled for this socket.
+.It Dv TCP_TLS_MODE_SW
+TLS records are encrypted by the kernel prior to placing the data in the
+socket buffer.
+Typically this encryption is performed in software.
+.It Dv TCP_TLS_MODE_IFNET
+TLS records are encrypted by the network interface card (NIC).
+.It Dv TCP_TLS_MODE_TOE
+TLS records are encrypted by the NIC using a TCP offload engine (TOE).
+.El
+.It Dv TCP_RXTLS_ENABLE
+Enable in-kernel TLS for data read from this socket.
+The
+.Vt struct tls_so_enable
+argument defines the encryption and authentication algorithms and keys
+used to decrypt the socket data.
+.Pp
+Each received TLS record must be read from the socket using
+.Xr recvmsg 2 .
+Each received TLS record will contain a
+.Dv TLS_GET_RECORD
+control message along with the decrypted payload.
+The control message contains a
+.Vt struct tls_get_record
+which includes fields from the TLS record header.
+If a corrupted TLS record is received,
+recvmsg 2
+will fail with
+.Dv EBADMSG .
+.Pp
+At present, only a single receive key may be set on a socket.
+As such, users of this option must disable rekeying.
+.It Dv TCP_RXTLS_MODE
+The integer argument can be used to get the current TLS receive mode
+of a socket.
+The available modes are the same as for
+.Dv TCP_TXTLS_MODE .
 .El
 .Pp
 The option level for the
@@ -459,7 +534,7 @@ The actual limit applied to a session's reassembly queue will be the lower of
 the system-calculated automatic limit and the user-specified
 .Va reass.maxqueuelen
 limit.
-.It Va rexmit_min , rexmit_slop
+.It Va rexmit_initial , rexmit_min , rexmit_slop
 Adjust the retransmit timer calculation for
 .Tn TCP .
 The slop is
@@ -481,6 +556,7 @@ code.
 For this reason, we use 200ms of slop and a near-0
 minimum, which gives us an effective minimum of 200ms (similar to
 .Tn Linux ) .
+The initial value is used before an RTT measurement has been performed.
 .It Va initcwnd_segments
 Enable the ability to specify initial congestion window in number of segments.
 The default value is 10 as suggested by RFC 6928.
@@ -492,6 +568,15 @@ The value should be relative to the link capacity.
 Start with small values for lower-capacity links.
 Large bursts can cause buffer overruns and packet drops if routers have small
 buffers or the link is experiencing congestion.
+.It Va newcwd
+Enable the New Congestion Window Validation mechanism as described in RFC 7661.
+This gently reduces the congestion window during periods, where TCP is
+application limited and the network bandwidth is not utilized completely.
+That prevents self-inflicted packet losses once the application starts to
+transmit data at a higher speed.
+.It Va rfc6675_pipe
+Calculate the bytes in flight using the algorithm described in RFC 6675, and
+is also a prerequisite to enable Proportional Rate Reduction.
 .It Va rfc3042
 Enable the Limited Transmit algorithm as described in RFC 3042.
 It helps avoid timeouts on lossy links and also when the congestion window
@@ -569,27 +654,35 @@ specific connection.
 This is needed to help with connection establishment
 when a broken firewall is in the network path.
 .It Va pmtud_blackhole_detection
-Turn on automatic path MTU blackhole detection.
-In case of retransmits OS will
-lower the MSS to check if it's MTU problem.
-If current MSS is greater than
-configured value to try, it will be set to configured value, otherwise,
-MSS will be set to default values
+Enable automatic path MTU blackhole detection.
+In case of retransmits of MSS sized segments,
+the OS will lower the MSS to check if it's an MTU problem.
+If the current MSS is greater than the configured value to try
+.Po Va net.inet.tcp.pmtud_blackhole_mss
+and
+.Va net.inet.tcp.v6pmtud_blackhole_mss
+.Pc ,
+it will be set to this value, otherwise,
+the MSS will be set to the default values
 .Po Va net.inet.tcp.mssdflt
 and
 .Va net.inet.tcp.v6mssdflt
 .Pc .
+Settings:
+.Bl -tag -compact
+.It 0
+Disable path MTU blackhole detection.
+.It 1
+Enable path MTU blackhole detection for IPv4 and IPv6.
+.It 2
+Enable path MTU blackhole detection only for IPv4.
+.It 3
+Enable path MTU blackhole detection only for IPv6.
+.El
 .It Va pmtud_blackhole_mss
 MSS to try for IPv4 if PMTU blackhole detection is turned on.
 .It Va v6pmtud_blackhole_mss
 MSS to try for IPv6 if PMTU blackhole detection is turned on.
-.It Va pmtud_blackhole_activated
-Number of times configured values were used in an attempt to downshift.
-.It Va pmtud_blackhole_activated_min_mss
-Number of times default MSS was used in an attempt to downshift.
-.It Va pmtud_blackhole_failed
-Number of connections for which retransmits continued even after MSS
-downshift.
 .It Va functions_available
 List of available TCP function blocks (TCP stacks).
 .It Va functions_default
@@ -597,8 +690,7 @@ The default TCP function block (TCP stack).
 .It Va functions_inherit_listen_socket_stack
 Determines whether to inherit listen socket's tcp stack or use the current
 system default tcp stack, as defined by
-.Va functions_default
-.Pc .
+.Va functions_default .
 Default is true.
 .It Va insecure_rst
 Use criteria defined in RFC793 instead of RFC5961 for accepting RST segments.
@@ -606,6 +698,21 @@ Default is false.
 .It Va insecure_syn
 Use criteria defined in RFC793 instead of RFC5961 for accepting SYN segments.
 Default is false.
+.It Va ts_offset_per_conn
+When initializing the TCP timestamps, use a per connection offset instead of a
+per host pair offset.
+Default is to use per connection offsets as recommended in RFC 7323.
+.It Va perconn_stats_enable
+Controls the default collection of statistics for all connections using the
+.Xr stats 3
+framework.
+0 disables, 1 enables, 2 enables random sampling across log id connection
+groups with all connections in a group receiving the same setting.
+.It Va perconn_stats_sample_rates
+A CSV list of template_spec=percent key-value pairs which controls the per
+template sampling rates when
+.Xr stats 3
+sampling is enabled.
 .El
 .Sh ERRORS
 A socket operation may fail with one of the following errors returned:
@@ -645,6 +752,7 @@ when trying to use a TCP function block that is not available;
 .Sh SEE ALSO
 .Xr getsockopt 2 ,
 .Xr socket 2 ,
+.Xr stats 3 ,
 .Xr sysctl 3 ,
 .Xr blackhole 4 ,
 .Xr inet 4 ,

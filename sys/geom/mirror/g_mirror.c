@@ -47,6 +47,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/sysctl.h>
 
 #include <geom/geom.h>
+#include <geom/geom_dbg.h>
 #include <geom/mirror/g_mirror.h>
 
 FEATURE(geom_mirror, "GEOM mirroring support");
@@ -54,7 +55,7 @@ FEATURE(geom_mirror, "GEOM mirroring support");
 static MALLOC_DEFINE(M_MIRROR, "mirror_data", "GEOM_MIRROR Data");
 
 SYSCTL_DECL(_kern_geom);
-static SYSCTL_NODE(_kern_geom, OID_AUTO, mirror, CTLFLAG_RW, 0,
+static SYSCTL_NODE(_kern_geom, OID_AUTO, mirror, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
     "GEOM_MIRROR stuff");
 int g_mirror_debug = 0;
 SYSCTL_INT(_kern_geom_mirror, OID_AUTO, debug, CTLFLAG_RWTUN, &g_mirror_debug, 0,
@@ -924,7 +925,8 @@ g_mirror_regular_request_error(struct g_mirror_softc *sc,
     struct g_mirror_disk *disk, struct bio *bp)
 {
 
-	if (bp->bio_cmd == BIO_FLUSH && bp->bio_error == EOPNOTSUPP)
+	if ((bp->bio_cmd == BIO_FLUSH || bp->bio_cmd == BIO_SPEEDUP) &&
+	    bp->bio_error == EOPNOTSUPP)
 		return;
 
 	if ((disk->d_flags & G_MIRROR_DISK_FLAG_BROKEN) == 0) {
@@ -987,6 +989,10 @@ g_mirror_regular_request(struct g_mirror_softc *sc, struct bio *bp)
 		KFAIL_POINT_ERROR(DEBUG_FP, g_mirror_regular_request_flush,
 		    bp->bio_error);
 		break;
+	case BIO_SPEEDUP:
+		KFAIL_POINT_ERROR(DEBUG_FP, g_mirror_regular_request_speedup,
+		    bp->bio_error);
+		break;
 	}
 
 	pbp->bio_inbed++;
@@ -1017,6 +1023,7 @@ g_mirror_regular_request(struct g_mirror_softc *sc, struct bio *bp)
 		case BIO_DELETE:
 		case BIO_WRITE:
 		case BIO_FLUSH:
+		case BIO_SPEEDUP:
 			pbp->bio_inbed--;
 			pbp->bio_children--;
 			break;
@@ -1042,6 +1049,7 @@ g_mirror_regular_request(struct g_mirror_softc *sc, struct bio *bp)
 	case BIO_DELETE:
 	case BIO_WRITE:
 	case BIO_FLUSH:
+	case BIO_SPEEDUP:
 		if (pbp->bio_children == 0) {
 			/*
 			 * All requests failed.
@@ -1148,6 +1156,7 @@ g_mirror_start(struct bio *bp)
 	case BIO_READ:
 	case BIO_WRITE:
 	case BIO_DELETE:
+	case BIO_SPEEDUP:
 	case BIO_FLUSH:
 		break;
 	case BIO_GETATTR:
@@ -1782,6 +1791,7 @@ g_mirror_register_request(struct g_mirror_softc *sc, struct bio *bp)
 		 */
 		TAILQ_INSERT_TAIL(&sc->sc_inflight, bp, bio_queue);
 		return;
+	case BIO_SPEEDUP:
 	case BIO_FLUSH:
 		TAILQ_INIT(&queue);
 		LIST_FOREACH(disk, &sc->sc_disks, d_next) {
@@ -3291,6 +3301,7 @@ g_mirror_taste(struct g_class *mp, struct g_provider *pp, int flags __unused)
 	sx_xlock(&sc->sc_lock);
 	sc->sc_flags |= G_MIRROR_DEVICE_FLAG_TASTING;
 	error = g_mirror_add_disk(sc, pp, &md);
+	sc->sc_flags &= ~G_MIRROR_DEVICE_FLAG_TASTING;
 	if (error != 0) {
 		G_MIRROR_DEBUG(0, "Cannot add disk %s to %s (error=%d).",
 		    pp->name, gp->name, error);
@@ -3302,7 +3313,6 @@ g_mirror_taste(struct g_class *mp, struct g_provider *pp, int flags __unused)
 		}
 		gp = NULL;
 	}
-	sc->sc_flags &= ~G_MIRROR_DEVICE_FLAG_TASTING;
 	if ((sc->sc_flags & G_MIRROR_DEVICE_FLAG_DESTROY) != 0) {
 		g_mirror_destroy(sc, G_MIRROR_DESTROY_HARD);
 		g_topology_lock();
@@ -3373,12 +3383,12 @@ g_mirror_dumpconf(struct sbuf *sb, const char *indent, struct g_geom *gp,
 		if (disk->d_state == G_MIRROR_DISK_STATE_SYNCHRONIZING) {
 			sbuf_printf(sb, "%s<Synchronized>", indent);
 			if (disk->d_sync.ds_offset == 0)
-				sbuf_printf(sb, "0%%");
+				sbuf_cat(sb, "0%");
 			else
 				sbuf_printf(sb, "%u%%",
 				    (u_int)((disk->d_sync.ds_offset * 100) /
 				    sc->sc_mediasize));
-			sbuf_printf(sb, "</Synchronized>\n");
+			sbuf_cat(sb, "</Synchronized>\n");
 			if (disk->d_sync.ds_offset > 0)
 				sbuf_printf(sb, "%s<BytesSynced>%jd"
 				    "</BytesSynced>\n", indent,
@@ -3390,17 +3400,17 @@ g_mirror_dumpconf(struct sbuf *sb, const char *indent, struct g_geom *gp,
 		    disk->d_genid);
 		sbuf_printf(sb, "%s<Flags>", indent);
 		if (disk->d_flags == 0)
-			sbuf_printf(sb, "NONE");
+			sbuf_cat(sb, "NONE");
 		else {
 			int first = 1;
 
 #define	ADD_FLAG(flag, name)	do {					\
 	if ((disk->d_flags & (flag)) != 0) {				\
 		if (!first)						\
-			sbuf_printf(sb, ", ");				\
+			sbuf_cat(sb, ", ");				\
 		else							\
 			first = 0;					\
-		sbuf_printf(sb, name);					\
+		sbuf_cat(sb, name);					\
 	}								\
 } while (0)
 			ADD_FLAG(G_MIRROR_DISK_FLAG_DIRTY, "DIRTY");
@@ -3412,7 +3422,7 @@ g_mirror_dumpconf(struct sbuf *sb, const char *indent, struct g_geom *gp,
 			ADD_FLAG(G_MIRROR_DISK_FLAG_BROKEN, "BROKEN");
 #undef	ADD_FLAG
 		}
-		sbuf_printf(sb, "</Flags>\n");
+		sbuf_cat(sb, "</Flags>\n");
 		sbuf_printf(sb, "%s<Priority>%u</Priority>\n", indent,
 		    disk->d_priority);
 		sbuf_printf(sb, "%s<State>%s</State>\n", indent,
@@ -3421,39 +3431,39 @@ g_mirror_dumpconf(struct sbuf *sb, const char *indent, struct g_geom *gp,
 		sbuf_printf(sb, "%s<Type>", indent);
 		switch (sc->sc_type) {
 		case G_MIRROR_TYPE_AUTOMATIC:
-			sbuf_printf(sb, "AUTOMATIC");
+			sbuf_cat(sb, "AUTOMATIC");
 			break;
 		case G_MIRROR_TYPE_MANUAL:
-			sbuf_printf(sb, "MANUAL");
+			sbuf_cat(sb, "MANUAL");
 			break;
 		default:
-			sbuf_printf(sb, "UNKNOWN");
+			sbuf_cat(sb, "UNKNOWN");
 			break;
 		}
-		sbuf_printf(sb, "</Type>\n");
+		sbuf_cat(sb, "</Type>\n");
 		sbuf_printf(sb, "%s<ID>%u</ID>\n", indent, (u_int)sc->sc_id);
 		sbuf_printf(sb, "%s<SyncID>%u</SyncID>\n", indent, sc->sc_syncid);
 		sbuf_printf(sb, "%s<GenID>%u</GenID>\n", indent, sc->sc_genid);
 		sbuf_printf(sb, "%s<Flags>", indent);
 		if (sc->sc_flags == 0)
-			sbuf_printf(sb, "NONE");
+			sbuf_cat(sb, "NONE");
 		else {
 			int first = 1;
 
 #define	ADD_FLAG(flag, name)	do {					\
 	if ((sc->sc_flags & (flag)) != 0) {				\
 		if (!first)						\
-			sbuf_printf(sb, ", ");				\
+			sbuf_cat(sb, ", ");				\
 		else							\
 			first = 0;					\
-		sbuf_printf(sb, name);					\
+		sbuf_cat(sb, name);					\
 	}								\
 } while (0)
 			ADD_FLAG(G_MIRROR_DEVICE_FLAG_NOFAILSYNC, "NOFAILSYNC");
 			ADD_FLAG(G_MIRROR_DEVICE_FLAG_NOAUTOSYNC, "NOAUTOSYNC");
 #undef	ADD_FLAG
 		}
-		sbuf_printf(sb, "</Flags>\n");
+		sbuf_cat(sb, "</Flags>\n");
 		sbuf_printf(sb, "%s<Slice>%u</Slice>\n", indent,
 		    (u_int)sc->sc_slice);
 		sbuf_printf(sb, "%s<Balance>%s</Balance>\n", indent,
@@ -3468,7 +3478,7 @@ g_mirror_dumpconf(struct sbuf *sb, const char *indent, struct g_geom *gp,
 			sbuf_printf(sb, "%s", "COMPLETE");
 		else
 			sbuf_printf(sb, "%s", "DEGRADED");
-		sbuf_printf(sb, "</State>\n");
+		sbuf_cat(sb, "</State>\n");
 	}
 }
 
@@ -3480,7 +3490,7 @@ g_mirror_shutdown_post_sync(void *arg, int howto)
 	struct g_mirror_softc *sc;
 	int error;
 
-	if (panicstr != NULL)
+	if (KERNEL_PANICKED())
 		return;
 
 	mp = arg;

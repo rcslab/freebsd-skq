@@ -1,7 +1,8 @@
 #!/bin/sh
 #
+# SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+#
 # Copyright (c) 2015 Alan Somers
-# All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -65,6 +66,15 @@ exfat_head() {
 exfat_body() {
 	bzcat $(atf_get_srcdir)/dfr-01-xfat.img.bz2 > exfat.img
 	atf_check -s exit:0 -o inline:"exfat\n" fstyp -u exfat.img
+}
+
+atf_test_case exfat_label
+exfat_label_head() {
+	atf_set "descr" "fstyp(8) can read exFAT labels"
+}
+exfat_label_body() {
+	bzcat $(atf_get_srcdir)/dfr-01-xfat.img.bz2 > exfat.img
+	atf_check -s exit:0 -o inline:"exfat exFat\n" fstyp -u -l exfat.img
 }
 
 atf_test_case empty
@@ -252,6 +262,7 @@ atf_init_test_cases() {
 	atf_add_test_case dir
 	atf_add_test_case empty
 	atf_add_test_case exfat
+	atf_add_test_case exfat_label
 	atf_add_test_case ext2
 	atf_add_test_case ext3
 	atf_add_test_case ext4

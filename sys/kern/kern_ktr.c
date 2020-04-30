@@ -2,7 +2,6 @@
  * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
  *
  * Copyright (c) 2000 John Baldwin <jhb@FreeBSD.org>
- * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -103,7 +102,8 @@ struct	ktr_entry ktr_buf_init[KTR_BOOT_ENTRIES];
 struct	ktr_entry *ktr_buf = ktr_buf_init;
 cpuset_t ktr_cpumask = CPUSET_T_INITIALIZER(KTR_CPUMASK);
 
-static SYSCTL_NODE(_debug, OID_AUTO, ktr, CTLFLAG_RD, 0, "KTR options");
+static SYSCTL_NODE(_debug, OID_AUTO, ktr, CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
+    "KTR options");
 
 SYSCTL_INT(_debug_ktr, OID_AUTO, version, CTLFLAG_RD,
     &ktr_version, 0, "Version of the KTR interface");
@@ -151,8 +151,10 @@ sysctl_debug_ktr_clear(SYSCTL_HANDLER_ARGS)
 
 	return (error);
 }
-SYSCTL_PROC(_debug_ktr, OID_AUTO, clear, CTLTYPE_INT|CTLFLAG_RW, 0, 0,
-    sysctl_debug_ktr_clear, "I", "Clear KTR Buffer");
+SYSCTL_PROC(_debug_ktr, OID_AUTO, clear,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_NEEDGIANT, 0, 0,
+    sysctl_debug_ktr_clear, "I",
+    "Clear KTR Buffer");
 
 /*
  * This is a sysctl proc so that it is serialized as !MPSAFE along with
@@ -172,8 +174,9 @@ sysctl_debug_ktr_mask(SYSCTL_HANDLER_ARGS)
 	return (error);
 }
 
-SYSCTL_PROC(_debug_ktr, OID_AUTO, mask, CTLTYPE_U64 | CTLFLAG_RWTUN, 0, 0,
-    sysctl_debug_ktr_mask, "QU",
+SYSCTL_PROC(_debug_ktr, OID_AUTO, mask,
+    CTLTYPE_U64 | CTLFLAG_RWTUN | CTLFLAG_NEEDGIANT,
+    0, 0, sysctl_debug_ktr_mask, "QU",
     "Bitmask of KTR event classes for which logging is enabled");
 
 #if KTR_ENTRIES > KTR_BOOT_ENTRIES
@@ -243,8 +246,10 @@ sysctl_debug_ktr_entries(SYSCTL_HANDLER_ARGS)
 	return (error);
 }
 
-SYSCTL_PROC(_debug_ktr, OID_AUTO, entries, CTLTYPE_INT|CTLFLAG_RW, 0, 0,
-    sysctl_debug_ktr_entries, "I", "Number of entries in the KTR buffer");
+SYSCTL_PROC(_debug_ktr, OID_AUTO, entries,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_NEEDGIANT,
+    0, 0, sysctl_debug_ktr_entries, "I",
+    "Number of entries in the KTR buffer");
 
 #ifdef KTR_VERBOSE
 int	ktr_verbose = KTR_VERBOSE;
@@ -306,8 +311,9 @@ sysctl_debug_ktr_alq_enable(SYSCTL_HANDLER_ARGS)
 	return (error);
 }
 SYSCTL_PROC(_debug_ktr, OID_AUTO, alq_enable,
-    CTLTYPE_INT|CTLFLAG_RW, 0, 0, sysctl_debug_ktr_alq_enable,
-    "I", "Enable KTR logging");
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_NEEDGIANT, 0, 0,
+    sysctl_debug_ktr_alq_enable, "I",
+    "Enable KTR logging");
 #endif
 
 void
@@ -325,7 +331,7 @@ ktr_tracepoint(uint64_t mask, const char *file, int line, const char *format,
 #endif
 	int cpu;
 
-	if (panicstr || kdb_active)
+	if (KERNEL_PANICKED() || kdb_active)
 		return;
 	if ((ktr_mask & mask) == 0 || ktr_buf == NULL)
 		return;

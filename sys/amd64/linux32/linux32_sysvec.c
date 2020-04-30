@@ -81,7 +81,6 @@ __FBSDID("$FreeBSD$");
 #include <amd64/linux32/linux.h>
 #include <amd64/linux32/linux32_proto.h>
 #include <compat/linux/linux_emul.h>
-#include <compat/linux/linux_futex.h>
 #include <compat/linux/linux_ioctl.h>
 #include <compat/linux/linux_mib.h>
 #include <compat/linux/linux_misc.h>
@@ -90,14 +89,6 @@ __FBSDID("$FreeBSD$");
 #include <compat/linux/linux_vdso.h>
 
 MODULE_VERSION(linux, 1);
-
-/*
- * Allow the sendsig functions to use the ldebug() facility even though they
- * are not syscalls themselves.  Map them to syscall 0.  This is slightly less
- * bogus than using ldebug(sigreturn).
- */
-#define	LINUX32_SYS_linux_rt_sendsig	0
-#define	LINUX32_SYS_linux_sendsig	0
 
 const char *linux_kplatform;
 static int linux_szsigcode;
@@ -110,12 +101,13 @@ extern struct sysent linux32_sysent[LINUX32_SYS_MAXSYSCALL];
 
 SET_DECLARE(linux_ioctl_handler_set, struct linux_ioctl_handler);
 
-static int	linux_fixup_elf(register_t **stack_base,
+static int	linux_fixup_elf(uintptr_t *stack_base,
 		    struct image_params *iparams);
-static register_t *linux_copyout_strings(struct image_params *imgp);
+static int	linux_copyout_strings(struct image_params *imgp,
+		    uintptr_t *stack_base);
 static void     linux_sendsig(sig_t catcher, ksiginfo_t *ksi, sigset_t *mask);
 static void	linux_exec_setregs(struct thread *td,
-				   struct image_params *imgp, u_long stack);
+				   struct image_params *imgp, uintptr_t stack);
 static void	linux32_fixlimit(struct rlimit *rl, int which);
 static bool	linux32_trans_osrel(const Elf_Note *note, int32_t *osrel);
 static void	linux_vdso_install(void *param);
@@ -195,21 +187,13 @@ linux_translate_traps(int signal, int trap_code)
 }
 
 static int
-linux_fixup_elf(register_t **stack_base, struct image_params *imgp)
+linux_copyout_auxargs(struct image_params *imgp, uintptr_t base)
 {
 	Elf32_Auxargs *args;
 	Elf32_Auxinfo *argarray, *pos;
-	Elf32_Addr *auxbase, *base;
-	struct linux32_ps_strings *arginfo;
 	int error, issetugid;
 
-	arginfo = (struct linux32_ps_strings *)LINUX32_PS_STRINGS;
-
-	KASSERT(curthread->td_proc == imgp->proc,
-	    ("unsafe linux_fixup_elf(), should be curproc"));
-	base = (Elf32_Addr *)*stack_base;
 	args = (Elf32_Auxargs *)imgp->auxargs;
-	auxbase = base + (imgp->args->argc + 1 + imgp->args->envc + 1);
 	argarray = pos = malloc(LINUX_AT_COUNT * sizeof(*pos), M_TEMP,
 	    M_WAITOK | M_ZERO);
 
@@ -253,16 +237,22 @@ linux_fixup_elf(register_t **stack_base, struct image_params *imgp)
 	imgp->auxargs = NULL;
 	KASSERT(pos - argarray <= LINUX_AT_COUNT, ("Too many auxargs"));
 
-	error = copyout(&argarray[0], auxbase,
+	error = copyout(argarray, (void *)base,
 	    sizeof(*argarray) * LINUX_AT_COUNT);
 	free(argarray, M_TEMP);
-	if (error != 0)
-		return (error);
+	return (error);
+}
 
+static int
+linux_fixup_elf(uintptr_t *stack_base, struct image_params *imgp)
+{
+	Elf32_Addr *base;
+
+	base = (Elf32_Addr *)*stack_base;
 	base--;
 	if (suword32(base, (uint32_t)imgp->args->argc) == -1)
 		return (EFAULT);
-	*stack_base = (register_t *)base;
+	*stack_base = (uintptr_t)base;
 	return (0);
 }
 
@@ -286,11 +276,6 @@ linux_rt_sendsig(sig_t catcher, ksiginfo_t *ksi, sigset_t *mask)
 	regs = td->td_frame;
 	oonstack = sigonstack(regs->tf_rsp);
 
-#ifdef DEBUG
-	if (ldebug(rt_sendsig))
-		printf(ARGS(rt_sendsig, "%p, %d, %p, %u"),
-		    catcher, sig, (void*)mask, code);
-#endif
 	/* Allocate space for the signal handler context. */
 	if ((td->td_pflags & TDP_ALTSTACK) && !oonstack &&
 	    SIGISMEMBER(psp->ps_sigonstack, sig)) {
@@ -349,23 +334,11 @@ linux_rt_sendsig(sig_t catcher, ksiginfo_t *ksi, sigset_t *mask)
 	frame.sf_sc.uc_mcontext.sc_cr2    = (u_int32_t)(uintptr_t)ksi->ksi_addr;
 	frame.sf_sc.uc_mcontext.sc_trapno = bsd_to_linux_trapcode(code);
 
-#ifdef DEBUG
-	if (ldebug(rt_sendsig))
-		printf(LMSG("rt_sendsig flags: 0x%x, sp: %p, ss: 0x%lx, mask: 0x%x"),
-		    frame.sf_sc.uc_stack.ss_flags, td->td_sigstk.ss_sp,
-		    td->td_sigstk.ss_size, frame.sf_sc.uc_mcontext.sc_mask);
-#endif
-
 	if (copyout(&frame, fp, sizeof(frame)) != 0) {
 		/*
 		 * Process has trashed its stack; give it an illegal
 		 * instruction to halt it in its tracks.
 		 */
-#ifdef DEBUG
-		if (ldebug(rt_sendsig))
-			printf(LMSG("rt_sendsig: bad stack %p, oonstack=%x"),
-			    fp, oonstack);
-#endif
 		PROC_LOCK(p);
 		sigexit(td, SIGILL);
 	}
@@ -422,12 +395,6 @@ linux_sendsig(sig_t catcher, ksiginfo_t *ksi, sigset_t *mask)
 
 	regs = td->td_frame;
 	oonstack = sigonstack(regs->tf_rsp);
-
-#ifdef DEBUG
-	if (ldebug(sendsig))
-		printf(ARGS(sendsig, "%p, %d, %p, %u"),
-		    catcher, sig, (void*)mask, code);
-#endif
 
 	/* Allocate space for the signal handler context. */
 	if ((td->td_pflags & TDP_ALTSTACK) && !oonstack &&
@@ -521,10 +488,6 @@ linux_sigreturn(struct thread *td, struct linux_sigreturn_args *args)
 
 	regs = td->td_frame;
 
-#ifdef DEBUG
-	if (ldebug(sigreturn))
-		printf(ARGS(sigreturn, "%p"), (void *)args->sfp);
-#endif
 	/*
 	 * The trampoline code hands us the sigframe.
 	 * It is unsafe to keep track of it ourselves, in the event that a
@@ -606,10 +569,6 @@ linux_rt_sigreturn(struct thread *td, struct linux_rt_sigreturn_args *args)
 
 	regs = td->td_frame;
 
-#ifdef DEBUG
-	if (ldebug(rt_sigreturn))
-		printf(ARGS(rt_sigreturn, "%p"), (void *)args->ucp);
-#endif
 	/*
 	 * The trampoline code hands us the ucontext.
 	 * It is unsafe to keep track of it ourselves, in the event that a
@@ -674,11 +633,6 @@ linux_rt_sigreturn(struct thread *td, struct linux_rt_sigreturn_args *args)
 	ss.ss_size = lss->ss_size;
 	ss.ss_flags = linux_to_bsd_sigaltstack(lss->ss_flags);
 
-#ifdef DEBUG
-	if (ldebug(rt_sigreturn))
-		printf(LMSG("rt_sigret flags: 0x%x, sp: %p, ss: 0x%lx, mask: 0x%x"),
-		    ss.ss_flags, ss.ss_sp, ss.ss_size, context->sc_mask);
-#endif
 	(void)kern_sigaltstack(td, &ss, NULL);
 
 	return (EJUSTRETURN);
@@ -721,7 +675,8 @@ linux32_fetch_syscall_args(struct thread *td)
  * XXX copied from ia32_signal.c.
  */
 static void
-linux_exec_setregs(struct thread *td, struct image_params *imgp, u_long stack)
+linux_exec_setregs(struct thread *td, struct image_params *imgp,
+    uintptr_t stack)
 {
 	struct trapframe *regs = td->td_frame;
 	struct pcb *pcb = td->td_pcb;
@@ -753,7 +708,7 @@ linux_exec_setregs(struct thread *td, struct image_params *imgp, u_long stack)
 	regs->tf_ss = _udatasel;
 	regs->tf_flags = TF_HASSEGS;
 	regs->tf_cs = _ucode32sel;
-	regs->tf_rbx = imgp->ps_strings;
+	regs->tf_rbx = (register_t)imgp->ps_strings;
 
 	fpstate_drop(td);
 
@@ -764,13 +719,13 @@ linux_exec_setregs(struct thread *td, struct image_params *imgp, u_long stack)
 /*
  * XXX copied from ia32_sysvec.c.
  */
-static register_t *
-linux_copyout_strings(struct image_params *imgp)
+static int
+linux_copyout_strings(struct image_params *imgp, uintptr_t *stack_base)
 {
-	int argc, envc;
+	int argc, envc, error;
 	u_int32_t *vectp;
-	char *stringp, *destp;
-	u_int32_t *stack_base;
+	char *stringp;
+	uintptr_t destp, ustringp;
 	struct linux32_ps_strings *arginfo;
 	char canary[LINUX_AT_RANDOM_LEN];
 	size_t execpath_len;
@@ -782,32 +737,40 @@ linux_copyout_strings(struct image_params *imgp)
 		execpath_len = 0;
 
 	arginfo = (struct linux32_ps_strings *)LINUX32_PS_STRINGS;
-	destp =	(caddr_t)arginfo - SPARE_USRSPACE -
-	    roundup(sizeof(canary), sizeof(char *)) -
-	    roundup(execpath_len, sizeof(char *)) -
-	    roundup(ARG_MAX - imgp->args->stringspace, sizeof(char *));
+	destp = (uintptr_t)arginfo;
 
 	if (execpath_len != 0) {
-		imgp->execpathp = (uintptr_t)arginfo - execpath_len;
-		copyout(imgp->execpath, (void *)imgp->execpathp, execpath_len);
+		destp -= execpath_len;
+		destp = rounddown2(destp, sizeof(uint32_t));
+		imgp->execpathp = (void *)destp;
+		error = copyout(imgp->execpath, imgp->execpathp, execpath_len);
+		if (error != 0)
+			return (error);
 	}
 
 	/* Prepare the canary for SSP. */
 	arc4rand(canary, sizeof(canary), 0);
-	imgp->canary = (uintptr_t)arginfo -
-	    roundup(execpath_len, sizeof(char *)) -
-	    roundup(sizeof(canary), sizeof(char *));
-	copyout(canary, (void *)imgp->canary, sizeof(canary));
+	destp -= roundup(sizeof(canary), sizeof(uint32_t));
+	imgp->canary = (void *)destp;
+	error = copyout(canary, imgp->canary, sizeof(canary));
+	if (error != 0)
+		return (error);
 
-	vectp = (uint32_t *)destp;
+	/* Allocate room for the argument and environment strings. */
+	destp -= ARG_MAX - imgp->args->stringspace;
+	destp = rounddown2(destp, sizeof(uint32_t));
+	ustringp = destp;
+
 	if (imgp->auxargs) {
 		/*
 		 * Allocate room on the stack for the ELF auxargs
 		 * array.  It has LINUX_AT_COUNT entries.
 		 */
-		vectp -= howmany(LINUX_AT_COUNT * sizeof(Elf32_Auxinfo),
-		    sizeof(*vectp));
+		destp -= LINUX_AT_COUNT * sizeof(Elf32_Auxinfo);
+		destp = rounddown2(destp, sizeof(uint32_t));
 	}
+
+	vectp = (uint32_t *)destp;
 
 	/*
 	 * Allocate room for the argv[] and env vectors including the
@@ -816,47 +779,65 @@ linux_copyout_strings(struct image_params *imgp)
 	vectp -= imgp->args->argc + 1 + imgp->args->envc + 1;
 
 	/* vectp also becomes our initial stack base. */
-	stack_base = vectp;
+	*stack_base = (uintptr_t)vectp;
 
 	stringp = imgp->args->begin_argv;
 	argc = imgp->args->argc;
 	envc = imgp->args->envc;
+
 	/* Copy out strings - arguments and environment. */
-	copyout(stringp, destp, ARG_MAX - imgp->args->stringspace);
+	error = copyout(stringp, (void *)ustringp,
+	    ARG_MAX - imgp->args->stringspace);
+	if (error != 0)
+		return (error);
 
 	/* Fill in "ps_strings" struct for ps, w, etc. */
-	suword32(&arginfo->ps_argvstr, (uint32_t)(intptr_t)vectp);
-	suword32(&arginfo->ps_nargvstr, argc);
+	if (suword32(&arginfo->ps_argvstr, (uint32_t)(intptr_t)vectp) != 0 ||
+	    suword32(&arginfo->ps_nargvstr, argc) != 0)
+		return (EFAULT);
 
 	/* Fill in argument portion of vector table. */
 	for (; argc > 0; --argc) {
-		suword32(vectp++, (uint32_t)(intptr_t)destp);
+		if (suword32(vectp++, ustringp) != 0)
+			return (EFAULT);
 		while (*stringp++ != 0)
-			destp++;
-		destp++;
+			ustringp++;
+		ustringp++;
 	}
 
 	/* A null vector table pointer separates the argp's from the envp's. */
-	suword32(vectp++, 0);
+	if (suword32(vectp++, 0) != 0)
+		return (EFAULT);
 
-	suword32(&arginfo->ps_envstr, (uint32_t)(intptr_t)vectp);
-	suword32(&arginfo->ps_nenvstr, envc);
+	if (suword32(&arginfo->ps_envstr, (uint32_t)(intptr_t)vectp) != 0 ||
+	    suword32(&arginfo->ps_nenvstr, envc) != 0)
+		return (EFAULT);
 
 	/* Fill in environment portion of vector table. */
 	for (; envc > 0; --envc) {
-		suword32(vectp++, (uint32_t)(intptr_t)destp);
+		if (suword32(vectp++, ustringp) != 0)
+			return (EFAULT);
 		while (*stringp++ != 0)
-			destp++;
-		destp++;
+			ustringp++;
+		ustringp++;
 	}
 
 	/* The end of the vector table is a null pointer. */
-	suword32(vectp, 0);
+	if (suword32(vectp, 0) != 0)
+		return (EFAULT);
 
-	return ((register_t *)stack_base);
+	if (imgp->auxargs) {
+		vectp++;
+		error = imgp->sysent->sv_copyout_auxargs(imgp,
+		    (uintptr_t)vectp);
+		if (error != 0)
+			return (error);
+	}
+
+	return (0);
 }
 
-static SYSCTL_NODE(_compat, OID_AUTO, linux32, CTLFLAG_RW, 0,
+static SYSCTL_NODE(_compat, OID_AUTO, linux32, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
     "32-bit Linux emulation");
 
 static u_long	linux32_maxdsiz = LINUX32_MAXDSIZ;
@@ -868,11 +849,6 @@ SYSCTL_ULONG(_compat_linux32, OID_AUTO, maxssiz, CTLFLAG_RW,
 static u_long	linux32_maxvmem = LINUX32_MAXVMEM;
 SYSCTL_ULONG(_compat_linux32, OID_AUTO, maxvmem, CTLFLAG_RW,
     &linux32_maxvmem, 0, "");
-
-#if defined(DEBUG)
-SYSCTL_PROC(_compat_linux32, OID_AUTO, debug, CTLTYPE_STRING | CTLFLAG_RW, 0, 0,
-    linux_sysctl_debug, "A", "Linux debugging control");
-#endif
 
 static void
 linux32_fixlimit(struct rlimit *rl, int which)
@@ -920,12 +896,12 @@ struct sysentvec elf_linux_sysvec = {
 	.sv_coredump	= elf32_coredump,
 	.sv_imgact_try	= linux_exec_imgact_try,
 	.sv_minsigstksz	= LINUX_MINSIGSTKSZ,
-	.sv_pagesize	= PAGE_SIZE,
 	.sv_minuser	= VM_MIN_ADDRESS,
 	.sv_maxuser	= LINUX32_MAXUSER,
 	.sv_usrstack	= LINUX32_USRSTACK,
 	.sv_psstrings	= LINUX32_PS_STRINGS,
 	.sv_stackprot	= VM_PROT_ALL,
+	.sv_copyout_auxargs = linux_copyout_auxargs,
 	.sv_copyout_strings = linux_copyout_strings,
 	.sv_setregs	= linux_exec_setregs,
 	.sv_fixlimit	= linux32_fixlimit,
@@ -1016,7 +992,7 @@ static Elf32_Brandinfo linux_brand = {
 	.brand		= ELFOSABI_LINUX,
 	.machine	= EM_386,
 	.compat_3_brand	= "Linux",
-	.emul_path	= "/compat/linux",
+	.emul_path	= linux_emul_path,
 	.interp_path	= "/lib/ld-linux.so.1",
 	.sysvec		= &elf_linux_sysvec,
 	.interp_newpath	= NULL,
@@ -1028,7 +1004,7 @@ static Elf32_Brandinfo linux_glibc2brand = {
 	.brand		= ELFOSABI_LINUX,
 	.machine	= EM_386,
 	.compat_3_brand	= "Linux",
-	.emul_path	= "/compat/linux",
+	.emul_path	= linux_emul_path,
 	.interp_path	= "/lib/ld-linux.so.2",
 	.sysvec		= &elf_linux_sysvec,
 	.interp_newpath	= NULL,
@@ -1040,7 +1016,7 @@ static Elf32_Brandinfo linux_muslbrand = {
 	.brand		= ELFOSABI_LINUX,
 	.machine	= EM_386,
 	.compat_3_brand	= "Linux",
-	.emul_path	= "/compat/linux",
+	.emul_path	= linux_emul_path,
 	.interp_path	= "/lib/ld-musl-i386.so.1",
 	.sysvec		= &elf_linux_sysvec,
 	.interp_newpath	= NULL,
@@ -1073,8 +1049,6 @@ linux_elf_modevent(module_t mod, int type, void *data)
 		if (error == 0) {
 			SET_FOREACH(lihp, linux_ioctl_handler_set)
 				linux32_ioctl_register_handler(*lihp);
-			LIST_INIT(&futex_list);
-			mtx_init(&futex_mtx, "ftllk", NULL, MTX_DEF);
 			stclohz = (stathz ? stathz : hz);
 			if (bootverbose)
 				printf("Linux ELF exec handler installed\n");
@@ -1095,7 +1069,6 @@ linux_elf_modevent(module_t mod, int type, void *data)
 		if (error == 0) {
 			SET_FOREACH(lihp, linux_ioctl_handler_set)
 				linux32_ioctl_unregister_handler(*lihp);
-			mtx_destroy(&futex_mtx);
 			if (bootverbose)
 				printf("Linux ELF exec handler removed\n");
 		} else

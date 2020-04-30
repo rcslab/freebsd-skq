@@ -6,6 +6,8 @@ ATF_TESTS_C+=		dynthr_test
 ATF_TESTS_C+=		heapsort_test
 ATF_TESTS_C+=		mergesort_test
 ATF_TESTS_C+=		qsort_test
+ATF_TESTS_C+=		qsort_r_test
+ATF_TESTS_C+=		qsort_s_test
 ATF_TESTS_C+=		set_constraint_handler_s_test
 ATF_TESTS_C+=		strfmon_test
 ATF_TESTS_C+=		tsearch_test
@@ -13,6 +15,9 @@ ATF_TESTS_C+=		tsearch_test
 ATF_TESTS_CXX+=		cxa_thread_atexit_test
 ATF_TESTS_CXX+=		cxa_thread_atexit_nothr_test
 .endif
+
+# All architectures on FreeBSD have fenv.h
+CFLAGS+=	-D__HAVE_FENV
 
 # Not sure why this isn't defined for all architectures, since most
 # have long double.
@@ -50,8 +55,8 @@ PROGS+=		h_getopt h_getopt_long
 
 CFLAGS+=	-I${.CURDIR}
 
-CXXFLAGS.cxa_thread_atexit_test+=	-std=c++11
-CXXFLAGS.cxa_thread_atexit_nothr_test+=	-std=c++11
+CXXSTD.cxa_thread_atexit_test=	c++11
+CXXSTD.cxa_thread_atexit_nothr_test=	c++11
 LIBADD.cxa_thread_atexit_test+=		pthread
 
 .for t in h_getopt h_getopt_long

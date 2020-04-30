@@ -50,11 +50,11 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
+#include <sys/gsb_crc32.h>
+#include <sys/eventhandler.h>
 #include <sys/stdint.h>
 #include <sys/stddef.h>
-#include <sys/param.h>
 #include <sys/queue.h>
-#include <sys/types.h>
 #include <sys/systm.h>
 #include <sys/socket.h>
 #include <sys/kernel.h>
@@ -118,7 +118,8 @@ static uint32_t	cdce_m_crc32(struct mbuf *, uint32_t, uint32_t);
 static int cdce_debug = 0;
 static int cdce_tx_interval = 0;
 
-static SYSCTL_NODE(_hw_usb, OID_AUTO, cdce, CTLFLAG_RW, 0, "USB CDC-Ethernet");
+static SYSCTL_NODE(_hw_usb, OID_AUTO, cdce, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "USB CDC-Ethernet");
 SYSCTL_INT(_hw_usb_cdce, OID_AUTO, debug, CTLFLAG_RWTUN, &cdce_debug, 0,
     "Debug level");
 SYSCTL_INT(_hw_usb_cdce, OID_AUTO, interval, CTLFLAG_RWTUN, &cdce_tx_interval, 0,
@@ -276,6 +277,7 @@ static const STRUCT_USB_HOST_ID cdce_host_devs[] = {
 	{USB_VPI(USB_VENDOR_SHARP, USB_PRODUCT_SHARP_SLA300, CDCE_FLAG_ZAURUS | CDCE_FLAG_NO_UNION)},
 	{USB_VPI(USB_VENDOR_SHARP, USB_PRODUCT_SHARP_SLC700, CDCE_FLAG_ZAURUS | CDCE_FLAG_NO_UNION)},
 	{USB_VPI(USB_VENDOR_SHARP, USB_PRODUCT_SHARP_SLC750, CDCE_FLAG_ZAURUS | CDCE_FLAG_NO_UNION)},
+	{USB_VPI(USB_VENDOR_REALTEK, USB_PRODUCT_REALTEK_RTL8156, 0)},
 
 	{USB_VENDOR(USB_VENDOR_HUAWEI), USB_IFACE_CLASS(UICLASS_VENDOR),
 		USB_IFACE_SUBCLASS(0x02), USB_IFACE_PROTOCOL(0x16),

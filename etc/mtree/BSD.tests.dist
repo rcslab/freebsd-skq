@@ -238,6 +238,20 @@
                     version
                     ..
                 ..
+                i386
+                    arrays
+                    ..
+                    funcs
+                    ..
+                    pid
+                    ..
+                    ustack
+                    ..
+                ..
+                amd64
+                    arrays
+                    ..
+                ..
             ..
             zfsd
             ..
@@ -278,7 +292,19 @@
             static
             ..
         ..
+        googletest
+            gmock
+            ..
+            gmock_main
+            ..
+            gtest
+            ..
+            gtest_main
+            ..
+        ..
         libarchive
+        ..
+        libbe
         ..
         libc
             c063
@@ -358,6 +384,8 @@
         ..
         libdevdctl
         ..
+        libexecinfo
+        ..
         libkvm
         ..
         libmp
@@ -410,9 +438,15 @@
         ..
         mdconfig
         ..
+        nvmecontrol
+        ..
         pfctl
             files
             ..
+        ..
+        ping
+        ..
+        ping6
         ..
     ..
     secure
@@ -429,6 +463,8 @@
         examples
             tests
                 atf
+                ..
+                googletest
                 ..
                 plain
                 ..
@@ -694,6 +730,8 @@
                 ..
             ..
         ..
+        devrandom
+        ..
         dtrace
         ..
         fifo
@@ -701,6 +739,8 @@
         file
         ..
         fs
+            fusefs
+            ..
             tmpfs
             ..
         ..
@@ -715,6 +755,8 @@
                 gpt
                 ..
                 mirror
+                ..
+                multipath
                 ..
                 nop
                 ..
@@ -756,6 +798,10 @@
         ..
         netinet
         ..
+        netinet6
+            frag6
+            ..
+        ..
         netipsec
             tunnel
             ..
@@ -763,6 +809,8 @@
     netmap
     ..
         netpfil
+            common
+            ..
             pf
                 ioctl
                 ..
@@ -972,6 +1020,8 @@
         ..
         limits
         ..
+        locale
+        ..
         m4
         ..
         mkimg
@@ -979,6 +1029,8 @@
         ncal
         ..
         opensm
+        ..
+        patch
         ..
         pr
         ..
@@ -1016,6 +1068,8 @@
         ..
         uuencode
         ..
+        unifdef
+        ..
         uniq
         ..
         vmstat
@@ -1040,7 +1094,11 @@
         ..
         fstyp
         ..
+        jail
+        ..
         makefs
+        ..
+        mixer
         ..
         newsyslog
         ..

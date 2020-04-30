@@ -36,10 +36,12 @@
 		for (i in a) {
 			if (a[i] ~ /^package=/) {
 				pkgname=a[i]
+				if ($1 ~ /^\/boot\//)
+					pkgname="bootloader"
 				gsub(/package=/, "", pkgname)
 			} else if (a[i] == "config") {
 				type="config"
-			} else if (a[i] == "development" || a[i] == "profile" || a[i] == "debug" || a[i] == "docs") {
+			} else if (a[i] == "development" || a[i] == "debug" || a[i] == "docs") {
 				pkgend=a[i]
 			} else {
 				if (ext != "")

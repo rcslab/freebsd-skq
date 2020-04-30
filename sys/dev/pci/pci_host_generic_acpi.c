@@ -57,6 +57,7 @@ __FBSDID("$FreeBSD$");
 #include <dev/pci/pcireg.h>
 #include <dev/pci/pcib_private.h>
 #include <dev/pci/pci_host_generic.h>
+#include <dev/pci/pci_host_generic_acpi.h>
 
 #include <machine/cpu.h>
 #include <machine/bus.h>
@@ -87,11 +88,6 @@ __FBSDID("$FreeBSD$");
 #define	SPACE_CODE_IO_SPACE	0x1
 #define	PROPS_CELL_SIZE		1
 #define	PCI_ADDR_CELL_SIZE	2
-
-struct generic_pcie_acpi_softc {
-	struct generic_pcie_core_softc base;
-	ACPI_BUFFER		ap_prt;		/* interrupt routing table */
-};
 
 /* Forward prototypes */
 
@@ -148,8 +144,6 @@ pci_host_generic_acpi_parse_resource(ACPI_RESOURCE *res, void *arg)
 		off = res->Data.Address32.Address.TranslationOffset;
 		break;
 	case ACPI_RESOURCE_TYPE_ADDRESS64:
-		if (res->Data.Address.ResourceType != ACPI_MEMORY_RANGE)
-			break;
 		min = res->Data.Address64.Address.Minimum;
 		max = res->Data.Address64.Address.Maximum;
 		off = res->Data.Address64.Address.TranslationOffset;
@@ -207,11 +201,7 @@ pci_host_acpi_get_ecam_resource(device_t dev)
 				mcfg_entry++;
 		}
 		if (found) {
-			if (mcfg_entry->EndBusNumber < sc->base.bus_end) {
-				device_printf(dev, "bus end mismatch! expected %d found %d.\n",
-				    sc->base.bus_end, (int)mcfg_entry->EndBusNumber);
-				sc->base.bus_end = mcfg_entry->EndBusNumber;
-			}
+			sc->base.bus_end = mcfg_entry->EndBusNumber;
 			base = mcfg_entry->Address;
 		} else {
 			device_printf(dev, "MCFG exists, but does not have bus %d-%d\n",
@@ -220,9 +210,10 @@ pci_host_acpi_get_ecam_resource(device_t dev)
 		}
 	} else {
 		status = acpi_GetInteger(handle, "_CBA", &val);
-		if (ACPI_SUCCESS(status))
+		if (ACPI_SUCCESS(status)) {
 			base = val;
-		else
+			sc->base.bus_end = 255;
+		} else
 			return (ENXIO);
 	}
 
@@ -238,8 +229,8 @@ pci_host_acpi_get_ecam_resource(device_t dev)
 	return (0);
 }
 
-static int
-pci_host_generic_acpi_attach(device_t dev)
+int
+pci_host_generic_acpi_init(device_t dev)
 {
 	struct generic_pcie_acpi_softc *sc;
 	ACPI_HANDLE handle;
@@ -259,7 +250,6 @@ pci_host_generic_acpi_attach(device_t dev)
 		device_printf(dev, "No _BBN, using start bus 0\n");
 		sc->base.bus_start = 0;
 	}
-	sc->base.bus_end = 255;
 
 	/* Get PCI Segment (domain) needed for MCFG lookup */
 	status = acpi_GetInteger(handle, "_SEG", &sc->base.ecam);
@@ -297,7 +287,7 @@ pci_host_generic_acpi_attach(device_t dev)
 			continue; /* empty range element */
 		if (sc->base.ranges[tuple].flags & FLAG_MEM) {
 			error = rman_manage_region(&sc->base.mem_rman,
-			   phys_base, phys_base + size - 1);
+			   pci_base, pci_base + size - 1);
 		} else if (sc->base.ranges[tuple].flags & FLAG_IO) {
 			error = rman_manage_region(&sc->base.io_rman,
 			   pci_base + PCI_IO_WINDOW_OFFSET,
@@ -311,6 +301,18 @@ pci_host_generic_acpi_attach(device_t dev)
 			return (error);
 		}
 	}
+
+	return (0);
+}
+
+static int
+pci_host_generic_acpi_attach(device_t dev)
+{
+	int error;
+
+	error = pci_host_generic_acpi_init(dev);
+	if (error != 0)
+		return (error);
 
 	device_add_child(dev, "pci", -1);
 	return (bus_generic_attach(dev));

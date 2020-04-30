@@ -120,7 +120,7 @@ ofwfdt_fixups(void *fdtp)
 		/* Instantiate RTAS */
 		rtas = OF_open(path);
 		base = 0;
-		OF_call_method("instantiate-rtas", rtas, 1, 1, (cell_t)rtas,
+		OF_call_method("instantiate-rtas", rtas, 1, 1, (cell_t)rtasmem,
 		    &base);
 
 		/* Store info to FDT using Linux convention */
@@ -195,6 +195,12 @@ fdt_platform_load_dtb(void)
         free(buffer);
 
         return (0);
+}
+
+void
+fdt_platform_load_overlays(void)
+{
+
 }
 
 void

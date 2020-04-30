@@ -46,11 +46,11 @@ pr_debug("%s:%s:%d:(pid %d): " format, (dev)->ib_dev.name, __func__,	\
 	 __LINE__, current->pid, ##arg)
 
 #define mlx5_ib_err(dev, format, arg...)				\
-pr_err("%s:%s:%d:(pid %d): " format, (dev)->ib_dev.name, __func__,	\
+pr_err("%s: ERR: %s:%d:(pid %d): " format, (dev)->ib_dev.name, __func__,	\
 	__LINE__, current->pid, ##arg)
 
 #define mlx5_ib_warn(dev, format, arg...)				\
-pr_warn("%s:%s:%d:(pid %d): " format, (dev)->ib_dev.name, __func__,	\
+pr_warn("%s: WARN: %s:%d:(pid %d): " format, (dev)->ib_dev.name, __func__,	\
 	__LINE__, current->pid, ##arg)
 
 #define field_avail(type, fld, sz) (offsetof(type, fld) +		\
@@ -650,9 +650,13 @@ struct mlx5_ib_congestion {
 	struct sysctl_ctx_list ctx;
 	struct sx lock;
 	struct delayed_work dwork;
-	u64	arg [0];
-	MLX5_IB_CONG_PARAMS(MLX5_IB_STATS_VAR)
-	MLX5_IB_CONG_STATS(MLX5_IB_STATS_VAR)
+	union {
+		u64	arg[1];
+		struct {
+			MLX5_IB_CONG_PARAMS(MLX5_IB_STATS_VAR)
+			MLX5_IB_CONG_STATS(MLX5_IB_STATS_VAR)
+		};
+	};
 };
 
 struct mlx5_ib_dev {

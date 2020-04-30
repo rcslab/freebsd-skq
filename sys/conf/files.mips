@@ -50,6 +50,7 @@ mips/mips/vm_machdep.c			standard
 # misc opt-in bits
 kern/kern_clocksource.c			standard
 kern/link_elf_obj.c			standard
+kern/subr_atomic64.c			optional	mips | mipsel | mipshf | mipselhf
 kern/subr_busdma_bufalloc.c		standard
 kern/subr_dummy_vdso_tc.c		standard
 kern/subr_sfbuf.c			optional	mips | mipsel | mipsn32
@@ -91,7 +92,9 @@ dev/nvram2env/nvram2env_mips.c		optional	nvram2env
 dev/nvram2env/nvram2env.c		optional	nvram2env
 
 # hwpmc support
-dev/hwpmc/hwpmc_mips.c			optional	hwpmc
+dev/hwpmc/hwpmc_beri.c			optional	hwpmc_beri
+dev/hwpmc/hwpmc_mips.c			optional	hwpmc_mips24k | \
+	hwpmc_mips74k
 dev/hwpmc/hwpmc_mips24k.c		optional	hwpmc_mips24k
 dev/hwpmc/hwpmc_mips74k.c		optional	hwpmc_mips74k
 

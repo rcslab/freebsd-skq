@@ -43,7 +43,7 @@
 #define	_SYS_CONF_H_
 
 #ifdef _KERNEL
-#include <sys/eventhandler.h>
+#include <sys/_eventhandler.h>
 #else
 #include <sys/queue.h>
 #endif
@@ -59,7 +59,7 @@ struct cdev {
 #define	SI_ETERNAL	0x0001	/* never destroyed */
 #define	SI_ALIAS	0x0002	/* carrier of alias name */
 #define	SI_NAMED	0x0004	/* make_dev{_alias} has been called */
-#define	SI_CHEAPCLONE	0x0008	/* can be removed_dev'ed when vnode reclaims */
+#define	SI_UNUSED1	0x0008	/* unused */
 #define	SI_CHILD	0x0010	/* child of another struct cdev **/
 #define	SI_DUMPDEV	0x0080	/* is kernel dumpdev */
 #define	SI_CLONELIST	0x0200	/* on a clone list */
@@ -256,7 +256,6 @@ void make_dev_args_init_impl(struct make_dev_args *_args, size_t _sz);
 #define	make_dev_args_init(a) \
     make_dev_args_init_impl((a), sizeof(struct make_dev_args))
 	
-int	count_dev(struct cdev *_dev);
 void	delist_dev(struct cdev *_dev);
 void	destroy_dev(struct cdev *_dev);
 int	destroy_dev_sched(struct cdev *dev);
@@ -352,22 +351,30 @@ struct dumperinfo {
 	off_t	origdumpoff;	/* Starting dump offset. */
 	struct kerneldumpcrypto	*kdcrypto; /* Kernel dump crypto. */
 	struct kerneldumpcomp *kdcomp; /* Kernel dump compression. */
+
+	TAILQ_ENTRY(dumperinfo)	di_next;
+
+	char			di_devname[];
 };
 
 extern int dumping;		/* system is dumping */
 
 int doadump(boolean_t);
-int set_dumper(struct dumperinfo *di, const char *devname, struct thread *td,
-    uint8_t compression, uint8_t encryption, const uint8_t *key,
-    uint32_t encryptedkeysize, const uint8_t *encryptedkey);
-int clear_dumper(struct thread *td);
+struct diocskerneldump_arg;
+int dumper_insert(const struct dumperinfo *di_template, const char *devname,
+    const struct diocskerneldump_arg *kda);
+int dumper_remove(const char *devname, const struct diocskerneldump_arg *kda);
+
+/* For ddb(4)-time use only. */
+void dumper_ddb_insert(struct dumperinfo *);
+void dumper_ddb_remove(struct dumperinfo *);
 
 int dump_start(struct dumperinfo *di, struct kerneldumpheader *kdh);
 int dump_append(struct dumperinfo *, void *, vm_offset_t, size_t);
 int dump_write(struct dumperinfo *, void *, vm_offset_t, off_t, size_t);
 int dump_finish(struct dumperinfo *di, struct kerneldumpheader *kdh);
 void dump_init_header(const struct dumperinfo *di, struct kerneldumpheader *kdh,
-    char *magic, uint32_t archver, uint64_t dumplen);
+    const char *magic, uint32_t archver, uint64_t dumplen);
 
 #endif /* _KERNEL */
 

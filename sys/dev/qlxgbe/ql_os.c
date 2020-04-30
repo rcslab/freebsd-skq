@@ -176,10 +176,9 @@ qla_add_sysctls(qla_host_t *ha)
                 ha->fw_ver_str, 0, "firmware version");
 
         SYSCTL_ADD_PROC(device_get_sysctl_ctx(dev),
-                SYSCTL_CHILDREN(device_get_sysctl_tree(dev)),
-                OID_AUTO, "link_status", CTLTYPE_INT | CTLFLAG_RW,
-                (void *)ha, 0,
-                qla_sysctl_get_link_status, "I", "Link Status");
+            SYSCTL_CHILDREN(device_get_sysctl_tree(dev)), OID_AUTO,
+	    "link_status", CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_NEEDGIANT, 
+	    (void *)ha, 0, qla_sysctl_get_link_status, "I", "Link Status");
 
 	ha->dbg_level = 0;
         SYSCTL_ADD_UINT(device_get_sysctl_ctx(dev),
@@ -977,32 +976,28 @@ qla_init(void *arg)
 	QL_DPRINT2(ha, (ha->pci_dev, "%s: exit\n", __func__));
 }
 
+static u_int
+qla_copy_maddr(void *arg, struct sockaddr_dl *sdl, u_int mcnt)
+{
+	uint8_t *mta = arg;
+
+	if (mcnt == Q8_MAX_NUM_MULTICAST_ADDRS)
+		return (0);
+
+	bcopy(LLADDR(sdl), &mta[mcnt * Q8_MAC_ADDR_LEN], Q8_MAC_ADDR_LEN);
+
+	return (1);
+}
+
 static int
 qla_set_multi(qla_host_t *ha, uint32_t add_multi)
 {
 	uint8_t mta[Q8_MAX_NUM_MULTICAST_ADDRS * Q8_MAC_ADDR_LEN];
-	struct ifmultiaddr *ifma;
 	int mcnt = 0;
 	struct ifnet *ifp = ha->ifp;
 	int ret = 0;
 
-	if_maddr_rlock(ifp);
-
-	CK_STAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
-
-		if (ifma->ifma_addr->sa_family != AF_LINK)
-			continue;
-
-		if (mcnt == Q8_MAX_NUM_MULTICAST_ADDRS)
-			break;
-
-		bcopy(LLADDR((struct sockaddr_dl *) ifma->ifma_addr),
-			&mta[mcnt * Q8_MAC_ADDR_LEN], Q8_MAC_ADDR_LEN);
-
-		mcnt++;
-	}
-
-	if_maddr_runlock(ifp);
+	mcnt = if_foreach_llmaddr(ifp, qla_copy_maddr, mta);
 
 	if (QLA_LOCK(ha, __func__, QLA_LOCK_DEFAULT_MS_TIMEOUT,
 		QLA_LOCK_NO_SLEEP) != 0)
@@ -1547,7 +1542,7 @@ qla_create_fp_taskqueues(qla_host_t *ha)
                 bzero(tq_name, sizeof (tq_name));
                 snprintf(tq_name, sizeof (tq_name), "ql_fp_tq_%d", i);
 
-                TASK_INIT(&fp->fp_task, 0, qla_fp_taskqueue, fp);
+                NET_TASK_INIT(&fp->fp_task, 0, qla_fp_taskqueue, fp);
 
                 fp->fp_taskqueue = taskqueue_create_fast(tq_name, M_NOWAIT,
                                         taskqueue_thread_enqueue,

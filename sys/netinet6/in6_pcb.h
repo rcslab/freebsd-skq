@@ -86,7 +86,7 @@ void	in6_losing(struct inpcb *);
 int	in6_pcbbind(struct inpcb *, struct sockaddr *, struct ucred *);
 int	in6_pcbconnect(struct inpcb *, struct sockaddr *, struct ucred *);
 int	in6_pcbconnect_mbuf(struct inpcb *, struct sockaddr *,
-	    struct ucred *, struct mbuf *);
+	    struct ucred *, struct mbuf *, bool);
 void	in6_pcbdisconnect(struct inpcb *);
 struct	inpcb *
 	in6_pcblookup_local(struct inpcbinfo *,
@@ -113,7 +113,7 @@ int	in6_getpeeraddr(struct socket *so, struct sockaddr **nam);
 int	in6_getsockaddr(struct socket *so, struct sockaddr **nam);
 int	in6_mapped_sockaddr(struct socket *so, struct sockaddr **nam);
 int	in6_mapped_peeraddr(struct socket *so, struct sockaddr **nam);
-int	in6_selecthlim(struct in6pcb *, struct ifnet *);
+int	in6_selecthlim(struct inpcb *, struct ifnet *);
 int	in6_pcbsetport(struct in6_addr *, struct inpcb *, struct ucred *);
 void	init_sin6(struct sockaddr_in6 *sin6, struct mbuf *m, int);
 #endif /* _KERNEL */

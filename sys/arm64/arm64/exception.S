@@ -73,18 +73,27 @@ __FBSDID("$FreeBSD$");
 	mov	w0, #1
 	blr	x1
 1:
+
+	ldr	x0, [x18, #(PC_CURTHREAD)]
+	bl	dbg_monitor_enter
 .endif
+	msr	daifclr, #8	/* Enable the debug exception */
 .endm
 
 .macro	restore_registers el
 .if \el == 1
-	msr	daifset, #2
 	/*
-	 * Disable interrupts, x18 may change in the interrupt exception
-	 * handler.  For EL0 exceptions, do_ast already did this.
+	 * Disable interrupts and debug exceptions, x18 may change in the
+	 * interrupt exception handler.  For EL0 exceptions, do_ast already
+	 * did this.
 	 */
+	msr	daifset, #10
 .endif
 .if \el == 0
+	ldr	x0, [x18, #PC_CURTHREAD]
+	mov	x1, sp
+	bl	dbg_monitor_exit
+
 	/* Remove the SSBD (CVE-2018-3639) workaround if needed */
 	ldr	x1, [x18, #PC_SSBD]
 	cbz	x1, 1f
@@ -136,7 +145,7 @@ __FBSDID("$FreeBSD$");
 	bic	x19, x19, #PSR_I
 1:
 	/* Disable interrupts */
-	msr	daifset, #2
+	msr	daifset, #10
 
 	/* Read the current thread flags */
 	ldr	x1, [x18, #PC_CURTHREAD]	/* Load curthread */
@@ -166,7 +175,7 @@ ENTRY(handle_el1h_sync)
 	mov	x1, sp
 	bl	do_el1h_sync
 	restore_registers 1
-	eret
+	ERET
 END(handle_el1h_sync)
 
 ENTRY(handle_el1h_irq)
@@ -174,7 +183,7 @@ ENTRY(handle_el1h_irq)
 	mov	x0, sp
 	bl	intr_irq_handler
 	restore_registers 1
-	eret
+	ERET
 END(handle_el1h_irq)
 
 ENTRY(handle_el0_sync)
@@ -185,7 +194,7 @@ ENTRY(handle_el0_sync)
 	bl	do_el0_sync
 	do_ast
 	restore_registers 0
-	eret
+	ERET
 END(handle_el0_sync)
 
 ENTRY(handle_el0_irq)
@@ -194,7 +203,7 @@ ENTRY(handle_el0_irq)
 	bl	intr_irq_handler
 	do_ast
 	restore_registers 0
-	eret
+	ERET
 END(handle_el0_irq)
 
 ENTRY(handle_serror)

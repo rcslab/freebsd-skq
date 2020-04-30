@@ -114,10 +114,13 @@ setlaggrr_limit(const char *val, int d, int s, const struct afswtch *afp)
 	
 	bzero(&ro, sizeof(ro));
 	strlcpy(ro.ro_ifname, name, sizeof(ro.ro_ifname));
-	ro.ro_bkt = (int)strtol(val, NULL, 10);
+	ro.ro_opts = LAGG_OPT_RR_LIMIT;
+	ro.ro_bkt = (uint32_t)strtoul(val, NULL, 10);
+	if (ro.ro_bkt == 0)
+		errx(1, "Invalid round-robin stride: %s", val);
 
 	if (ioctl(s, SIOCSLAGGOPTS, &ro) != 0)
-		err(1, "SIOCSLAGG");
+		err(1, "SIOCSLAGGOPTS");
 }
 
 static void
@@ -130,6 +133,8 @@ setlaggsetopt(const char *val, int d, int s, const struct afswtch *afp)
 	switch (ro.ro_opts) {
 	case LAGG_OPT_USE_FLOWID:
 	case -LAGG_OPT_USE_FLOWID:
+	case LAGG_OPT_USE_NUMA:
+	case -LAGG_OPT_USE_NUMA:
 	case LAGG_OPT_LACP_STRICT:
 	case -LAGG_OPT_LACP_STRICT:
 	case LAGG_OPT_LACP_TXTEST:
@@ -303,6 +308,8 @@ static struct cmd lagg_cmds[] = {
 	DEF_CMD_ARG("lagghash",		setlagghash),
 	DEF_CMD("use_flowid",	LAGG_OPT_USE_FLOWID,	setlaggsetopt),
 	DEF_CMD("-use_flowid",	-LAGG_OPT_USE_FLOWID,	setlaggsetopt),
+	DEF_CMD("use_numa",	LAGG_OPT_USE_NUMA,	setlaggsetopt),
+	DEF_CMD("-use_numa",	-LAGG_OPT_USE_NUMA,	setlaggsetopt),
 	DEF_CMD("lacp_strict",	LAGG_OPT_LACP_STRICT,	setlaggsetopt),
 	DEF_CMD("-lacp_strict",	-LAGG_OPT_LACP_STRICT,	setlaggsetopt),
 	DEF_CMD("lacp_txtest",	LAGG_OPT_LACP_TXTEST,	setlaggsetopt),

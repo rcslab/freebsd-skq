@@ -47,12 +47,12 @@ __FBSDID("$FreeBSD$");
 #include <sys/capsicum.h>
 #include <sys/eventhandler.h>
 #include <sys/kernel.h>
+#include <sys/ktr.h>
 #include <sys/malloc.h>
 #include <sys/lock.h>
 #include <sys/mutex.h>
 #include <sys/proc.h>
 #include <sys/procdesc.h>
-#include <sys/pioctl.h>
 #include <sys/jail.h>
 #include <sys/tty.h>
 #include <sys/wait.h>
@@ -95,11 +95,6 @@ dtrace_execexit_func_t	dtrace_fasttrap_exit;
 
 SDT_PROVIDER_DECLARE(proc);
 SDT_PROBE_DEFINE1(proc, , , exit, "int");
-
-/* Hook for NFS teardown procedure. */
-void (*nlminfo_release_p)(struct proc *p);
-
-EVENTHANDLER_LIST_DECLARE(process_exit);
 
 struct proc *
 proc_realparent(struct proc *child)
@@ -168,8 +163,8 @@ reaper_clear(struct proc *p)
 		proc_id_clear(PROC_ID_REAP, p->p_reapsubtree);
 }
 
-static void
-clear_orphan(struct proc *p)
+void
+proc_clear_orphan(struct proc *p)
 {
 	struct proc *p1;
 
@@ -218,6 +213,7 @@ exit1(struct thread *td, int rval, int signo)
 	 * XXX in case we're rebooting we just let init die in order to
 	 * work around an unsolved stack overflow seen very late during
 	 * shutdown on sparc64 when the gmirror worker process exists.
+	 * XXX what to do now that sparc64 is gone... remove if?
 	 */
 	if (p == initproc && rebooting == 0) {
 		printf("init died (signal %d, exit %d)\n", signo, rval);
@@ -281,15 +277,6 @@ exit1(struct thread *td, int rval, int signo)
 	p->p_xsig = signo;
 
 	/*
-	 * Wakeup anyone in procfs' PIOCWAIT.  They should have a hold
-	 * on our vmspace, so we should block below until they have
-	 * released their reference to us.  Note that if they have
-	 * requested S_EXIT stops we will block here until they ack
-	 * via PIOCCONT.
-	 */
-	_STOPEVENT(p, S_EXIT, 0);
-
-	/*
 	 * Ignore any pending request to stop due to a stop signal.
 	 * Once P_WEXIT is set, future requests will be ignored as
 	 * well.
@@ -297,13 +284,8 @@ exit1(struct thread *td, int rval, int signo)
 	p->p_flag &= ~P_STOPPED_SIG;
 	KASSERT(!P_SHOULDSTOP(p), ("exiting process is stopped"));
 
-	/*
-	 * Note that we are exiting and do another wakeup of anyone in
-	 * PIOCWAIT in case they aren't listening for S_EXIT stops or
-	 * decided to wait again after we told them we are exiting.
-	 */
+	/* Note that we are exiting. */
 	p->p_flag |= P_WEXIT;
-	wakeup(&p->p_stype);
 
 	/*
 	 * Wait for any processes that have a hold on our vmspace to
@@ -356,7 +338,6 @@ exit1(struct thread *td, int rval, int signo)
 	 */
 	PROC_LOCK(p);
 	stopprofclock(p);
-	p->p_flag &= ~(P_TRACED | P_PPWAIT | P_PPTRACE);
 	p->p_ptevents = 0;
 
 	/*
@@ -380,12 +361,6 @@ exit1(struct thread *td, int rval, int signo)
 	 * F_SETOWN with our pid.
 	 */
 	funsetownlst(&p->p_sigiolst);
-
-	/*
-	 * If this process has an nlminfo data area (for lockd), release it
-	 */
-	if (nlminfo_release_p != NULL && p->p_nlminfo != NULL)
-		(*nlminfo_release_p)(p);
 
 	/*
 	 * Close open files and release open-file table.
@@ -449,16 +424,16 @@ exit1(struct thread *td, int rval, int signo)
 	WITNESS_WARN(WARN_PANIC, NULL, "process (pid %d) exiting", p->p_pid);
 
 	/*
-	 * Move proc from allproc queue to zombproc.
+	 * Remove from allproc. It still sits in the hash.
 	 */
 	sx_xlock(&allproc_lock);
-	sx_xlock(&zombproc_lock);
 	LIST_REMOVE(p, p_list);
-	LIST_INSERT_HEAD(&zombproc, p, p_list);
-	sx_xunlock(&zombproc_lock);
 	sx_xunlock(&allproc_lock);
 
 	sx_xlock(&proctree_lock);
+	PROC_LOCK(p);
+	p->p_flag &= ~(P_TRACED | P_PPWAIT | P_PPTRACE);
+	PROC_UNLOCK(p);
 
 	/*
 	 * Reparent all children processes:
@@ -474,7 +449,7 @@ exit1(struct thread *td, int rval, int signo)
 		PROC_LOCK(q);
 		q->p_sigparent = SIGCHLD;
 
-		if (!(q->p_flag & P_TRACED)) {
+		if ((q->p_flag & P_TRACED) == 0) {
 			proc_reparent(q, q->p_reaper, true);
 			if (q->p_state == PRS_ZOMBIE) {
 				/*
@@ -523,7 +498,7 @@ exit1(struct thread *td, int rval, int signo)
 			 * list due to present P_TRACED flag. Clear
 			 * orphan link for q now while q is locked.
 			 */
-			clear_orphan(q);
+			proc_clear_orphan(q);
 			q->p_flag &= ~(P_TRACED | P_STOPPED_TRACE);
 			q->p_flag2 &= ~P2_PTRACE_FSTP;
 			q->p_ptevents = 0;
@@ -543,6 +518,11 @@ exit1(struct thread *td, int rval, int signo)
 	 */
 	while ((q = LIST_FIRST(&p->p_orphans)) != NULL) {
 		PROC_LOCK(q);
+		KASSERT(q->p_oppid == p->p_pid,
+		    ("orphan %p of %p has unexpected oppid %d", q, p,
+		    q->p_oppid));
+		q->p_oppid = q->p_reaper->p_pid;
+
 		/*
 		 * If we are the real parent of this process
 		 * but it has been reparented to a debugger, then
@@ -552,7 +532,7 @@ exit1(struct thread *td, int rval, int signo)
 			kern_psignal(q, q->p_pdeathsig);
 		CTR2(KTR_PTRACE, "exit: pid %d, clearing orphan %d", p->p_pid,
 		    q->p_pid);
-		clear_orphan(q);
+		proc_clear_orphan(q);
 		PROC_UNLOCK(q);
 	}
 
@@ -683,7 +663,6 @@ exit1(struct thread *td, int rval, int signo)
 	thread_exit();
 }
 
-
 #ifndef _SYS_SYSPROTO_H_
 struct abort2_args {
 	char *why;
@@ -759,7 +738,6 @@ out:
 	exit1(td, 0, sig);
 	return (0);
 }
-
 
 #ifdef COMPAT_43
 /*
@@ -897,23 +875,21 @@ proc_reap(struct thread *td, struct proc *p, int *status, int options)
 	 * Remove other references to this process to ensure we have an
 	 * exclusive reference.
 	 */
-	sx_xlock(&zombproc_lock);
-	LIST_REMOVE(p, p_list);	/* off zombproc */
-	sx_xunlock(&zombproc_lock);
 	sx_xlock(PIDHASHLOCK(p->p_pid));
 	LIST_REMOVE(p, p_hash);
 	sx_xunlock(PIDHASHLOCK(p->p_pid));
 	LIST_REMOVE(p, p_sibling);
 	reaper_abandon_children(p, true);
 	reaper_clear(p);
-	proc_id_clear(PROC_ID_PID, p->p_pid);
 	PROC_LOCK(p);
-	clear_orphan(p);
+	proc_clear_orphan(p);
 	PROC_UNLOCK(p);
 	leavepgrp(p);
 	if (p->p_procdesc != NULL)
 		procdesc_reap(p);
 	sx_xunlock(&proctree_lock);
+
+	proc_id_clear(PROC_ID_PID, p->p_pid);
 
 	PROC_LOCK(p);
 	knlist_detach(p->p_klist);
@@ -992,11 +968,14 @@ proc_to_reap(struct thread *td, struct proc *p, idtype_t idtype, id_t id,
 
 	switch (idtype) {
 	case P_ALL:
-		if (p->p_procdesc != NULL) {
-			PROC_UNLOCK(p);
-			return (0);
+		if (p->p_procdesc == NULL ||
+		   (p->p_pptr == td->td_proc &&
+		   (p->p_flag & P_TRACED) != 0)) {
+			break;
 		}
-		break;
+
+		PROC_UNLOCK(p);
+		return (0);
 	case P_PID:
 		if (p->p_pid != (pid_t)id) {
 			PROC_UNLOCK(p);
@@ -1349,6 +1328,24 @@ loop_locked:
 	goto loop;
 }
 
+void
+proc_add_orphan(struct proc *child, struct proc *parent)
+{
+
+	sx_assert(&proctree_lock, SX_XLOCKED);
+	KASSERT((child->p_flag & P_TRACED) != 0,
+	    ("proc_add_orphan: not traced"));
+
+	if (LIST_EMPTY(&parent->p_orphans)) {
+		child->p_treeflag |= P_TREE_FIRST_ORPHAN;
+		LIST_INSERT_HEAD(&parent->p_orphans, child, p_orphan);
+	} else {
+		LIST_INSERT_AFTER(LIST_FIRST(&parent->p_orphans),
+		    child, p_orphan);
+	}
+	child->p_treeflag |= P_TREE_ORPHANED;
+}
+
 /*
  * Make process 'parent' the new parent of process 'child'.
  * Must be called with an exclusive hold of proctree lock.
@@ -1368,17 +1365,9 @@ proc_reparent(struct proc *child, struct proc *parent, bool set_oppid)
 	LIST_REMOVE(child, p_sibling);
 	LIST_INSERT_HEAD(&parent->p_children, child, p_sibling);
 
-	clear_orphan(child);
-	if (child->p_flag & P_TRACED) {
-		if (LIST_EMPTY(&child->p_pptr->p_orphans)) {
-			child->p_treeflag |= P_TREE_FIRST_ORPHAN;
-			LIST_INSERT_HEAD(&child->p_pptr->p_orphans, child,
-			    p_orphan);
-		} else {
-			LIST_INSERT_AFTER(LIST_FIRST(&child->p_pptr->p_orphans),
-			    child, p_orphan);
-		}
-		child->p_treeflag |= P_TREE_ORPHANED;
+	proc_clear_orphan(child);
+	if ((child->p_flag & P_TRACED) != 0) {
+		proc_add_orphan(child, child->p_pptr);
 	}
 
 	child->p_pptr = parent;

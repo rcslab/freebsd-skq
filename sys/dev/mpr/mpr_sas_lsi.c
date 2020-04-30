@@ -998,11 +998,7 @@ mprsas_add_device(struct mpr_softc *sc, u16 handle, u8 linkrate)
 		    "and connector name (%4s)\n", targ->encl_level,
 		    targ->connector_name);
 	}
-#if ((__FreeBSD_version >= 1000000) && (__FreeBSD_version < 1000039)) || \
-    (__FreeBSD_version < 902502)
-	if ((sassc->flags & MPRSAS_IN_STARTUP) == 0)
-#endif
-		mprsas_rescan_target(sc, targ);
+	mprsas_rescan_target(sc, targ);
 	mpr_dprint(sc, MPR_MAPPING, "Target id 0x%x added\n", targ->tid);
 
 	/*
@@ -1017,7 +1013,7 @@ mprsas_add_device(struct mpr_softc *sc, u16 handle, u8 linkrate)
 		cm = &sc->commands[i];
 		if (cm->cm_flags & MPR_CM_FLAGS_SATA_ID_TIMEOUT) {
 			targ->timeouts++;
-			cm->cm_state = MPR_CM_STATE_TIMEDOUT;
+			cm->cm_flags |= MPR_CM_FLAGS_TIMEDOUT;
 
 			if ((targ->tm = mprsas_alloc_tm(sc)) != NULL) {
 				mpr_dprint(sc, MPR_INFO, "%s: sending Target "
@@ -1206,7 +1202,7 @@ mprsas_get_sata_identify(struct mpr_softc *sc, u16 handle,
 		 * reset
 		 */
 		mpr_dprint(sc, MPR_INFO|MPR_FAULT|MPR_MAPPING,
-		    "Request for SATA PASSTHROUGH page completed with error %d",
+		    "Request for SATA PASSTHROUGH page completed with error %d\n",
 		    error);
 		error = ENXIO;
 		goto out;
@@ -1244,9 +1240,11 @@ mprsas_ata_id_timeout(struct mpr_softc *sc, struct mpr_command *cm)
 	/*
 	 * The Abort Task cannot be sent from here because the driver has not
 	 * completed setting up targets.  Instead, the command is flagged so
-	 * that special handling will be used to send the abort.
+	 * that special handling will be used to send the abort. Now that
+	 * this command has timed out, it's no longer in the queue.
 	 */
 	cm->cm_flags |= MPR_CM_FLAGS_SATA_ID_TIMEOUT;
+	cm->cm_state = MPR_CM_STATE_BUSY;
 }
 
 static int
@@ -1377,11 +1375,7 @@ mprsas_add_pcie_device(struct mpr_softc *sc, u16 handle, u8 linkrate)
 		    "and connector name (%4s)\n", targ->encl_level,
 		    targ->connector_name);
 	}
-#if ((__FreeBSD_version >= 1000000) && (__FreeBSD_version < 1000039)) || \
-    (__FreeBSD_version < 902502)
-	if ((sassc->flags & MPRSAS_IN_STARTUP) == 0)
-#endif
-		mprsas_rescan_target(sc, targ);
+	mprsas_rescan_target(sc, targ);
 	mpr_dprint(sc, MPR_MAPPING, "Target id 0x%x added\n", targ->tid);
 
 out:
@@ -1431,11 +1425,7 @@ mprsas_volume_add(struct mpr_softc *sc, u16 handle)
 		free(lun, M_MPR);
 	}
 	SLIST_INIT(&targ->luns);
-#if ((__FreeBSD_version >= 1000000) && (__FreeBSD_version < 1000039)) || \
-    (__FreeBSD_version < 902502)
-	if ((sassc->flags & MPRSAS_IN_STARTUP) == 0)
-#endif
-		mprsas_rescan_target(sc, targ);
+	mprsas_rescan_target(sc, targ);
 	mpr_dprint(sc, MPR_MAPPING, "RAID target id %d added (WWID = 0x%jx)\n",
 	    targ->tid, wwid);
 out:

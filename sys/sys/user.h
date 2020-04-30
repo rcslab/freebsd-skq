@@ -128,7 +128,7 @@ struct kinfo_proc {
 	struct	vnode *ki_textvp;	/* pointer to executable file */
 	struct	filedesc *ki_fd;	/* pointer to open file info */
 	struct	vmspace *ki_vmspace;	/* pointer to kernel vmspace struct */
-	void	*ki_wchan;		/* sleep address */
+	const void *ki_wchan;		/* sleep address */
 	pid_t	ki_pid;			/* Process identifier */
 	pid_t	ki_ppid;		/* parent process id */
 	pid_t	ki_pgid;		/* process group id */
@@ -471,6 +471,7 @@ struct kinfo_file {
 #define	KVME_FLAG_SUPER		0x00000008
 #define	KVME_FLAG_GROWS_UP	0x00000010
 #define	KVME_FLAG_GROWS_DOWN	0x00000020
+#define	KVME_FLAG_USER_WIRED	0x00000040
 
 #if defined(__amd64__)
 #define	KINFO_OVMENTRY_SIZE	1168
@@ -607,6 +608,7 @@ int	kern_proc_vmmap_out(struct proc *p, struct sbuf *sb, ssize_t maxlen,
 	int flags);
 
 int	vntype_to_kinfo(int vtype);
+void	pack_kinfo(struct kinfo_file *kif);
 #endif /* !_KERNEL */
 
 #endif

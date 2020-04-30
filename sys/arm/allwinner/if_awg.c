@@ -1,6 +1,5 @@
 /*-
  * Copyright (c) 2016 Jared McNeill <jmcneill@invisible.ca>
- * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -675,12 +674,25 @@ bitrev32(uint32_t x)
 	return (x >> 16) | (x << 16);
 }
 
+static u_int
+awg_hash_maddr(void *arg, struct sockaddr_dl *sdl, u_int cnt)
+{
+	uint32_t crc, hashreg, hashbit, *hash = arg;
+
+	crc = ether_crc32_le(LLADDR(sdl), ETHER_ADDR_LEN) & 0x7f;
+	crc = bitrev32(~crc) >> 26;
+	hashreg = (crc >> 5);
+	hashbit = (crc & 0x1f);
+	hash[hashreg] |= (1 << hashbit);
+
+	return (1);
+}
+
 static void
 awg_setup_rxfilter(struct awg_softc *sc)
 {
-	uint32_t val, crc, hashreg, hashbit, hash[2], machi, maclo;
-	int mc_count, mcnt, i;
-	uint8_t *eaddr, *mta;
+	uint32_t val, hash[2], machi, maclo;
+	uint8_t *eaddr;
 	if_t ifp;
 
 	AWG_ASSERT_LOCKED(sc);
@@ -689,36 +701,13 @@ awg_setup_rxfilter(struct awg_softc *sc)
 	val = 0;
 	hash[0] = hash[1] = 0;
 
-	mc_count = if_multiaddr_count(ifp, -1);
-
 	if (if_getflags(ifp) & IFF_PROMISC)
 		val |= DIS_ADDR_FILTER;
 	else if (if_getflags(ifp) & IFF_ALLMULTI) {
 		val |= RX_ALL_MULTICAST;
 		hash[0] = hash[1] = ~0;
-	} else if (mc_count > 0) {
+	} else if (if_foreach_llmaddr(ifp, awg_hash_maddr, hash) > 0)
 		val |= HASH_MULTICAST;
-
-		mta = malloc(sizeof(unsigned char) * ETHER_ADDR_LEN * mc_count,
-		    M_DEVBUF, M_NOWAIT);
-		if (mta == NULL) {
-			if_printf(ifp,
-			    "failed to allocate temporary multicast list\n");
-			return;
-		}
-
-		if_multiaddr_array(ifp, mta, &mcnt, mc_count);
-		for (i = 0; i < mcnt; i++) {
-			crc = ether_crc32_le(mta + (i * ETHER_ADDR_LEN),
-			    ETHER_ADDR_LEN) & 0x7f;
-			crc = bitrev32(~crc) >> 26;
-			hashreg = (crc >> 5);
-			hashbit = (crc & 0x1f);
-			hash[hashreg] |= (1 << hashbit);
-		}
-
-		free(mta, M_DEVBUF);
-	}
 
 	/* Write our unicast address */
 	eaddr = IF_LLADDR(ifp);
@@ -1967,6 +1956,7 @@ static devclass_t awg_devclass;
 
 DRIVER_MODULE(awg, simplebus, awg_driver, awg_devclass, 0, 0);
 DRIVER_MODULE(miibus, awg, miibus_driver, miibus_devclass, 0, 0);
-
 MODULE_DEPEND(awg, ether, 1, 1, 1);
 MODULE_DEPEND(awg, miibus, 1, 1, 1);
+MODULE_DEPEND(awg, aw_sid, 1, 1, 1);
+SIMPLEBUS_PNP_INFO(compat_data);

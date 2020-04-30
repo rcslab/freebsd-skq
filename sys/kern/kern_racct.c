@@ -79,7 +79,8 @@ bool __read_frequently racct_enable = false;
 bool __read_frequently racct_enable = true;
 #endif
 
-SYSCTL_NODE(_kern, OID_AUTO, racct, CTLFLAG_RW, 0, "Resource Accounting");
+SYSCTL_NODE(_kern, OID_AUTO, racct, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "Resource Accounting");
 SYSCTL_BOOL(_kern_racct, OID_AUTO, enable, CTLFLAG_RDTUN, &racct_enable,
     0, "Enable RACCT/RCTL");
 SYSCTL_UINT(_kern_racct, OID_AUTO, pcpu_threshold, CTLFLAG_RW, &pcpu_threshold,
@@ -1256,17 +1257,11 @@ racctd(void)
 
 		sx_slock(&allproc_lock);
 
-		sx_slock(&zombproc_lock);
-		LIST_FOREACH(p, &zombproc, p_list) {
-			PROC_LOCK(p);
-			racct_set(p, RACCT_PCTCPU, 0);
-			PROC_UNLOCK(p);
-		}
-		sx_sunlock(&zombproc_lock);
-
 		FOREACH_PROC_IN_SYSTEM(p) {
 			PROC_LOCK(p);
 			if (p->p_state != PRS_NORMAL) {
+				if (p->p_state == PRS_ZOMBIE)
+					racct_set(p, RACCT_PCTCPU, 0);
 				PROC_UNLOCK(p);
 				continue;
 			}

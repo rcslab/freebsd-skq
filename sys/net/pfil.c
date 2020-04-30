@@ -69,10 +69,6 @@ MTX_SYSINIT(pfil_mtxinit, &pfil_lock, "pfil(9) lock", MTX_DEF);
 #define	PFIL_UNLOCK()	mtx_unlock(&pfil_lock)
 #define	PFIL_LOCK_ASSERT()	mtx_assert(&pfil_lock, MA_OWNED)
 
-#define	PFIL_EPOCH		net_epoch_preempt
-#define	PFIL_EPOCH_ENTER(et)	epoch_enter_preempt(net_epoch_preempt, &(et))
-#define	PFIL_EPOCH_EXIT(et)	epoch_exit_preempt(net_epoch_preempt, &(et))
-
 struct pfil_hook {
 	pfil_func_t	 hook_func;
 	void		*hook_ruleset;
@@ -118,15 +114,31 @@ VNET_DEFINE_STATIC(struct pfilhookhead, pfil_hook_list) =
 static struct pfil_link *pfil_link_remove(pfil_chain_t *, pfil_hook_t );
 static void pfil_link_free(epoch_context_t);
 
+int
+pfil_realloc(pfil_packet_t *p, int flags, struct ifnet *ifp)
+{
+	struct mbuf *m;
+
+	MPASS(flags & PFIL_MEMPTR);
+
+	if ((m = m_devget(p->mem, PFIL_LENGTH(flags), 0, ifp, NULL)) == NULL)
+		return (ENOMEM);
+	*p = pfil_packet_align(*p);
+	*p->m = m;
+
+	return (0);
+}
+
 static __noinline int
-pfil_fake_mbuf(pfil_func_t func, void *mem, struct ifnet *ifp, int flags,
+pfil_fake_mbuf(pfil_func_t func, pfil_packet_t *p, struct ifnet *ifp, int flags,
     void *ruleset, struct inpcb *inp)
 {
 	struct mbuf m, *mp;
 	pfil_return_t rv;
 
 	(void)m_init(&m, M_NOWAIT, MT_DATA, M_NOFREE | M_PKTHDR);
-	m_extadd(&m, mem, PFIL_LENGTH(flags), NULL, NULL, NULL, 0, EXT_RXRING);
+	m_extadd(&m, p->mem, PFIL_LENGTH(flags), NULL, NULL, NULL, 0,
+	    EXT_RXRING);
 	m.m_len = m.m_pkthdr.len = PFIL_LENGTH(flags);
 	mp = &m;
 	flags &= ~(PFIL_MEMPTR | PFIL_LENMASK);
@@ -135,10 +147,11 @@ pfil_fake_mbuf(pfil_func_t func, void *mem, struct ifnet *ifp, int flags,
 	if (rv == PFIL_PASS && mp != &m) {
 		/*
 		 * Firewalls that need pfil_fake_mbuf() most likely don't
-		 * know to return PFIL_REALLOCED.
+		 * know they need return PFIL_REALLOCED.
 		 */
 		rv = PFIL_REALLOCED;
-		*(struct mbuf **)mem = mp;
+		*p = pfil_packet_align(*p);
+		*p->m = mp;
 	}
 
 	return (rv);
@@ -151,10 +164,12 @@ int
 pfil_run_hooks(struct pfil_head *head, pfil_packet_t p, struct ifnet *ifp,
     int flags, struct inpcb *inp)
 {
-	struct epoch_tracker et;
 	pfil_chain_t *pch;
 	struct pfil_link *link;
-	pfil_return_t rv, rvi;
+	pfil_return_t rv;
+	bool realloc = false;
+
+	NET_EPOCH_ASSERT();
 
 	if (PFIL_DIR(flags) == PFIL_IN)
 		pch = &head->head_in;
@@ -164,24 +179,23 @@ pfil_run_hooks(struct pfil_head *head, pfil_packet_t p, struct ifnet *ifp,
 		panic("%s: bogus flags %d", __func__, flags);
 
 	rv = PFIL_PASS;
-	PFIL_EPOCH_ENTER(et);
 	CK_STAILQ_FOREACH(link, pch, link_chain) {
 		if ((flags & PFIL_MEMPTR) && !(link->link_flags & PFIL_MEMPTR))
-			rvi = pfil_fake_mbuf(link->link_func, p.mem, ifp,
-			    flags, link->link_ruleset, inp);
-		else
-			rvi = (*link->link_func)(p, ifp, flags,
+			rv = pfil_fake_mbuf(link->link_func, &p, ifp, flags,
 			    link->link_ruleset, inp);
-		if (rvi == PFIL_DROPPED || rvi == PFIL_CONSUMED) {
-			rv = rvi;
+		else
+			rv = (*link->link_func)(p, ifp, flags,
+			    link->link_ruleset, inp);
+		if (rv == PFIL_DROPPED || rv == PFIL_CONSUMED)
 			break;
-		} else if (rv == PFIL_REALLOCED) {
+		else if (rv == PFIL_REALLOCED) {
 			flags &= ~(PFIL_MEMPTR | PFIL_LENMASK);
-			rv = rvi;
+			realloc = true;
 		}
 	}
-	PFIL_EPOCH_EXIT(et);
-	return (rvi);
+	if (realloc && rv == PFIL_PASS)
+		rv = PFIL_REALLOCED;
+	return (rv);
 }
 
 /*
@@ -294,9 +308,9 @@ pfil_unlink(struct pfil_link_args *pa, pfil_head_t head, pfil_hook_t hook)
 	PFIL_UNLOCK();
 
 	if (in != NULL)
-		epoch_call(PFIL_EPOCH, &in->link_epoch_ctx, pfil_link_free);
+		NET_EPOCH_CALL(pfil_link_free, &in->link_epoch_ctx);
 	if (out != NULL)
-		epoch_call(PFIL_EPOCH, &out->link_epoch_ctx, pfil_link_free);
+		NET_EPOCH_CALL(pfil_link_free, &out->link_epoch_ctx);
 
 	if (in == NULL && out == NULL)
 		return (ENOENT);
@@ -424,15 +438,13 @@ retry:
 		if (in != NULL) {
 			head->head_nhooksin--;
 			hook->hook_links--;
-			epoch_call(PFIL_EPOCH, &in->link_epoch_ctx,
-			    pfil_link_free);
+			NET_EPOCH_CALL(pfil_link_free, &in->link_epoch_ctx);
 		}
 		out = pfil_link_remove(&head->head_out, hook);
 		if (out != NULL) {
 			head->head_nhooksout--;
 			hook->hook_links--;
-			epoch_call(PFIL_EPOCH, &out->link_epoch_ctx,
-			    pfil_link_free);
+			NET_EPOCH_CALL(pfil_link_free, &out->link_epoch_ctx);
 		}
 		if (in != NULL || out != NULL)
 			/* What if some stupid admin put same filter twice? */

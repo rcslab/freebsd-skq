@@ -1,7 +1,12 @@
 /*-
+ * Copyright (c) 2018-2019 The FreeBSD Foundation
  * Copyright (c) 2003 Peter Wemm.
  * Copyright (c) 1993 The Regents of the University of California.
  * All rights reserved.
+ *
+ * Portions of this software were developed by
+ * Konstantin Belousov <kib@FreeBSD.org> under sponsorship from
+ * the FreeBSD Foundation.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -43,7 +48,7 @@
 /* Address: %rdi */
 ENTRY(pagezero_std)
 	PUSH_FRAME_POINTER
-	movq	$PAGE_SIZE/8,%rcx
+	movl	$PAGE_SIZE/8,%ecx
 	xorl	%eax,%eax
 	rep
 	stosq
@@ -53,7 +58,7 @@ END(pagezero_std)
 
 ENTRY(pagezero_erms)
 	PUSH_FRAME_POINTER
-	movq	$PAGE_SIZE,%rcx
+	movl	$PAGE_SIZE,%ecx
 	xorl	%eax,%eax
 	rep
 	stosb
@@ -66,7 +71,7 @@ END(pagezero_erms)
  */
 ENTRY(pagecopy)
 	PUSH_FRAME_POINTER
-	movq	$PAGE_SIZE/8,%rcx
+	movl	$PAGE_SIZE/8,%ecx
 	movq	%rdi,%r9
 	movq	%rsi,%rdi
 	movq	%r9,%rsi
@@ -102,96 +107,185 @@ END(sse2_pagezero)
 
 /*
  * memcmpy(b1, b2, len)
- *	   rdi,rsi,len
+ *	   rdi,rsi,rdx
  */
 ENTRY(memcmp)
 	PUSH_FRAME_POINTER
-	cmpq	$16,%rdx
-	jae	5f
-1:
-	testq	%rdx,%rdx
-	je	3f
-	xorl	%ecx,%ecx
-2:
-	movzbl	(%rdi,%rcx,1),%eax
-	movzbl	(%rsi,%rcx,1),%r8d
-	cmpb	%r8b,%al
-	jne	4f
-	addq    $1,%rcx
-	cmpq    %rcx,%rdx
-	jz	3f
-	movzbl	(%rdi,%rcx,1),%eax
-	movzbl	(%rsi,%rcx,1),%r8d
-	cmpb	%r8b,%al
-	jne	4f
-	addq	$1,%rcx
-	cmpq	%rcx,%rdx
-	jz	3f
-	movzbl	(%rdi,%rcx,1),%eax
-	movzbl	(%rsi,%rcx,1),%r8d
-	cmpb	%r8b,%al
-	jne	4f
-	addq	$1,%rcx
-	cmpq	%rcx,%rdx
-	jz	3f
-	movzbl	(%rdi,%rcx,1),%eax
-	movzbl	(%rsi,%rcx,1),%r8d
-	cmpb	%r8b,%al
-	jne	4f
-	addq	$1,%rcx
-	cmpq	%rcx,%rdx
-	jne	2b
-3:
+
 	xorl	%eax,%eax
+10:
+	cmpq	$16,%rdx
+	ja	101632f
+
+100816:
+	cmpb	$8,%dl
+	jl	100408f
+	movq	(%rdi),%r8
+	movq	(%rsi),%r9
+	cmpq	%r8,%r9
+	jne	80f
+	movq	-8(%rdi,%rdx),%r8
+	movq	-8(%rsi,%rdx),%r9
+	cmpq	%r8,%r9
+	jne	10081608f
 	POP_FRAME_POINTER
 	ret
-4:
+100408:
+	cmpb	$4,%dl
+	jl	100204f
+	movl	(%rdi),%r8d
+	movl	(%rsi),%r9d
+	cmpl	%r8d,%r9d
+	jne	80f
+	movl	-4(%rdi,%rdx),%r8d
+	movl	-4(%rsi,%rdx),%r9d
+	cmpl	%r8d,%r9d
+	jne	10040804f
+	POP_FRAME_POINTER
+	ret
+100204:
+	cmpb	$2,%dl
+	jl	100001f
+	movzwl	(%rdi),%r8d
+	movzwl	(%rsi),%r9d
+	cmpl	%r8d,%r9d
+	jne	1f
+	movzwl	-2(%rdi,%rdx),%r8d
+	movzwl	-2(%rsi,%rdx),%r9d
+	cmpl	%r8d,%r9d
+	jne	1f
+	POP_FRAME_POINTER
+	ret
+100001:
+	cmpb	$1,%dl
+	jl	100000f
+	movzbl	(%rdi),%eax
+	movzbl	(%rsi),%r8d
+	subl	%r8d,%eax
+100000:
+	POP_FRAME_POINTER
+	ret
+ALIGN_TEXT
+101632:
+	cmpq	$32,%rdx
+	ja	103200f
+	movq	(%rdi),%r8
+	movq	(%rsi),%r9
+	cmpq	%r8,%r9
+	jne	80f
+	movq	8(%rdi),%r8
+	movq	8(%rsi),%r9
+	cmpq	%r8,%r9
+	jne	10163208f
+	movq	-16(%rdi,%rdx),%r8
+	movq	-16(%rsi,%rdx),%r9
+	cmpq	%r8,%r9
+	jne	10163216f
+	movq	-8(%rdi,%rdx),%r8
+	movq	-8(%rsi,%rdx),%r9
+	cmpq	%r8,%r9
+	jne	10163224f
+	POP_FRAME_POINTER
+	ret
+ALIGN_TEXT
+103200:
+	movq	(%rdi),%r8
+	movq	8(%rdi),%r9
+	subq	(%rsi),%r8
+	subq	8(%rsi),%r9
+	orq	%r8,%r9
+	jnz	10320000f
+
+	movq    16(%rdi),%r8
+	movq    24(%rdi),%r9
+	subq    16(%rsi),%r8
+	subq    24(%rsi),%r9
+	orq	%r8,%r9
+	jnz     10320016f
+
+	leaq	32(%rdi),%rdi
+	leaq	32(%rsi),%rsi
+	subq	$32,%rdx
+	cmpq	$32,%rdx
+	jae	103200b
+	cmpb	$0,%dl
+	jne	10b
+	POP_FRAME_POINTER
+	ret
+
+/*
+ * Mismatch was found.
+ *
+ * Before we compute it we narrow down the range (16 -> 8 -> 4 bytes).
+ */
+ALIGN_TEXT
+10320016:
+	leaq	16(%rdi),%rdi
+	leaq	16(%rsi),%rsi
+10320000:
+	movq	(%rdi),%r8
+	movq	(%rsi),%r9
+	cmpq	%r8,%r9
+	jne	80f
+	leaq	8(%rdi),%rdi
+	leaq	8(%rsi),%rsi
+	jmp	80f
+ALIGN_TEXT
+10081608:
+10163224:
+	leaq	-8(%rdi,%rdx),%rdi
+	leaq	-8(%rsi,%rdx),%rsi
+	jmp	80f
+ALIGN_TEXT
+10163216:
+	leaq	-16(%rdi,%rdx),%rdi
+	leaq	-16(%rsi,%rdx),%rsi
+	jmp	80f
+ALIGN_TEXT
+10163208:
+	leaq	8(%rdi),%rdi
+	leaq	8(%rsi),%rsi
+	jmp	80f
+ALIGN_TEXT
+10040804:
+	leaq	-4(%rdi,%rdx),%rdi
+	leaq	-4(%rsi,%rdx),%rsi
+	jmp	1f
+
+ALIGN_TEXT
+80:
+	movl	(%rdi),%r8d
+	movl	(%rsi),%r9d
+	cmpl	%r8d,%r9d
+	jne	1f
+	leaq	4(%rdi),%rdi
+	leaq	4(%rsi),%rsi
+
+/*
+ * We have up to 4 bytes to inspect.
+ */
+1:
+	movzbl	(%rdi),%eax
+	movzbl	(%rsi),%r8d
+	cmpb	%r8b,%al
+	jne	2f
+
+	movzbl	1(%rdi),%eax
+	movzbl	1(%rsi),%r8d
+	cmpb	%r8b,%al
+	jne	2f
+
+	movzbl	2(%rdi),%eax
+	movzbl	2(%rsi),%r8d
+	cmpb	%r8b,%al
+	jne	2f
+
+	movzbl	3(%rdi),%eax
+	movzbl	3(%rsi),%r8d
+2:
 	subl	%r8d,%eax
 	POP_FRAME_POINTER
 	ret
-5:
-	cmpq	$32,%rdx
-	jae	7f
-6:
-	/*
-	 * 8 bytes
-	 */
-	movq    (%rdi),%r8
-	movq    (%rsi),%r9
-	cmpq    %r8,%r9
-	jne	1b
-	leaq	8(%rdi),%rdi
-	leaq	8(%rsi),%rsi
-	subq	$8,%rdx
-	cmpq	$8,%rdx
-	jae	6b
-	jl	1b
-	jmp	3b
-7:
-	/*
-	 * 32 bytes
-	 */
-	movq    (%rsi),%r8
-	movq    8(%rsi),%r9
-	subq    (%rdi),%r8
-	subq    8(%rdi),%r9
-	or	%r8,%r9
-	jnz	1b
-
-	movq    16(%rsi),%r8
-	movq    24(%rsi),%r9
-	subq    16(%rdi),%r8
-	subq    24(%rdi),%r9
-	or	%r8,%r9
-	jnz	1b
-
-	leaq    32(%rdi),%rdi
-	leaq    32(%rsi),%rsi
-	subq    $32,%rdx
-	cmpq    $32,%rdx
-	jae	7b
-	jnz	1b
-	jmp	3b
 END(memcmp)
 
 /*
@@ -205,7 +299,7 @@ END(memcmp)
  * rsi - source
  * rdx - count
  *
- * The macro possibly clobbers the above and: rcx, r8, r9, 10
+ * The macro possibly clobbers the above and: rcx, r8, r9, r10
  * It does not clobber rax nor r11.
  */
 .macro MEMMOVE erms overlap begin end
@@ -666,13 +760,7 @@ END(fillw)
 	movq	$copy_fault,PCB_ONFAULT(%r11)
 
 	/*
-	 * Check explicitly for non-user addresses.  If 486 write protection
-	 * is being used, this check is essential because we are in kernel
-	 * mode so the h/w does not provide any protection against writing
-	 * kernel addresses.
-	 */
-
-	/*
+	 * Check explicitly for non-user addresses.
 	 * First, prevent address wrapping.
 	 */
 	movq	%rsi,%rax
@@ -806,6 +894,7 @@ ENTRY(casueword32_nosmap)
 	lock
 #endif
 	cmpxchgl %ecx,(%rdi)			/* new = %ecx */
+	setne	%cl
 
 	/*
 	 * The old value is in %eax.  If the store succeeded it will be the
@@ -823,6 +912,7 @@ ENTRY(casueword32_nosmap)
 	 */
 	movl	%esi,(%rdx)			/* oldp = %rdx */
 	POP_FRAME_POINTER
+	movzbl	%cl, %eax
 	ret
 END(casueword32_nosmap)
 
@@ -842,6 +932,7 @@ ENTRY(casueword32_smap)
 #endif
 	cmpxchgl %ecx,(%rdi)			/* new = %ecx */
 	clac
+	setne	%cl
 
 	/*
 	 * The old value is in %eax.  If the store succeeded it will be the
@@ -859,6 +950,7 @@ ENTRY(casueword32_smap)
 	 */
 	movl	%esi,(%rdx)			/* oldp = %rdx */
 	POP_FRAME_POINTER
+	movzbl	%cl, %eax
 	ret
 END(casueword32_smap)
 
@@ -881,6 +973,7 @@ ENTRY(casueword_nosmap)
 	lock
 #endif
 	cmpxchgq %rcx,(%rdi)			/* new = %rcx */
+	setne	%cl
 
 	/*
 	 * The old value is in %rax.  If the store succeeded it will be the
@@ -892,6 +985,7 @@ ENTRY(casueword_nosmap)
 	movq	%rax,PCB_ONFAULT(%r8)
 	movq	%rsi,(%rdx)
 	POP_FRAME_POINTER
+	movzbl	%cl, %eax
 	ret
 END(casueword_nosmap)
 
@@ -911,6 +1005,7 @@ ENTRY(casueword_smap)
 #endif
 	cmpxchgq %rcx,(%rdi)			/* new = %rcx */
 	clac
+	setne	%cl
 
 	/*
 	 * The old value is in %rax.  If the store succeeded it will be the
@@ -922,6 +1017,7 @@ ENTRY(casueword_smap)
 	movq	%rax,PCB_ONFAULT(%r8)
 	movq	%rsi,(%rdx)
 	POP_FRAME_POINTER
+	movzbl	%cl, %eax
 	ret
 END(casueword_smap)
 
@@ -1083,7 +1179,6 @@ ENTRY(suword_nosmap)
 
 	movq	%rsi,(%rdi)
 	xorl	%eax,%eax
-	movq	PCPU(CURPCB),%rcx
 	movq	%rax,PCB_ONFAULT(%rcx)
 	POP_FRAME_POINTER
 	ret
@@ -1102,7 +1197,6 @@ ENTRY(suword_smap)
 	movq	%rsi,(%rdi)
 	clac
 	xorl	%eax,%eax
-	movq	PCPU(CURPCB),%rcx
 	movq	%rax,PCB_ONFAULT(%rcx)
 	POP_FRAME_POINTER
 	ret
@@ -1119,7 +1213,6 @@ ENTRY(suword32_nosmap)
 
 	movl	%esi,(%rdi)
 	xorl	%eax,%eax
-	movq	PCPU(CURPCB),%rcx
 	movq	%rax,PCB_ONFAULT(%rcx)
 	POP_FRAME_POINTER
 	ret
@@ -1138,7 +1231,6 @@ ENTRY(suword32_smap)
 	movl	%esi,(%rdi)
 	clac
 	xorl	%eax,%eax
-	movq	PCPU(CURPCB),%rcx
 	movq	%rax,PCB_ONFAULT(%rcx)
 	POP_FRAME_POINTER
 	ret
@@ -1540,7 +1632,7 @@ handle_ibrs_\l:
 
 /* all callers already saved %rax, %rdx, and %rcx */
 ENTRY(handle_ibrs_entry)
-	cmpb	$0,hw_ibrs_active(%rip)
+	cmpb	$0,hw_ibrs_ibpb_active(%rip)
 	je	1f
 	movl	$MSR_IA32_SPEC_CTRL,%ecx
 	rdmsr
@@ -1626,3 +1718,239 @@ ENTRY(flush_l1d_sw_abi)
 	popq	%rbx
 	ret
 END(flush_l1d_sw_abi)
+
+ENTRY(mds_handler_void)
+	retq
+END(mds_handler_void)
+
+ENTRY(mds_handler_verw)
+	subq	$8, %rsp
+	movw	%ds, (%rsp)
+	verw	(%rsp)
+	addq	$8, %rsp
+	retq
+END(mds_handler_verw)
+
+ENTRY(mds_handler_ivb)
+	pushq	%rax
+	pushq	%rdx
+	pushq	%rcx
+
+	movq	%cr0, %rax
+	testb	$CR0_TS, %al
+	je	1f
+	clts
+1:	movq	PCPU(MDS_BUF), %rdx
+	movdqa	%xmm0, PCPU(MDS_TMP)
+	pxor	%xmm0, %xmm0
+
+	lfence
+	orpd	(%rdx), %xmm0
+	orpd	(%rdx), %xmm0
+	mfence
+	movl	$40, %ecx
+	addq	$16, %rdx
+2:	movntdq	%xmm0, (%rdx)
+	addq	$16, %rdx
+	decl	%ecx
+	jnz	2b
+	mfence
+
+	movdqa	PCPU(MDS_TMP),%xmm0
+	testb	$CR0_TS, %al
+	je	3f
+	movq	%rax, %cr0
+3:	popq	%rcx
+	popq	%rdx
+	popq	%rax
+	retq
+END(mds_handler_ivb)
+
+ENTRY(mds_handler_bdw)
+	pushq	%rax
+	pushq	%rbx
+	pushq	%rcx
+	pushq	%rdi
+	pushq	%rsi
+
+	movq	%cr0, %rax
+	testb	$CR0_TS, %al
+	je	1f
+	clts
+1:	movq	PCPU(MDS_BUF), %rbx
+	movdqa	%xmm0, PCPU(MDS_TMP)
+	pxor	%xmm0, %xmm0
+
+	movq	%rbx, %rdi
+	movq	%rbx, %rsi
+	movl	$40, %ecx
+2:	movntdq	%xmm0, (%rbx)
+	addq	$16, %rbx
+	decl	%ecx
+	jnz	2b
+	mfence
+	movl	$1536, %ecx
+	rep; movsb
+	lfence
+
+	movdqa	PCPU(MDS_TMP),%xmm0
+	testb	$CR0_TS, %al
+	je	3f
+	movq	%rax, %cr0
+3:	popq	%rsi
+	popq	%rdi
+	popq	%rcx
+	popq	%rbx
+	popq	%rax
+	retq
+END(mds_handler_bdw)
+
+ENTRY(mds_handler_skl_sse)
+	pushq	%rax
+	pushq	%rdx
+	pushq	%rcx
+	pushq	%rdi
+
+	movq	%cr0, %rax
+	testb	$CR0_TS, %al
+	je	1f
+	clts
+1:	movq	PCPU(MDS_BUF), %rdi
+	movq	PCPU(MDS_BUF64), %rdx
+	movdqa	%xmm0, PCPU(MDS_TMP)
+	pxor	%xmm0, %xmm0
+
+	lfence
+	orpd	(%rdx), %xmm0
+	orpd	(%rdx), %xmm0
+	xorl	%eax, %eax
+2:	clflushopt	5376(%rdi, %rax, 8)
+	addl	$8, %eax
+	cmpl	$8 * 12, %eax
+	jb	2b
+	sfence
+	movl	$6144, %ecx
+	xorl	%eax, %eax
+	rep; stosb
+	mfence
+
+	movdqa	PCPU(MDS_TMP), %xmm0
+	testb	$CR0_TS, %al
+	je	3f
+	movq	%rax, %cr0
+3:	popq	%rdi
+	popq	%rcx
+	popq	%rdx
+	popq	%rax
+	retq
+END(mds_handler_skl_sse)
+
+ENTRY(mds_handler_skl_avx)
+	pushq	%rax
+	pushq	%rdx
+	pushq	%rcx
+	pushq	%rdi
+
+	movq	%cr0, %rax
+	testb	$CR0_TS, %al
+	je	1f
+	clts
+1:	movq	PCPU(MDS_BUF), %rdi
+	movq	PCPU(MDS_BUF64), %rdx
+	vmovdqa	%ymm0, PCPU(MDS_TMP)
+	vpxor	%ymm0, %ymm0, %ymm0
+
+	lfence
+	vorpd	(%rdx), %ymm0, %ymm0
+	vorpd	(%rdx), %ymm0, %ymm0
+	xorl	%eax, %eax
+2:	clflushopt	5376(%rdi, %rax, 8)
+	addl	$8, %eax
+	cmpl	$8 * 12, %eax
+	jb	2b
+	sfence
+	movl	$6144, %ecx
+	xorl	%eax, %eax
+	rep; stosb
+	mfence
+
+	vmovdqa	PCPU(MDS_TMP), %ymm0
+	testb	$CR0_TS, %al
+	je	3f
+	movq	%rax, %cr0
+3:	popq	%rdi
+	popq	%rcx
+	popq	%rdx
+	popq	%rax
+	retq
+END(mds_handler_skl_avx)
+
+ENTRY(mds_handler_skl_avx512)
+	pushq	%rax
+	pushq	%rdx
+	pushq	%rcx
+	pushq	%rdi
+
+	movq	%cr0, %rax
+	testb	$CR0_TS, %al
+	je	1f
+	clts
+1:	movq	PCPU(MDS_BUF), %rdi
+	movq	PCPU(MDS_BUF64), %rdx
+	vmovdqa64	%zmm0, PCPU(MDS_TMP)
+	vpxord	%zmm0, %zmm0, %zmm0
+
+	lfence
+	vorpd	(%rdx), %zmm0, %zmm0
+	vorpd	(%rdx), %zmm0, %zmm0
+	xorl	%eax, %eax
+2:	clflushopt	5376(%rdi, %rax, 8)
+	addl	$8, %eax
+	cmpl	$8 * 12, %eax
+	jb	2b
+	sfence
+	movl	$6144, %ecx
+	xorl	%eax, %eax
+	rep; stosb
+	mfence
+
+	vmovdqa64	PCPU(MDS_TMP), %zmm0
+	testb	$CR0_TS, %al
+	je	3f
+	movq	%rax, %cr0
+3:	popq	%rdi
+	popq	%rcx
+	popq	%rdx
+	popq	%rax
+	retq
+END(mds_handler_skl_avx512)
+
+ENTRY(mds_handler_silvermont)
+	pushq	%rax
+	pushq	%rdx
+	pushq	%rcx
+
+	movq	%cr0, %rax
+	testb	$CR0_TS, %al
+	je	1f
+	clts
+1:	movq	PCPU(MDS_BUF), %rdx
+	movdqa	%xmm0, PCPU(MDS_TMP)
+	pxor	%xmm0, %xmm0
+
+	movl	$16, %ecx
+2:	movntdq	%xmm0, (%rdx)
+	addq	$16, %rdx
+	decl	%ecx
+	jnz	2b
+	mfence
+
+	movdqa	PCPU(MDS_TMP),%xmm0
+	testb	$CR0_TS, %al
+	je	3f
+	movq	%rax, %cr0
+3:	popq	%rcx
+	popq	%rdx
+	popq	%rax
+	retq
+END(mds_handler_silvermont)

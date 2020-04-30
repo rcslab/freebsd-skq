@@ -189,6 +189,7 @@ STATIC void mvneta_clear_mib(struct mvneta_softc *);
 STATIC void mvneta_update_mib(struct mvneta_softc *);
 
 /* Switch */
+STATIC boolean_t mvneta_find_ethernet_prop_switch(phandle_t, phandle_t);
 STATIC boolean_t mvneta_has_switch(device_t);
 
 #define	mvneta_sc_lock(sc) mtx_lock(&sc->mtx)
@@ -412,23 +413,39 @@ mvneta_get_mac_address(struct mvneta_softc *sc, uint8_t *addr)
 }
 
 STATIC boolean_t
+mvneta_find_ethernet_prop_switch(phandle_t ethernet, phandle_t node)
+{
+	boolean_t ret;
+	phandle_t child, switch_eth_handle, switch_eth;
+
+	for (child = OF_child(node); child != 0; child = OF_peer(child)) {
+		if (OF_getencprop(child, "ethernet", (void*)&switch_eth_handle,
+		    sizeof(switch_eth_handle)) > 0) {
+			if (switch_eth_handle > 0) {
+				switch_eth = OF_node_from_xref(
+				    switch_eth_handle);
+
+				if (switch_eth == ethernet)
+					return (true);
+			}
+		}
+
+		ret = mvneta_find_ethernet_prop_switch(ethernet, child);
+		if (ret != 0)
+			return (ret);
+	}
+
+	return (false);
+}
+
+STATIC boolean_t
 mvneta_has_switch(device_t self)
 {
-	phandle_t node, switch_node, switch_eth, switch_eth_handle;
+	phandle_t node;
 
 	node = ofw_bus_get_node(self);
-	switch_node =
-	    ofw_bus_find_compatible(OF_finddevice("/"), "marvell,dsa");
-	switch_eth = 0;
 
-	OF_getencprop(switch_node, "dsa,ethernet",
-	    (void*)&switch_eth_handle, sizeof(switch_eth_handle));
-
-	if (switch_eth_handle > 0)
-		switch_eth = OF_node_from_xref(switch_eth_handle);
-
-	/* Return true if dsa,ethernet cell points to us */
-	return (node == switch_eth);
+	return mvneta_find_ethernet_prop_switch(node, OF_finddevice("/"));
 }
 
 STATIC int
@@ -466,9 +483,9 @@ mvneta_dma_create(struct mvneta_softc *sc)
 	    BUS_SPACE_MAXADDR_32BIT,		/* lowaddr */
 	    BUS_SPACE_MAXADDR,			/* highaddr */
 	    NULL, NULL,				/* filtfunc, filtfuncarg */
-	    MVNETA_PACKET_SIZE,			/* maxsize */
+	    MVNETA_MAX_FRAME,			/* maxsize */
 	    MVNETA_TX_SEGLIMIT,			/* nsegments */
-	    MVNETA_PACKET_SIZE,			/* maxsegsz */
+	    MVNETA_MAX_FRAME,			/* maxsegsz */
 	    BUS_DMA_ALLOCNOW,			/* flags */
 	    NULL, NULL,				/* lockfunc, lockfuncarg */
 	    &sc->txmbuf_dtag);
@@ -516,8 +533,8 @@ mvneta_dma_create(struct mvneta_softc *sc)
 	    BUS_SPACE_MAXADDR_32BIT,		/* lowaddr */
 	    BUS_SPACE_MAXADDR,			/* highaddr */
 	    NULL, NULL,				/* filtfunc, filtfuncarg */
-	    MVNETA_PACKET_SIZE, 1,		/* maxsize, nsegments */
-	    MVNETA_PACKET_SIZE,			/* maxsegsz */
+	    MVNETA_MAX_FRAME, 1,		/* maxsize, nsegments */
+	    MVNETA_MAX_FRAME,			/* maxsegsz */
 	    0,					/* flags */
 	    NULL, NULL,				/* lockfunc, lockfuncarg */
 	    &sc->rxbuf_dtag);			/* dmat */
@@ -656,6 +673,8 @@ mvneta_attach(device_t self)
 	ifp->if_capabilities |= IFCAP_LRO;
 
 	ifp->if_hwassist = CSUM_IP | CSUM_TCP | CSUM_UDP;
+
+	sc->rx_frame_size = MCLBYTES; /* ether_ifattach() always sets normal mtu */
 
 	/*
 	 * Device DMA Buffer allocation.
@@ -799,6 +818,8 @@ mvneta_attach(device_t self)
 		if_link_state_change(sc->ifp, LINK_STATE_UP);
 
 		if (mvneta_has_switch(self)) {
+			if (bootverbose)
+				device_printf(self, "This device is attached to a switch\n");
 			child = device_add_child(sc->dev, "mdio", -1);
 			if (child == NULL) {
 				ether_ifdetach(sc->ifp);
@@ -855,6 +876,8 @@ mvneta_detach(device_t dev)
 		bus_dma_tag_destroy(sc->rx_dtag);
 	if (sc->txmbuf_dtag != NULL)
 		bus_dma_tag_destroy(sc->txmbuf_dtag);
+	if (sc->rxbuf_dtag != NULL)
+		bus_dma_tag_destroy(sc->rxbuf_dtag);
 
 	bus_release_resources(dev, res_spec, sc->res);
 	return (0);
@@ -1137,7 +1160,7 @@ mvneta_initreg(struct ifnet *ifp)
 	/* Port MAC Control set 0 */
 	reg  = MVNETA_PMACC0_MUSTSET;	/* must write 0x1 */
 	reg &= ~MVNETA_PMACC0_PORTEN;	/* port is still disabled */
-	reg |= MVNETA_PMACC0_FRAMESIZELIMIT(MVNETA_MAX_FRAME);
+	reg |= MVNETA_PMACC0_FRAMESIZELIMIT(ifp->if_mtu + MVNETA_ETHER_SIZE);
 	MVNETA_WRITE(sc, MVNETA_PMACC0, reg);
 
 	/* Port MAC Control set 2 */
@@ -1504,7 +1527,7 @@ mvneta_rx_queue_init(struct ifnet *ifp, int q)
 	MVNETA_WRITE(sc, MVNETA_PRXDQA(q), rx->desc_pa);
 
 	/* Rx buffer size and descriptor ring size */
-	reg  = MVNETA_PRXDQS_BUFFERSIZE(MVNETA_PACKET_SIZE >> 3);
+	reg  = MVNETA_PRXDQS_BUFFERSIZE(sc->rx_frame_size >> 3);
 	reg |= MVNETA_PRXDQS_DESCRIPTORSQUEUESIZE(MVNETA_RX_RING_CNT);
 	MVNETA_WRITE(sc, MVNETA_PRXDQS(q), reg);
 #ifdef MVNETA_KTR
@@ -2082,7 +2105,7 @@ mvneta_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 		mvneta_sc_unlock(sc);
 		break;
 	case SIOCSIFCAP:
-		if (ifp->if_mtu > MVNETA_MAX_CSUM_MTU &&
+		if (ifp->if_mtu > sc->tx_csum_limit &&
 		    ifr->ifr_reqcap & IFCAP_TXCSUM)
 			ifr->ifr_reqcap &= ~IFCAP_TXCSUM;
 		mask = ifp->if_capenable ^ ifr->ifr_reqcap;
@@ -2136,7 +2159,12 @@ mvneta_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 		} else {
 			ifp->if_mtu = ifr->ifr_mtu;
 			mvneta_sc_lock(sc);
-			if (ifp->if_mtu > MVNETA_MAX_CSUM_MTU) {
+			if (ifp->if_mtu + MVNETA_ETHER_SIZE <= MCLBYTES) {
+				sc->rx_frame_size = MCLBYTES;
+			} else {
+				sc->rx_frame_size = MJUM9BYTES;
+			}
+			if (ifp->if_mtu > sc->tx_csum_limit) {
 				ifp->if_capenable &= ~IFCAP_TXCSUM;
 				ifp->if_hwassist = 0;
 			} else {
@@ -2146,8 +2174,25 @@ mvneta_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 			}
 
 			if (ifp->if_drv_flags & IFF_DRV_RUNNING) {
-				/* Trigger reinitialize sequence */
+				/* Stop hardware */
 				mvneta_stop_locked(sc);
+				/*
+				 * Reinitialize RX queues.
+				 * We need to update RX descriptor size.
+				 */
+				for (q = 0; q < MVNETA_RX_QNUM_MAX; q++) {
+					mvneta_rx_lockq(sc, q);
+					if (mvneta_rx_queue_init(ifp, q) != 0) {
+						device_printf(sc->dev,
+						    "initialization failed:"
+						    " cannot initialize queue\n");
+						mvneta_rx_unlockq(sc, q);
+						error = ENOBUFS;
+						break;
+					}
+					mvneta_rx_unlockq(sc, q);
+				}
+				/* Trigger reinitialization */
 				mvneta_init_locked(sc);
 			}
 			mvneta_sc_unlock(sc);
@@ -2193,6 +2238,8 @@ mvneta_init_locked(void *arg)
 	/* Enable port */
 	reg  = MVNETA_READ(sc, MVNETA_PMACC0);
 	reg |= MVNETA_PMACC0_PORTEN;
+	reg &= ~MVNETA_PMACC0_FRAMESIZELIMIT_MASK;
+	reg |= MVNETA_PMACC0_FRAMESIZELIMIT(ifp->if_mtu + MVNETA_ETHER_SIZE);
 	MVNETA_WRITE(sc, MVNETA_PMACC0, reg);
 
 	/* Allow access to each TXQ/RXQ from both CPU's */
@@ -2780,6 +2827,10 @@ mvneta_tx_set_csumflag(struct ifnet *ifp,
 	iphl = ipoff = 0;
 	csum_flags = ifp->if_hwassist & m->m_pkthdr.csum_flags;
 	eh = mtod(m, struct ether_header *);
+
+	if (csum_flags == 0)
+		return;
+
 	switch (ntohs(eh->ether_type)) {
 	case ETHERTYPE_IP:
 		ipoff = ETHER_HDR_LEN;
@@ -3137,7 +3188,7 @@ mvneta_rx_queue_refill(struct mvneta_softc *sc, int q)
 
 	for (npkt = 0; npkt < refill; npkt++) {
 		rxbuf = &rx->rxbuf[rx->cpu];
-		m = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
+		m = m_getjcl(M_NOWAIT, MT_DATA, M_PKTHDR, sc->rx_frame_size);
 		if (__predict_false(m == NULL)) {
 			error = ENOBUFS;
 			break;
@@ -3428,10 +3479,10 @@ sysctl_mvneta_init(struct mvneta_softc *sc)
 	children = SYSCTL_CHILDREN(device_get_sysctl_tree(sc->dev));
 
 	tree = SYSCTL_ADD_NODE(ctx, children, OID_AUTO, "rx",
-	    CTLFLAG_RD, 0, "NETA RX");
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, 0, "NETA RX");
 	rxchildren = SYSCTL_CHILDREN(tree);
 	tree = SYSCTL_ADD_NODE(ctx, children, OID_AUTO, "mib",
-	    CTLFLAG_RD, 0, "NETA MIB");
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, 0, "NETA MIB");
 	mchildren = SYSCTL_CHILDREN(tree);
 
 
@@ -3451,8 +3502,9 @@ sysctl_mvneta_init(struct mvneta_softc *sc)
 		mib_arg->index = i;
 		SYSCTL_ADD_PROC(ctx, mchildren, OID_AUTO,
 		    mvneta_mib_list[i].sysctl_name,
-		    CTLTYPE_U64|CTLFLAG_RD, (void *)mib_arg, 0,
-		    sysctl_read_mib, "I", mvneta_mib_list[i].desc);
+		    CTLTYPE_U64 | CTLFLAG_RD | CTLFLAG_NEEDGIANT,
+		    (void *)mib_arg, 0, sysctl_read_mib, "I",
+		    mvneta_mib_list[i].desc);
 	}
 	SYSCTL_ADD_UQUAD(ctx, mchildren, OID_AUTO, "rx_discard",
 	    CTLFLAG_RD, &sc->counter_pdfc, "Port Rx Discard Frame Counter");
@@ -3462,8 +3514,8 @@ sysctl_mvneta_init(struct mvneta_softc *sc)
 	    CTLFLAG_RD, &sc->counter_watchdog, 0, "TX Watchdog Counter");
 
 	SYSCTL_ADD_PROC(ctx, mchildren, OID_AUTO, "reset",
-	    CTLTYPE_INT|CTLFLAG_RW, (void *)sc, 0,
-	    sysctl_clear_mib, "I", "Reset MIB counters");
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_NEEDGIANT,
+	    (void *)sc, 0, sysctl_clear_mib, "I", "Reset MIB counters");
 
 	for (q = 0; q < MVNETA_RX_QNUM_MAX; q++) {
 		rxarg = &sc->sysctl_rx_queue[q];
@@ -3474,13 +3526,13 @@ sysctl_mvneta_init(struct mvneta_softc *sc)
 
 		/* hw.mvneta.mvneta[unit].rx.[queue] */
 		tree = SYSCTL_ADD_NODE(ctx, rxchildren, OID_AUTO,
-		    sysctl_queue_names[q], CTLFLAG_RD, 0,
+		    sysctl_queue_names[q], CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
 		    sysctl_queue_descrs[q]);
 		qchildren = SYSCTL_CHILDREN(tree);
 
 		/* hw.mvneta.mvneta[unit].rx.[queue].threshold_timer_us */
 		SYSCTL_ADD_PROC(ctx, qchildren, OID_AUTO, "threshold_timer_us",
-		    CTLTYPE_UINT | CTLFLAG_RW, rxarg, 0,
+		    CTLTYPE_UINT | CTLFLAG_RW | CTLFLAG_NEEDGIANT, rxarg, 0,
 		    sysctl_set_queue_rxthtime, "I",
 		    "interrupt coalescing threshold timer [us]");
 	}

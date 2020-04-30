@@ -36,6 +36,8 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
+#include "opt_inet.h"
+#include "opt_inet6.h"
 /*
  * nfs version 2, 3 and 4 server calls to vnode ops
  * - these routines generally have 3 phases
@@ -48,6 +50,8 @@ __FBSDID("$FreeBSD$");
 
 #ifndef APPLEKEXT
 #include <fs/nfs/nfsport.h>
+#include <sys/extattr.h>
+#include <sys/filio.h>
 
 /* Global vars */
 extern u_int32_t newnfs_false, newnfs_true;
@@ -63,6 +67,7 @@ extern int nfsd_debuglevel;
 extern u_long sb_max_adj;
 extern int nfsrv_pnfsatime;
 extern int nfsrv_maxpnfsmirror;
+extern int nfs_maxcopyrange;
 #endif	/* !APPLEKEXT */
 
 static int	nfs_async = 0;
@@ -72,6 +77,14 @@ SYSCTL_INT(_vfs_nfsd, OID_AUTO, async, CTLFLAG_RW, &nfs_async, 0,
 extern int	nfsrv_doflexfile;
 SYSCTL_INT(_vfs_nfsd, OID_AUTO, default_flexfile, CTLFLAG_RW,
     &nfsrv_doflexfile, 0, "Make Flex File Layout the default for pNFS");
+static int	nfsrv_linux42server = 1;
+SYSCTL_INT(_vfs_nfsd, OID_AUTO, linux42server, CTLFLAG_RW,
+    &nfsrv_linux42server, 0,
+    "Enable Linux style NFSv4.2 server (non-RFC compliant)");
+static bool	nfsrv_openaccess = true;
+SYSCTL_BOOL(_vfs_nfsd, OID_AUTO, v4openaccess, CTLFLAG_RW,
+    &nfsrv_openaccess, 0,
+    "Enable Linux style NFSv4 Open access check");
 
 /*
  * This list defines the GSS mechanisms supported.
@@ -101,13 +114,14 @@ static void nfsrvd_mkdirsub(struct nfsrv_descript *nd, struct nameidata *ndp,
  */
 APPLESTATIC int
 nfsrvd_access(struct nfsrv_descript *nd, __unused int isdgram,
-    vnode_t vp, NFSPROC_T *p, struct nfsexstuff *exp)
+    vnode_t vp, struct nfsexstuff *exp)
 {
 	u_int32_t *tl;
 	int getret, error = 0;
 	struct nfsvattr nva;
 	u_int32_t testmode, nfsmode, supported = 0;
 	accmode_t deletebit;
+	struct thread *p = curthread;
 
 	if (nd->nd_repstat) {
 		nfsrv_postopattr(nd, 1, &nva);
@@ -118,7 +132,8 @@ nfsrvd_access(struct nfsrv_descript *nd, __unused int isdgram,
 	if ((nd->nd_flag & ND_NFSV4) &&
 	    (nfsmode & ~(NFSACCESS_READ | NFSACCESS_LOOKUP |
 	     NFSACCESS_MODIFY | NFSACCESS_EXTEND | NFSACCESS_DELETE |
-	     NFSACCESS_EXECUTE))) {
+	     NFSACCESS_EXECUTE | NFSACCESS_XAREAD | NFSACCESS_XAWRITE |
+	     NFSACCESS_XALIST))) {
 		nd->nd_repstat = NFSERR_INVAL;
 		vput(vp);
 		goto out;
@@ -140,6 +155,24 @@ nfsrvd_access(struct nfsrv_descript *nd, __unused int isdgram,
 		if (nfsvno_accchk(vp, VWRITE | VAPPEND, nd->nd_cred, exp, p,
 		    NFSACCCHK_NOOVERRIDE, NFSACCCHK_VPISLOCKED, &supported))
 			nfsmode &= ~NFSACCESS_EXTEND;
+	}
+	if (nfsmode & NFSACCESS_XAREAD) {
+		supported |= NFSACCESS_XAREAD;
+		if (nfsvno_accchk(vp, VREAD, nd->nd_cred, exp, p,
+		    NFSACCCHK_NOOVERRIDE, NFSACCCHK_VPISLOCKED, &supported))
+			nfsmode &= ~NFSACCESS_XAREAD;
+	}
+	if (nfsmode & NFSACCESS_XAWRITE) {
+		supported |= NFSACCESS_XAWRITE;
+		if (nfsvno_accchk(vp, VWRITE, nd->nd_cred, exp, p,
+		    NFSACCCHK_NOOVERRIDE, NFSACCCHK_VPISLOCKED, &supported))
+			nfsmode &= ~NFSACCESS_XAWRITE;
+	}
+	if (nfsmode & NFSACCESS_XALIST) {
+		supported |= NFSACCESS_XALIST;
+		if (nfsvno_accchk(vp, VREAD, nd->nd_cred, exp, p,
+		    NFSACCCHK_NOOVERRIDE, NFSACCCHK_VPISLOCKED, &supported))
+			nfsmode &= ~NFSACCESS_XALIST;
 	}
 	if (nfsmode & NFSACCESS_DELETE) {
 		supported |= NFSACCESS_DELETE;
@@ -188,7 +221,7 @@ nfsmout:
  */
 APPLESTATIC int
 nfsrvd_getattr(struct nfsrv_descript *nd, int isdgram,
-    vnode_t vp, NFSPROC_T *p, __unused struct nfsexstuff *exp)
+    vnode_t vp, __unused struct nfsexstuff *exp)
 {
 	struct nfsvattr nva;
 	fhandle_t fh;
@@ -200,6 +233,7 @@ nfsrvd_getattr(struct nfsrv_descript *nd, int isdgram,
 	struct vattr va;
 	uint64_t mounted_on_fileno = 0;
 	accmode_t accmode;
+	struct thread *p = curthread;
 
 	if (nd->nd_repstat)
 		goto out;
@@ -268,7 +302,7 @@ nfsrvd_getattr(struct nfsrv_descript *nd, int isdgram,
 				} else
 					at_root = 0;
 				vfs_ref(mp);
-				NFSVOPUNLOCK(vp, 0);
+				NFSVOPUNLOCK(vp);
 				if (at_root != 0) {
 					if ((nd->nd_repstat =
 					     NFSVOPLOCK(tvp, LK_SHARED)) == 0) {
@@ -314,7 +348,7 @@ out:
  */
 APPLESTATIC int
 nfsrvd_setattr(struct nfsrv_descript *nd, __unused int isdgram,
-    vnode_t vp, NFSPROC_T *p, struct nfsexstuff *exp)
+    vnode_t vp, struct nfsexstuff *exp)
 {
 	struct nfsvattr nva, nva2;
 	u_int32_t *tl;
@@ -324,6 +358,7 @@ nfsrvd_setattr(struct nfsrv_descript *nd, __unused int isdgram,
 	nfsattrbit_t attrbits, retbits;
 	nfsv4stateid_t stateid;
 	NFSACL_T *aclp = NULL;
+	struct thread *p = curthread;
 
 	if (nd->nd_repstat) {
 		nfsrv_wcc(nd, preat_ret, &nva2, postat_ret, &nva);
@@ -459,13 +494,18 @@ nfsrvd_setattr(struct nfsrv_descript *nd, __unused int isdgram,
 		}
 	    }
 	    if (!nd->nd_repstat &&
-		NFSISSET_ATTRBIT(&attrbits, NFSATTRBIT_MODE)) {
+		(NFSISSET_ATTRBIT(&attrbits, NFSATTRBIT_MODE) ||
+		 NFSISSET_ATTRBIT(&attrbits, NFSATTRBIT_MODESETMASKED))) {
 		NFSVNO_ATTRINIT(&nva2);
 		NFSVNO_SETATTRVAL(&nva2, mode, nva.na_mode);
 		nd->nd_repstat = nfsvno_setattr(vp, &nva2, nd->nd_cred, p,
 		    exp);
-		if (!nd->nd_repstat)
-		    NFSSETBIT_ATTRBIT(&retbits, NFSATTRBIT_MODE);
+		if (!nd->nd_repstat) {
+		    if (NFSISSET_ATTRBIT(&attrbits, NFSATTRBIT_MODE))
+			NFSSETBIT_ATTRBIT(&retbits, NFSATTRBIT_MODE);
+		    if (NFSISSET_ATTRBIT(&attrbits, NFSATTRBIT_MODESETMASKED))
+			NFSSETBIT_ATTRBIT(&retbits, NFSATTRBIT_MODESETMASKED);
+		}
 	    }
 
 #ifdef NFS4_ACL_EXTATTR_NAME
@@ -522,8 +562,7 @@ nfsmout:
  */
 APPLESTATIC int
 nfsrvd_lookup(struct nfsrv_descript *nd, __unused int isdgram,
-    vnode_t dp, vnode_t *vpp, fhandle_t *fhp, NFSPROC_T *p,
-    struct nfsexstuff *exp)
+    vnode_t dp, vnode_t *vpp, fhandle_t *fhp, struct nfsexstuff *exp)
 {
 	struct nameidata named;
 	vnode_t vp, dirp = NULL;
@@ -531,6 +570,7 @@ nfsrvd_lookup(struct nfsrv_descript *nd, __unused int isdgram,
 	struct nfsvattr nva, dattr;
 	char *bufp;
 	u_long *hashp;
+	struct thread *p = curthread;
 
 	if (nd->nd_repstat) {
 		nfsrv_postopattr(nd, dattr_ret, &dattr);
@@ -622,12 +662,13 @@ out:
  */
 APPLESTATIC int
 nfsrvd_readlink(struct nfsrv_descript *nd, __unused int isdgram,
-    vnode_t vp, NFSPROC_T *p, __unused struct nfsexstuff *exp)
+    vnode_t vp, __unused struct nfsexstuff *exp)
 {
 	u_int32_t *tl;
-	mbuf_t mp = NULL, mpend = NULL;
+	struct mbuf *mp = NULL, *mpend = NULL;
 	int getret = 1, len;
 	struct nfsvattr nva;
+	struct thread *p = curthread;
 
 	if (nd->nd_repstat) {
 		nfsrv_postopattr(nd, getret, &nva);
@@ -651,9 +692,9 @@ nfsrvd_readlink(struct nfsrv_descript *nd, __unused int isdgram,
 		goto out;
 	NFSM_BUILD(tl, u_int32_t *, NFSX_UNSIGNED);
 	*tl = txdr_unsigned(len);
-	mbuf_setnext(nd->nd_mb, mp);
+	nd->nd_mb->m_next = mp;
 	nd->nd_mb = mpend;
-	nd->nd_bpos = NFSMTOD(mpend, caddr_t) + mbuf_len(mpend);
+	nd->nd_bpos = mtod(mpend, caddr_t) + mpend->m_len;
 
 out:
 	NFSEXITCODE2(0, nd);
@@ -665,17 +706,18 @@ out:
  */
 APPLESTATIC int
 nfsrvd_read(struct nfsrv_descript *nd, __unused int isdgram,
-    vnode_t vp, NFSPROC_T *p, struct nfsexstuff *exp)
+    vnode_t vp, struct nfsexstuff *exp)
 {
 	u_int32_t *tl;
 	int error = 0, cnt, getret = 1, gotproxystateid, reqlen, eof = 0;
-	mbuf_t m2, m3;
+	struct mbuf *m2, *m3;
 	struct nfsvattr nva;
 	off_t off = 0x0;
 	struct nfsstate st, *stp = &st;
 	struct nfslock lo, *lop = &lo;
 	nfsv4stateid_t stateid;
 	nfsquad_t clientid;
+	struct thread *p = curthread;
 
 	if (nd->nd_repstat) {
 		nfsrv_postopattr(nd, getret, &nva);
@@ -807,7 +849,7 @@ nfsrvd_read(struct nfsrv_descript *nd, __unused int isdgram,
 		if (nd->nd_repstat) {
 			vput(vp);
 			if (m3)
-				mbuf_freem(m3);
+				m_freem(m3);
 			if (nd->nd_flag & ND_NFSV3)
 				nfsrv_postopattr(nd, getret, &nva);
 			goto out;
@@ -831,9 +873,9 @@ nfsrvd_read(struct nfsrv_descript *nd, __unused int isdgram,
 	}
 	*tl = txdr_unsigned(cnt);
 	if (m3) {
-		mbuf_setnext(nd->nd_mb, m3);
+		nd->nd_mb->m_next = m3;
 		nd->nd_mb = m2;
-		nd->nd_bpos = NFSMTOD(m2, caddr_t) + mbuf_len(m2);
+		nd->nd_bpos = mtod(m2, caddr_t) + m2->m_len;
 	}
 
 out:
@@ -850,11 +892,9 @@ nfsmout:
  */
 APPLESTATIC int
 nfsrvd_write(struct nfsrv_descript *nd, __unused int isdgram,
-    vnode_t vp, NFSPROC_T *p, struct nfsexstuff *exp)
+    vnode_t vp, struct nfsexstuff *exp)
 {
-	int i, cnt;
 	u_int32_t *tl;
-	mbuf_t mp;
 	struct nfsvattr nva, forat;
 	int aftat_ret = 1, retlen, len, error = 0, forat_ret = 1;
 	int gotproxystateid, stable = NFSWRITE_FILESYNC;
@@ -864,6 +904,7 @@ nfsrvd_write(struct nfsrv_descript *nd, __unused int isdgram,
 	nfsv4stateid_t stateid;
 	nfsquad_t clientid;
 	nfsattrbit_t attrbits;
+	struct thread *p = curthread;
 
 	if (nd->nd_repstat) {
 		nfsrv_wcc(nd, forat_ret, &forat, aftat_ret, &nva);
@@ -935,28 +976,6 @@ nfsrvd_write(struct nfsrv_descript *nd, __unused int isdgram,
 			lop->lo_end = NFS64BITSSET;
 	}
 
-	/*
-	 * Loop through the mbuf chain, counting how many mbufs are a
-	 * part of this write operation, so the iovec size is known.
-	 */
-	cnt = 0;
-	mp = nd->nd_md;
-	i = NFSMTOD(mp, caddr_t) + mbuf_len(mp) - nd->nd_dpos;
-	while (len > 0) {
-		if (i > 0) {
-			len -= i;
-			cnt++;
-		}
-		mp = mbuf_next(mp);
-		if (!mp) {
-			if (len > 0) {
-				error = EBADRPC;
-				goto nfsmout;
-			}
-		} else
-			i = mbuf_len(mp);
-	}
-
 	if (retlen > NFS_SRVMAXIO || retlen < 0)
 		nd->nd_repstat = EIO;
 	if (vnode_vtype(vp) != VREG && !nd->nd_repstat) {
@@ -998,7 +1017,7 @@ nfsrvd_write(struct nfsrv_descript *nd, __unused int isdgram,
 	 * which is to return ok so long as there are no permission problems.
 	 */
 	if (retlen > 0) {
-		nd->nd_repstat = nfsvno_write(vp, off, retlen, cnt, &stable,
+		nd->nd_repstat = nfsvno_write(vp, off, retlen, &stable,
 		    nd->nd_md, nd->nd_dpos, nd->nd_cred, p);
 		error = nfsm_advance(nd, NFSM_RNDUP(retlen), -1);
 		if (error)
@@ -1055,7 +1074,7 @@ nfsmout:
  */
 APPLESTATIC int
 nfsrvd_create(struct nfsrv_descript *nd, __unused int isdgram,
-    vnode_t dp, NFSPROC_T *p, struct nfsexstuff *exp)
+    vnode_t dp, struct nfsexstuff *exp)
 {
 	struct nfsvattr nva, dirfor, diraft;
 	struct nfsv2_sattr *sp;
@@ -1070,6 +1089,7 @@ nfsrvd_create(struct nfsrv_descript *nd, __unused int isdgram,
 	u_long *hashp;
 	enum vtype vtyp;
 	int32_t cverf[2], tverf[2] = { 0, 0 };
+	struct thread *p = curthread;
 
 	if (nd->nd_repstat) {
 		nfsrv_wcc(nd, dirfor_ret, &dirfor, diraft_ret, &diraft);
@@ -1178,7 +1198,7 @@ nfsrvd_create(struct nfsrv_descript *nd, __unused int isdgram,
 	 *   should I set the mode too ?
 	 */
 	nd->nd_repstat = nfsvno_createsub(nd, &named, &vp, &nva,
-	    &exclusive_flag, cverf, rdev, p, exp);
+	    &exclusive_flag, cverf, rdev, exp);
 
 	if (!nd->nd_repstat) {
 		nd->nd_repstat = nfsvno_getfh(vp, &fh, p);
@@ -1224,8 +1244,7 @@ nfsmout:
  */
 APPLESTATIC int
 nfsrvd_mknod(struct nfsrv_descript *nd, __unused int isdgram,
-    vnode_t dp, vnode_t *vpp, fhandle_t *fhp, NFSPROC_T *p,
-    struct nfsexstuff *exp)
+    vnode_t dp, vnode_t *vpp, fhandle_t *fhp, struct nfsexstuff *exp)
 {
 	struct nfsvattr nva, dirfor, diraft;
 	u_int32_t *tl;
@@ -1239,6 +1258,7 @@ nfsrvd_mknod(struct nfsrv_descript *nd, __unused int isdgram,
 	char *bufp = NULL, *pathcp = NULL;
 	u_long *hashp, cnflags;
 	NFSACL_T *aclp = NULL;
+	struct thread *p = curthread;
 
 	NFSVNO_ATTRINIT(&nva);
 	cnflags = (LOCKPARENT | SAVESTART);
@@ -1393,7 +1413,7 @@ nfsrvd_mknod(struct nfsrv_descript *nd, __unused int isdgram,
 			nd->nd_repstat = nfsvno_getattr(vp, &nva, nd, p, 1,
 			    NULL);
 		if (vpp != NULL && nd->nd_repstat == 0) {
-			NFSVOPUNLOCK(vp, 0);
+			NFSVOPUNLOCK(vp);
 			*vpp = vp;
 		} else
 			vput(vp);
@@ -1442,7 +1462,7 @@ nfsmout:
  */
 APPLESTATIC int
 nfsrvd_remove(struct nfsrv_descript *nd, __unused int isdgram,
-    vnode_t dp, NFSPROC_T *p, struct nfsexstuff *exp)
+    vnode_t dp, struct nfsexstuff *exp)
 {
 	struct nameidata named;
 	u_int32_t *tl;
@@ -1451,6 +1471,7 @@ nfsrvd_remove(struct nfsrv_descript *nd, __unused int isdgram,
 	struct nfsvattr dirfor, diraft;
 	char *bufp;
 	u_long *hashp;
+	struct thread *p = curthread;
 
 	if (nd->nd_repstat) {
 		nfsrv_wcc(nd, dirfor_ret, &dirfor, diraft_ret, &diraft);
@@ -1524,8 +1545,7 @@ out:
  */
 APPLESTATIC int
 nfsrvd_rename(struct nfsrv_descript *nd, int isdgram,
-    vnode_t dp, vnode_t todp, NFSPROC_T *p, struct nfsexstuff *exp,
-    struct nfsexstuff *toexp)
+    vnode_t dp, vnode_t todp, struct nfsexstuff *exp, struct nfsexstuff *toexp)
 {
 	u_int32_t *tl;
 	int error = 0, fdirfor_ret = 1, fdiraft_ret = 1;
@@ -1538,6 +1558,7 @@ nfsrvd_rename(struct nfsrv_descript *nd, int isdgram,
 	char *bufp, *tbufp = NULL;
 	u_long *hashp;
 	fhandle_t fh;
+	struct thread *p = curthread;
 
 	if (nd->nd_repstat) {
 		nfsrv_wcc(nd, fdirfor_ret, &fdirfor, fdiraft_ret, &fdiraft);
@@ -1567,14 +1588,14 @@ nfsrvd_rename(struct nfsrv_descript *nd, int isdgram,
 		tdp = todp;
 		tnes = *toexp;
 		if (dp != tdp) {
-			NFSVOPUNLOCK(dp, 0);
+			NFSVOPUNLOCK(dp);
 			/* Might lock tdp. */
 			tdirfor_ret = nfsvno_getattr(tdp, &tdirfor, nd, p, 0,
 			    NULL);
 		} else {
 			tdirfor_ret = nfsvno_getattr(tdp, &tdirfor, nd, p, 1,
 			    NULL);
-			NFSVOPUNLOCK(dp, 0);
+			NFSVOPUNLOCK(dp);
 		}
 	} else {
 		tfh.nfsrvfh_len = 0;
@@ -1596,16 +1617,16 @@ nfsrvd_rename(struct nfsrv_descript *nd, int isdgram,
 			tnes = *exp;
 			tdirfor_ret = nfsvno_getattr(tdp, &tdirfor, nd, p, 1,
 			    NULL);
-			NFSVOPUNLOCK(dp, 0);
+			NFSVOPUNLOCK(dp);
 		} else {
-			NFSVOPUNLOCK(dp, 0);
+			NFSVOPUNLOCK(dp);
 			nd->nd_cred->cr_uid = nd->nd_saveduid;
 			nfsd_fhtovp(nd, &tfh, LK_EXCLUSIVE, &tdp, &tnes, NULL,
-			    0, p);	/* Locks tdp. */
+			    0);	/* Locks tdp. */
 			if (tdp) {
 				tdirfor_ret = nfsvno_getattr(tdp, &tdirfor, nd,
 				    p, 1, NULL);
-				NFSVOPUNLOCK(tdp, 0);
+				NFSVOPUNLOCK(tdp);
 			}
 		}
 	}
@@ -1694,8 +1715,7 @@ out:
  */
 APPLESTATIC int
 nfsrvd_link(struct nfsrv_descript *nd, int isdgram,
-    vnode_t vp, vnode_t tovp, NFSPROC_T *p, struct nfsexstuff *exp,
-    struct nfsexstuff *toexp)
+    vnode_t vp, vnode_t tovp, struct nfsexstuff *exp, struct nfsexstuff *toexp)
 {
 	struct nameidata named;
 	u_int32_t *tl;
@@ -1706,13 +1726,14 @@ nfsrvd_link(struct nfsrv_descript *nd, int isdgram,
 	struct nfsrvfh dfh;
 	char *bufp;
 	u_long *hashp;
+	struct thread *p = curthread;
 
 	if (nd->nd_repstat) {
 		nfsrv_postopattr(nd, getret, &at);
 		nfsrv_wcc(nd, dirfor_ret, &dirfor, diraft_ret, &diraft);
 		goto out;
 	}
-	NFSVOPUNLOCK(vp, 0);
+	NFSVOPUNLOCK(vp);
 	if (vnode_vtype(vp) == VDIR) {
 		if (nd->nd_flag & ND_NFSV4)
 			nd->nd_repstat = NFSERR_ISDIR;
@@ -1732,10 +1753,9 @@ nfsrvd_link(struct nfsrv_descript *nd, int isdgram,
 				/* tovp is always NULL unless NFSv4 */
 				goto out;
 			}
-			nfsd_fhtovp(nd, &dfh, LK_EXCLUSIVE, &dp, &tnes, NULL, 0,
-			    p);
+			nfsd_fhtovp(nd, &dfh, LK_EXCLUSIVE, &dp, &tnes, NULL, 0);
 			if (dp)
-				NFSVOPUNLOCK(dp, 0);
+				NFSVOPUNLOCK(dp);
 		}
 	}
 	NFSNAMEICNDSET(&named.ni_cnd, nd->nd_cred, CREATE,
@@ -1798,8 +1818,7 @@ out:
  */
 APPLESTATIC int
 nfsrvd_symlink(struct nfsrv_descript *nd, __unused int isdgram,
-    vnode_t dp, vnode_t *vpp, fhandle_t *fhp, NFSPROC_T *p,
-    struct nfsexstuff *exp)
+    vnode_t dp, vnode_t *vpp, fhandle_t *fhp, struct nfsexstuff *exp)
 {
 	struct nfsvattr nva, dirfor, diraft;
 	struct nameidata named;
@@ -1807,6 +1826,7 @@ nfsrvd_symlink(struct nfsrv_descript *nd, __unused int isdgram,
 	vnode_t dirp = NULL;
 	char *bufp, *pathcp = NULL;
 	u_long *hashp;
+	struct thread *p = curthread;
 
 	if (nd->nd_repstat) {
 		nfsrv_wcc(nd, dirfor_ret, &dirfor, diraft_ret, &diraft);
@@ -1892,7 +1912,7 @@ nfsrvd_symlinksub(struct nfsrv_descript *nd, struct nameidata *ndp,
 				    nvap, nd, p, 1, NULL);
 		}
 		if (vpp != NULL && nd->nd_repstat == 0) {
-			NFSVOPUNLOCK(ndp->ni_vp, 0);
+			NFSVOPUNLOCK(ndp->ni_vp);
 			*vpp = ndp->ni_vp;
 		} else
 			vput(ndp->ni_vp);
@@ -1918,8 +1938,7 @@ nfsrvd_symlinksub(struct nfsrv_descript *nd, struct nameidata *ndp,
  */
 APPLESTATIC int
 nfsrvd_mkdir(struct nfsrv_descript *nd, __unused int isdgram,
-    vnode_t dp, vnode_t *vpp, fhandle_t *fhp, NFSPROC_T *p,
-    struct nfsexstuff *exp)
+    vnode_t dp, vnode_t *vpp, fhandle_t *fhp, struct nfsexstuff *exp)
 {
 	struct nfsvattr nva, dirfor, diraft;
 	struct nameidata named;
@@ -1928,6 +1947,7 @@ nfsrvd_mkdir(struct nfsrv_descript *nd, __unused int isdgram,
 	vnode_t dirp = NULL;
 	char *bufp;
 	u_long *hashp;
+	struct thread *p = curthread;
 
 	if (nd->nd_repstat) {
 		nfsrv_wcc(nd, dirfor_ret, &dirfor, diraft_ret, &diraft);
@@ -2025,7 +2045,7 @@ nfsrvd_mkdirsub(struct nfsrv_descript *nd, struct nameidata *ndp,
 			nd->nd_repstat = nfsvno_getattr(vp, nvap, nd, p, 1,
 			    NULL);
 		if (vpp && !nd->nd_repstat) {
-			NFSVOPUNLOCK(vp, 0);
+			NFSVOPUNLOCK(vp);
 			*vpp = vp;
 		} else {
 			vput(vp);
@@ -2052,12 +2072,13 @@ nfsrvd_mkdirsub(struct nfsrv_descript *nd, struct nameidata *ndp,
  */
 APPLESTATIC int
 nfsrvd_commit(struct nfsrv_descript *nd, __unused int isdgram,
-    vnode_t vp, NFSPROC_T *p, __unused struct nfsexstuff *exp)
+    vnode_t vp, __unused struct nfsexstuff *exp)
 {
 	struct nfsvattr bfor, aft;
 	u_int32_t *tl;
 	int error = 0, for_ret = 1, aft_ret = 1, cnt;
 	u_int64_t off;
+	struct thread *p = curthread;
 
        if (nd->nd_repstat) {
 		nfsrv_wcc(nd, for_ret, &bfor, aft_ret, &aft);
@@ -2109,13 +2130,14 @@ nfsmout:
  */
 APPLESTATIC int
 nfsrvd_statfs(struct nfsrv_descript *nd, __unused int isdgram,
-    vnode_t vp, NFSPROC_T *p, __unused struct nfsexstuff *exp)
+    vnode_t vp, __unused struct nfsexstuff *exp)
 {
 	struct statfs *sf;
 	u_int32_t *tl;
 	int getret = 1;
 	struct nfsvattr at;
 	u_quad_t tval;
+	struct thread *p = curthread;
 
 	sf = NULL;
 	if (nd->nd_repstat) {
@@ -2168,12 +2190,13 @@ out:
  */
 APPLESTATIC int
 nfsrvd_fsinfo(struct nfsrv_descript *nd, int isdgram,
-    vnode_t vp, NFSPROC_T *p, __unused struct nfsexstuff *exp)
+    vnode_t vp, __unused struct nfsexstuff *exp)
 {
 	u_int32_t *tl;
 	struct nfsfsinfo fs;
 	int getret = 1;
 	struct nfsvattr at;
+	struct thread *p = curthread;
 
 	if (nd->nd_repstat) {
 		nfsrv_postopattr(nd, getret, &at);
@@ -2207,12 +2230,13 @@ out:
  */
 APPLESTATIC int
 nfsrvd_pathconf(struct nfsrv_descript *nd, __unused int isdgram,
-    vnode_t vp, NFSPROC_T *p, __unused struct nfsexstuff *exp)
+    vnode_t vp, __unused struct nfsexstuff *exp)
 {
 	struct nfsv3_pathconf *pc;
 	int getret = 1;
 	long linkmax, namemax, chownres, notrunc;
 	struct nfsvattr at;
+	struct thread *p = curthread;
 
 	if (nd->nd_repstat) {
 		nfsrv_postopattr(nd, getret, &at);
@@ -2258,7 +2282,7 @@ out:
  */
 APPLESTATIC int
 nfsrvd_lock(struct nfsrv_descript *nd, __unused int isdgram,
-    vnode_t vp, NFSPROC_T *p, struct nfsexstuff *exp)
+    vnode_t vp, struct nfsexstuff *exp)
 {
 	u_int32_t *tl;
 	int i;
@@ -2270,6 +2294,7 @@ nfsrvd_lock(struct nfsrv_descript *nd, __unused int isdgram,
 	u_int64_t offset, len;
 	nfsv4stateid_t stateid;
 	nfsquad_t clientid;
+	struct thread *p = curthread;
 
 	NFSM_DISSECT(tl, u_int32_t *, 7 * NFSX_UNSIGNED);
 	i = fxdr_unsigned(int, *tl++);
@@ -2485,7 +2510,7 @@ nfsmout:
  */
 APPLESTATIC int
 nfsrvd_lockt(struct nfsrv_descript *nd, __unused int isdgram,
-    vnode_t vp, NFSPROC_T *p, struct nfsexstuff *exp)
+    vnode_t vp, struct nfsexstuff *exp)
 {
 	u_int32_t *tl;
 	int i;
@@ -2496,6 +2521,7 @@ nfsrvd_lockt(struct nfsrv_descript *nd, __unused int isdgram,
 	nfsv4stateid_t stateid;
 	nfsquad_t clientid;
 	u_int64_t len;
+	struct thread *p = curthread;
 
 	NFSM_DISSECT(tl, u_int32_t *, 8 * NFSX_UNSIGNED);
 	i = fxdr_unsigned(int, *(tl + 7));
@@ -2599,7 +2625,7 @@ nfsmout:
  */
 APPLESTATIC int
 nfsrvd_locku(struct nfsrv_descript *nd, __unused int isdgram,
-    vnode_t vp, NFSPROC_T *p, struct nfsexstuff *exp)
+    vnode_t vp, struct nfsexstuff *exp)
 {
 	u_int32_t *tl;
 	int i;
@@ -2609,6 +2635,7 @@ nfsrvd_locku(struct nfsrv_descript *nd, __unused int isdgram,
 	nfsv4stateid_t stateid;
 	nfsquad_t clientid;
 	u_int64_t len;
+	struct thread *p = curthread;
 
 	NFSM_DISSECT(tl, u_int32_t *, 6 * NFSX_UNSIGNED + NFSX_STATEID);
 	stp = malloc(sizeof (struct nfsstate),
@@ -2714,13 +2741,12 @@ nfsmout:
  */
 APPLESTATIC int
 nfsrvd_open(struct nfsrv_descript *nd, __unused int isdgram,
-    vnode_t dp, vnode_t *vpp, __unused fhandle_t *fhp, NFSPROC_T *p,
-    struct nfsexstuff *exp)
+    vnode_t dp, vnode_t *vpp, __unused fhandle_t *fhp, struct nfsexstuff *exp)
 {
 	u_int32_t *tl;
 	int i, retext;
 	struct nfsstate *stp = NULL;
-	int error = 0, create, claim, exclusive_flag = 0;
+	int error = 0, create, claim, exclusive_flag = 0, override;
 	u_int32_t rflags = NFSV4OPEN_LOCKTYPEPOSIX, acemask;
 	int how = NFSCREATE_UNCHECKED;
 	int32_t cverf[2], tverf[2] = { 0, 0 };
@@ -2733,6 +2759,7 @@ nfsrvd_open(struct nfsrv_descript *nd, __unused int isdgram,
 	char *bufp = NULL;
 	u_long *hashp;
 	NFSACL_T *aclp = NULL;
+	struct thread *p = curthread;
 
 #ifdef NFS4_ACL_EXTATTR_NAME
 	aclp = acl_alloc(M_WAITOK);
@@ -2870,7 +2897,7 @@ nfsrvd_open(struct nfsrv_descript *nd, __unused int isdgram,
 			NFSM_DISSECT(tl, u_int32_t *, NFSX_VERF);
 			cverf[0] = *tl++;
 			cverf[1] = *tl;
-			error = nfsv4_sattr(nd, vp, &nva, &attrbits, aclp, p);
+			error = nfsv4_sattr(nd, NULL, &nva, &attrbits, aclp, p);
 			if (error != 0)
 				goto nfsmout;
 			if (NFSISSET_ATTRBIT(&attrbits,
@@ -2977,7 +3004,7 @@ nfsrvd_open(struct nfsrv_descript *nd, __unused int isdgram,
 		}
 		nfsvno_open(nd, &named, clientid, &stateid, stp,
 		    &exclusive_flag, &nva, cverf, create, aclp, &attrbits,
-		    nd->nd_cred, p, exp, &vp);
+		    nd->nd_cred, exp, &vp);
 	} else if (claim == NFSV4OPEN_CLAIMPREVIOUS || claim ==
 	    NFSV4OPEN_CLAIMFH) {
 		if (claim == NFSV4OPEN_CLAIMPREVIOUS) {
@@ -3003,7 +3030,7 @@ nfsrvd_open(struct nfsrv_descript *nd, __unused int isdgram,
 		}
 		vp = dp;
 		NFSVOPLOCK(vp, LK_EXCLUSIVE | LK_RETRY);
-		if ((vp->v_iflag & VI_DOOMED) == 0)
+		if (!VN_IS_DOOMED(vp))
 			nd->nd_repstat = nfsrv_opencheck(clientid, &stateid,
 			    stp, vp, nd, p, nd->nd_repstat);
 		else
@@ -3023,15 +3050,38 @@ nfsrvd_open(struct nfsrv_descript *nd, __unused int isdgram,
 		 */
 		nd->nd_repstat = (vp->v_type == VDIR) ? NFSERR_ISDIR : NFSERR_SYMLINK;
 	}
+
+	/*
+	 * If the Open is being done for a file that already exists, apply
+	 * normal permission checking including for the file owner, if
+	 * vfs.nfsd.v4openaccess is set.
+	 * Previously, the owner was always allowed to open the file to
+	 * be consistent with the NFS tradition of always allowing the
+	 * owner of the file to write to the file regardless of permissions.
+	 * It now appears that the Linux client expects the owner
+	 * permissions to be checked for opens that are not creating the
+	 * file.  I believe the correct approach is to use the Access
+	 * operation's results to be consistent with NFSv3, but that is
+	 * not what the current Linux client appears to be doing.
+	 * Since both the Linux and OpenSolaris NFSv4 servers do this check,
+	 * I have enabled it by default.
+	 * If this semantic change causes a problem, it can be disabled by
+	 * setting the sysctl vfs.nfsd.v4openaccess to 0 to re-enable the
+	 * previous semantics.
+	 */
+	if (nfsrv_openaccess && create == NFSV4OPEN_NOCREATE)
+		override = NFSACCCHK_NOOVERRIDE;
+	else
+		override = NFSACCCHK_ALLOWOWNER;
 	if (!nd->nd_repstat && (stp->ls_flags & NFSLCK_WRITEACCESS))
 	    nd->nd_repstat = nfsvno_accchk(vp, VWRITE, nd->nd_cred,
-	        exp, p, NFSACCCHK_ALLOWOWNER, NFSACCCHK_VPISLOCKED, NULL);
+	        exp, p, override, NFSACCCHK_VPISLOCKED, NULL);
 	if (!nd->nd_repstat && (stp->ls_flags & NFSLCK_READACCESS)) {
 	    nd->nd_repstat = nfsvno_accchk(vp, VREAD, nd->nd_cred,
-	        exp, p, NFSACCCHK_ALLOWOWNER, NFSACCCHK_VPISLOCKED, NULL);
+	        exp, p, override, NFSACCCHK_VPISLOCKED, NULL);
 	    if (nd->nd_repstat)
 		nd->nd_repstat = nfsvno_accchk(vp, VEXEC,
-		    nd->nd_cred, exp, p, NFSACCCHK_ALLOWOWNER,
+		    nd->nd_cred, exp, p, override,
 		    NFSACCCHK_VPISLOCKED, NULL);
 	}
 
@@ -3058,7 +3108,7 @@ nfsrvd_open(struct nfsrv_descript *nd, __unused int isdgram,
 	 * (ie: Leave the NFSVOPUNLOCK() about here.)
 	 */
 	if (vp)
-		NFSVOPUNLOCK(vp, 0);
+		NFSVOPUNLOCK(vp);
 	if (stp)
 		free(stp, M_NFSDSTATE);
 	if (!nd->nd_repstat && dirp)
@@ -3170,7 +3220,7 @@ nfsmout:
  */
 APPLESTATIC int
 nfsrvd_close(struct nfsrv_descript *nd, __unused int isdgram,
-    vnode_t vp, NFSPROC_T *p, __unused struct nfsexstuff *exp)
+    vnode_t vp, __unused struct nfsexstuff *exp)
 {
 	u_int32_t *tl;
 	struct nfsstate st, *stp = &st;
@@ -3178,6 +3228,7 @@ nfsrvd_close(struct nfsrv_descript *nd, __unused int isdgram,
 	nfsv4stateid_t stateid;
 	nfsquad_t clientid;
 	struct nfsvattr na;
+	struct thread *p = curthread;
 
 	NFSM_DISSECT(tl, u_int32_t *, NFSX_UNSIGNED + NFSX_STATEID);
 	stp->ls_seq = fxdr_unsigned(u_int32_t, *tl++);
@@ -3250,11 +3301,12 @@ nfsmout:
  */
 APPLESTATIC int
 nfsrvd_delegpurge(struct nfsrv_descript *nd, __unused int isdgram,
-    __unused vnode_t vp, __unused NFSPROC_T *p, __unused struct nfsexstuff *exp)
+    __unused vnode_t vp, __unused struct nfsexstuff *exp)
 {
 	u_int32_t *tl;
 	int error = 0;
 	nfsquad_t clientid;
+	struct thread *p = curthread;
 
 	if (nfs_rootfhset == 0 || nfsd_checkrootexp(nd) != 0) {
 		nd->nd_repstat = NFSERR_WRONGSEC;
@@ -3286,13 +3338,14 @@ nfsmout:
  */
 APPLESTATIC int
 nfsrvd_delegreturn(struct nfsrv_descript *nd, __unused int isdgram,
-    vnode_t vp, NFSPROC_T *p, __unused struct nfsexstuff *exp)
+    vnode_t vp, __unused struct nfsexstuff *exp)
 {
 	u_int32_t *tl;
 	int error = 0, writeacc;
 	nfsv4stateid_t stateid;
 	nfsquad_t clientid;
 	struct nfsvattr na;
+	struct thread *p = curthread;
 
 	NFSM_DISSECT(tl, u_int32_t *, NFSX_STATEID);
 	stateid.seqid = fxdr_unsigned(u_int32_t, *tl++);
@@ -3326,9 +3379,10 @@ nfsmout:
  */
 APPLESTATIC int
 nfsrvd_getfh(struct nfsrv_descript *nd, __unused int isdgram,
-    vnode_t vp, NFSPROC_T *p, __unused struct nfsexstuff *exp)
+    vnode_t vp, __unused struct nfsexstuff *exp)
 {
 	fhandle_t fh;
+	struct thread *p = curthread;
 
 	nd->nd_repstat = nfsvno_getfh(vp, &fh, p);
 	vput(vp);
@@ -3343,13 +3397,14 @@ nfsrvd_getfh(struct nfsrv_descript *nd, __unused int isdgram,
  */
 APPLESTATIC int
 nfsrvd_openconfirm(struct nfsrv_descript *nd, __unused int isdgram,
-    vnode_t vp, NFSPROC_T *p, __unused struct nfsexstuff *exp)
+    vnode_t vp, __unused struct nfsexstuff *exp)
 {
 	u_int32_t *tl;
 	struct nfsstate st, *stp = &st;
 	int error = 0;
 	nfsv4stateid_t stateid;
 	nfsquad_t clientid;
+	struct thread *p = curthread;
 
 	if ((nd->nd_flag & ND_NFSV41) != 0) {
 		nd->nd_repstat = NFSERR_NOTSUPP;
@@ -3396,7 +3451,7 @@ nfsmout:
  */
 APPLESTATIC int
 nfsrvd_opendowngrade(struct nfsrv_descript *nd, __unused int isdgram,
-    vnode_t vp, NFSPROC_T *p, __unused struct nfsexstuff *exp)
+    vnode_t vp, __unused struct nfsexstuff *exp)
 {
 	u_int32_t *tl;
 	int i;
@@ -3404,6 +3459,7 @@ nfsrvd_opendowngrade(struct nfsrv_descript *nd, __unused int isdgram,
 	int error = 0;
 	nfsv4stateid_t stateid;
 	nfsquad_t clientid;
+	struct thread *p = curthread;
 
 	/* opendowngrade can only work on a file object.*/
 	if (vp->v_type != VREG) {
@@ -3506,11 +3562,12 @@ nfsmout:
  */
 APPLESTATIC int
 nfsrvd_renew(struct nfsrv_descript *nd, __unused int isdgram,
-    __unused vnode_t vp, NFSPROC_T *p, __unused struct nfsexstuff *exp)
+    __unused vnode_t vp, __unused struct nfsexstuff *exp)
 {
 	u_int32_t *tl;
 	int error = 0;
 	nfsquad_t clientid;
+	struct thread *p = curthread;
 
 	if ((nd->nd_flag & ND_NFSV41) != 0) {
 		nd->nd_repstat = NFSERR_NOTSUPP;
@@ -3546,7 +3603,7 @@ nfsmout:
  */
 APPLESTATIC int
 nfsrvd_secinfo(struct nfsrv_descript *nd, int isdgram,
-    vnode_t dp, NFSPROC_T *p, struct nfsexstuff *exp)
+    vnode_t dp, struct nfsexstuff *exp)
 {
 	u_int32_t *tl;
 	int len;
@@ -3558,6 +3615,7 @@ nfsrvd_secinfo(struct nfsrv_descript *nd, int isdgram,
 	int error = 0, savflag, i;
 	char *bufp;
 	u_long *hashp;
+	struct thread *p = curthread;
 
 	/*
 	 * All this just to get the export flags for the name.
@@ -3589,7 +3647,7 @@ nfsrvd_secinfo(struct nfsrv_descript *nd, int isdgram,
 	vput(vp);
 	savflag = nd->nd_flag;
 	if (!nd->nd_repstat) {
-		nfsd_fhtovp(nd, &fh, LK_SHARED, &vp, &retnes, NULL, 0, p);
+		nfsd_fhtovp(nd, &fh, LK_SHARED, &vp, &retnes, NULL, 0);
 		if (vp)
 			vput(vp);
 	}
@@ -3649,15 +3707,24 @@ out:
  */
 APPLESTATIC int
 nfsrvd_setclientid(struct nfsrv_descript *nd, __unused int isdgram,
-    __unused vnode_t vp, NFSPROC_T *p, __unused struct nfsexstuff *exp)
+    __unused vnode_t vp, __unused struct nfsexstuff *exp)
 {
 	u_int32_t *tl;
 	int i;
 	int error = 0, idlen;
 	struct nfsclient *clp = NULL;
-	struct sockaddr_in *rad;
-	u_char *verf, *ucp, *ucp2, addrbuf[24];
+#ifdef INET
+	struct sockaddr_in *rin;
+#endif
+#ifdef INET6
+	struct sockaddr_in6 *rin6;
+#endif
+#if defined(INET) || defined(INET6)
+	u_char *ucp, *ucp2;
+#endif
+	u_char *verf, *addrbuf;
 	nfsquad_t clientid, confirm;
+	struct thread *p = curthread;
 
 	if ((nd->nd_flag & ND_NFSV41) != 0) {
 		nd->nd_repstat = NFSERR_NOTSUPP;
@@ -3683,9 +3750,9 @@ nfsrvd_setclientid(struct nfsrv_descript *nd, __unused int isdgram,
 	clp->lc_stateid = malloc(sizeof(struct nfsstatehead) *
 	    nfsrv_statehashsize, M_NFSDCLIENT, M_WAITOK);
 	NFSINITSOCKMUTEX(&clp->lc_req.nr_mtx);
-	clp->lc_req.nr_nam = malloc(sizeof(*clp->lc_req.nr_nam), M_SONAME,
+	/* Allocated large enough for an AF_INET or AF_INET6 socket. */
+	clp->lc_req.nr_nam = malloc(sizeof(struct sockaddr_in6), M_SONAME,
 	    M_WAITOK | M_ZERO);
-	NFSSOCKADDRSIZE(clp->lc_req.nr_nam, sizeof (struct sockaddr_in));
 	clp->lc_req.nr_cred = NULL;
 	NFSBCOPY(verf, clp->lc_verf, NFSX_VERF);
 	clp->lc_idlen = idlen;
@@ -3727,17 +3794,46 @@ nfsrvd_setclientid(struct nfsrv_descript *nd, __unused int isdgram,
 	 */
 	nd->nd_repstat = nfsrv_setclient(nd, &clp, &clientid, &confirm, p);
 	if (nd->nd_repstat == NFSERR_CLIDINUSE) {
-		if (clp->lc_flags & LCL_TCPCALLBACK)
-			(void) nfsm_strtom(nd, "tcp", 3);
-		else 
-			(void) nfsm_strtom(nd, "udp", 3);
-		rad = NFSSOCKADDR(clp->lc_req.nr_nam, struct sockaddr_in *);
-		ucp = (u_char *)&rad->sin_addr.s_addr;
-		ucp2 = (u_char *)&rad->sin_port;
-		sprintf(addrbuf, "%d.%d.%d.%d.%d.%d", ucp[0] & 0xff,
-		    ucp[1] & 0xff, ucp[2] & 0xff, ucp[3] & 0xff,
-		    ucp2[0] & 0xff, ucp2[1] & 0xff);
+		/*
+		 * 8 is the maximum length of the port# string.
+		 */
+		addrbuf = malloc(INET6_ADDRSTRLEN + 8, M_TEMP, M_WAITOK);
+		switch (clp->lc_req.nr_nam->sa_family) {
+#ifdef INET
+		case AF_INET:
+			if (clp->lc_flags & LCL_TCPCALLBACK)
+				(void) nfsm_strtom(nd, "tcp", 3);
+			else 
+				(void) nfsm_strtom(nd, "udp", 3);
+			rin = (struct sockaddr_in *)clp->lc_req.nr_nam;
+			ucp = (u_char *)&rin->sin_addr.s_addr;
+			ucp2 = (u_char *)&rin->sin_port;
+			sprintf(addrbuf, "%d.%d.%d.%d.%d.%d", ucp[0] & 0xff,
+			    ucp[1] & 0xff, ucp[2] & 0xff, ucp[3] & 0xff,
+			    ucp2[0] & 0xff, ucp2[1] & 0xff);
+			break;
+#endif
+#ifdef INET6
+		case AF_INET6:
+			if (clp->lc_flags & LCL_TCPCALLBACK)
+				(void) nfsm_strtom(nd, "tcp6", 4);
+			else 
+				(void) nfsm_strtom(nd, "udp6", 4);
+			rin6 = (struct sockaddr_in6 *)clp->lc_req.nr_nam;
+			ucp = inet_ntop(AF_INET6, &rin6->sin6_addr, addrbuf,
+			    INET6_ADDRSTRLEN);
+			if (ucp != NULL)
+				i = strlen(ucp);
+			else
+				i = 0;
+			ucp2 = (u_char *)&rin6->sin6_port;
+			sprintf(&addrbuf[i], ".%d.%d", ucp2[0] & 0xff,
+			    ucp2[1] & 0xff);
+			break;
+#endif
+		}
 		(void) nfsm_strtom(nd, addrbuf, strlen(addrbuf));
+		free(addrbuf, M_TEMP);
 	}
 	if (clp) {
 		free(clp->lc_req.nr_nam, M_SONAME);
@@ -3772,12 +3868,13 @@ nfsmout:
  */
 APPLESTATIC int
 nfsrvd_setclientidcfrm(struct nfsrv_descript *nd,
-    __unused int isdgram, __unused vnode_t vp, NFSPROC_T *p,
+    __unused int isdgram, __unused vnode_t vp,
     __unused struct nfsexstuff *exp)
 {
 	u_int32_t *tl;
 	int error = 0;
 	nfsquad_t clientid, confirm;
+	struct thread *p = curthread;
 
 	if ((nd->nd_flag & ND_NFSV41) != 0) {
 		nd->nd_repstat = NFSERR_NOTSUPP;
@@ -3809,13 +3906,14 @@ nfsmout:
  */
 APPLESTATIC int
 nfsrvd_verify(struct nfsrv_descript *nd, int isdgram,
-    vnode_t vp, NFSPROC_T *p, __unused struct nfsexstuff *exp)
+    vnode_t vp, __unused struct nfsexstuff *exp)
 {
 	int error = 0, ret, fhsize = NFSX_MYFH;
 	struct nfsvattr nva;
 	struct statfs *sf;
 	struct nfsfsinfo fs;
 	fhandle_t fh;
+	struct thread *p = curthread;
 
 	sf = malloc(sizeof(struct statfs), M_STATFS, M_WAITOK);
 	nd->nd_repstat = nfsvno_getattr(vp, &nva, nd, p, 1, NULL);
@@ -3849,7 +3947,7 @@ nfsrvd_verify(struct nfsrv_descript *nd, int isdgram,
 APPLESTATIC int
 nfsrvd_openattr(struct nfsrv_descript *nd, __unused int isdgram,
     vnode_t dp, __unused vnode_t *vpp, __unused fhandle_t *fhp,
-    __unused NFSPROC_T *p, __unused struct nfsexstuff *exp)
+    __unused struct nfsexstuff *exp)
 {
 	u_int32_t *tl;
 	int error = 0, createdir __unused;
@@ -3868,12 +3966,13 @@ nfsmout:
  */
 APPLESTATIC int
 nfsrvd_releaselckown(struct nfsrv_descript *nd, __unused int isdgram,
-    __unused vnode_t vp, NFSPROC_T *p, __unused struct nfsexstuff *exp)
+    __unused vnode_t vp, __unused struct nfsexstuff *exp)
 {
 	u_int32_t *tl;
 	struct nfsstate *stp = NULL;
 	int error = 0, len;
 	nfsquad_t clientid;
+	struct thread *p = curthread;
 
 	if ((nd->nd_flag & ND_NFSV41) != 0) {
 		nd->nd_repstat = NFSERR_NOTSUPP;
@@ -3928,7 +4027,7 @@ nfsmout:
  */
 APPLESTATIC int
 nfsrvd_exchangeid(struct nfsrv_descript *nd, __unused int isdgram,
-    __unused vnode_t vp, NFSPROC_T *p, __unused struct nfsexstuff *exp)
+    __unused vnode_t vp, __unused struct nfsexstuff *exp)
 {
 	uint32_t *tl;
 	int error = 0, i, idlen;
@@ -3938,7 +4037,13 @@ nfsrvd_exchangeid(struct nfsrv_descript *nd, __unused int isdgram,
 	uint32_t sp4type, v41flags;
 	uint64_t owner_minor;
 	struct timespec verstime;
-	struct sockaddr_in *sad, *rad;
+#ifdef INET
+	struct sockaddr_in *sin, *rin;
+#endif
+#ifdef INET6
+	struct sockaddr_in6 *sin6, *rin6;
+#endif
+	struct thread *p = curthread;
 
 	if (nfs_rootfhset == 0 || nfsd_checkrootexp(nd) != 0) {
 		nd->nd_repstat = NFSERR_WRONGSEC;
@@ -3960,16 +4065,31 @@ nfsrvd_exchangeid(struct nfsrv_descript *nd, __unused int isdgram,
 	clp->lc_stateid = malloc(sizeof(struct nfsstatehead) *
 	    nfsrv_statehashsize, M_NFSDCLIENT, M_WAITOK);
 	NFSINITSOCKMUTEX(&clp->lc_req.nr_mtx);
-	clp->lc_req.nr_nam = malloc(sizeof(*clp->lc_req.nr_nam), M_SONAME,
+	/* Allocated large enough for an AF_INET or AF_INET6 socket. */
+	clp->lc_req.nr_nam = malloc(sizeof(struct sockaddr_in6), M_SONAME,
 	    M_WAITOK | M_ZERO);
-	NFSSOCKADDRSIZE(clp->lc_req.nr_nam, sizeof (struct sockaddr_in));
-	sad = NFSSOCKADDR(nd->nd_nam, struct sockaddr_in *);
-	rad = NFSSOCKADDR(clp->lc_req.nr_nam, struct sockaddr_in *);
-	rad->sin_family = AF_INET;
-	rad->sin_addr.s_addr = 0;
-	rad->sin_port = 0;
-	if (sad->sin_family == AF_INET)
-		rad->sin_addr.s_addr = sad->sin_addr.s_addr;
+	switch (nd->nd_nam->sa_family) {
+#ifdef INET
+	case AF_INET:
+		rin = (struct sockaddr_in *)clp->lc_req.nr_nam;
+		sin = (struct sockaddr_in *)nd->nd_nam;
+		rin->sin_family = AF_INET;
+		rin->sin_len = sizeof(struct sockaddr_in);
+		rin->sin_port = 0;
+		rin->sin_addr.s_addr = sin->sin_addr.s_addr;
+		break;
+#endif
+#ifdef INET6
+	case AF_INET6:
+		rin6 = (struct sockaddr_in6 *)clp->lc_req.nr_nam;
+		sin6 = (struct sockaddr_in6 *)nd->nd_nam;
+		rin6->sin6_family = AF_INET6;
+		rin6->sin6_len = sizeof(struct sockaddr_in6);
+		rin6->sin6_port = 0;
+		rin6->sin6_addr = sin6->sin6_addr;
+		break;
+#endif
+	}
 	clp->lc_req.nr_cred = NULL;
 	NFSBCOPY(verf, clp->lc_verf, NFSX_VERF);
 	clp->lc_idlen = idlen;
@@ -3984,6 +4104,8 @@ nfsrvd_exchangeid(struct nfsrv_descript *nd, __unused int isdgram,
 			clp->lc_flags |= LCL_GSSPRIVACY;
 	} else
 		clp->lc_flags = LCL_NFSV41;
+	if ((nd->nd_flag & ND_NFSV42) != 0)
+		clp->lc_flags |= LCL_NFSV42;
 	if ((nd->nd_flag & ND_GSS) != 0 && nd->nd_princlen > 0) {
 		clp->lc_flags |= LCL_NAME;
 		clp->lc_namelen = nd->nd_princlen;
@@ -4071,13 +4193,14 @@ nfsmout:
  */
 APPLESTATIC int
 nfsrvd_createsession(struct nfsrv_descript *nd, __unused int isdgram,
-    __unused vnode_t vp, NFSPROC_T *p, __unused struct nfsexstuff *exp)
+    __unused vnode_t vp, __unused struct nfsexstuff *exp)
 {
 	uint32_t *tl;
 	int error = 0;
 	nfsquad_t clientid, confirm;
 	struct nfsdsession *sep = NULL;
 	uint32_t rdmacnt;
+	struct thread *p = curthread;
 
 	if (nfs_rootfhset == 0 || nfsd_checkrootexp(nd) != 0) {
 		nd->nd_repstat = NFSERR_WRONGSEC;
@@ -4183,11 +4306,12 @@ nfsmout:
  */
 APPLESTATIC int
 nfsrvd_sequence(struct nfsrv_descript *nd, __unused int isdgram,
-    __unused vnode_t vp, __unused NFSPROC_T *p, __unused struct nfsexstuff *exp)
+    __unused vnode_t vp, __unused struct nfsexstuff *exp)
 {
 	uint32_t *tl;
 	uint32_t highest_slotid, sequenceid, sflags, target_highest_slotid;
 	int cache_this, error = 0;
+	struct thread *p = curthread;
 
 	if (nfs_rootfhset == 0 || nfsd_checkrootexp(nd) != 0) {
 		nd->nd_repstat = NFSERR_WRONGSEC;
@@ -4226,7 +4350,7 @@ nfsmout:
  */
 APPLESTATIC int
 nfsrvd_reclaimcomplete(struct nfsrv_descript *nd, __unused int isdgram,
-    __unused vnode_t vp, __unused NFSPROC_T *p, __unused struct nfsexstuff *exp)
+    __unused vnode_t vp, __unused struct nfsexstuff *exp)
 {
 	uint32_t *tl;
 	int error = 0, onefs;
@@ -4259,11 +4383,12 @@ nfsmout:
  */
 APPLESTATIC int
 nfsrvd_destroyclientid(struct nfsrv_descript *nd, __unused int isdgram,
-    __unused vnode_t vp, NFSPROC_T *p, __unused struct nfsexstuff *exp)
+    __unused vnode_t vp, __unused struct nfsexstuff *exp)
 {
 	uint32_t *tl;
 	nfsquad_t clientid;
 	int error = 0;
+	struct thread *p = curthread;
 
 	if (nfs_rootfhset == 0 || nfsd_checkrootexp(nd) != 0) {
 		nd->nd_repstat = NFSERR_WRONGSEC;
@@ -4283,7 +4408,7 @@ nfsmout:
  */
 APPLESTATIC int
 nfsrvd_bindconnsess(struct nfsrv_descript *nd, __unused int isdgram,
-    __unused vnode_t vp, NFSPROC_T *p, __unused struct nfsexstuff *exp)
+    __unused vnode_t vp, __unused struct nfsexstuff *exp)
 {
 	uint32_t *tl;
 	uint8_t sessid[NFSX_V4SESSIONID];
@@ -4322,7 +4447,7 @@ nfsmout:
  */
 APPLESTATIC int
 nfsrvd_destroysession(struct nfsrv_descript *nd, __unused int isdgram,
-    __unused vnode_t vp, __unused NFSPROC_T *p, __unused struct nfsexstuff *exp)
+    __unused vnode_t vp, __unused struct nfsexstuff *exp)
 {
 	uint8_t *cp, sessid[NFSX_V4SESSIONID];
 	int error = 0;
@@ -4344,11 +4469,12 @@ nfsmout:
  */
 APPLESTATIC int
 nfsrvd_freestateid(struct nfsrv_descript *nd, __unused int isdgram,
-    __unused vnode_t vp, NFSPROC_T *p, __unused struct nfsexstuff *exp)
+    __unused vnode_t vp, __unused struct nfsexstuff *exp)
 {
 	uint32_t *tl;
 	nfsv4stateid_t stateid;
 	int error = 0;
+	struct thread *p = curthread;
 
 	if (nfs_rootfhset == 0 || nfsd_checkrootexp(nd) != 0) {
 		nd->nd_repstat = NFSERR_WRONGSEC;
@@ -4391,13 +4517,14 @@ nfsmout:
  */
 APPLESTATIC int
 nfsrvd_layoutget(struct nfsrv_descript *nd, __unused int isdgram,
-    vnode_t vp, NFSPROC_T *p, struct nfsexstuff *exp)
+    vnode_t vp, struct nfsexstuff *exp)
 {
 	uint32_t *tl;
 	nfsv4stateid_t stateid;
 	int error = 0, layoutlen, layouttype, iomode, maxcnt, retonclose;
 	uint64_t offset, len, minlen;
 	char *layp;
+	struct thread *p = curthread;
 
 	if (nfs_rootfhset == 0 || nfsd_checkrootexp(nd) != 0) {
 		nd->nd_repstat = NFSERR_WRONGSEC;
@@ -4488,15 +4615,16 @@ nfsmout:
  */
 APPLESTATIC int
 nfsrvd_layoutcommit(struct nfsrv_descript *nd, __unused int isdgram,
-    vnode_t vp, NFSPROC_T *p, struct nfsexstuff *exp)
+    vnode_t vp, struct nfsexstuff *exp)
 {
 	uint32_t *tl;
 	nfsv4stateid_t stateid;
 	int error = 0, hasnewoff, hasnewmtime, layouttype, maxcnt, reclaim;
 	int hasnewsize;
-	uint64_t offset, len, newoff, newsize;
+	uint64_t offset, len, newoff = 0, newsize;
 	struct timespec newmtime;
 	char *layp;
+	struct thread *p = curthread;
 
 	layp = NULL;
 	if (nfs_rootfhset == 0 || nfsd_checkrootexp(nd) != 0) {
@@ -4573,12 +4701,13 @@ nfsmout:
  */
 APPLESTATIC int
 nfsrvd_layoutreturn(struct nfsrv_descript *nd, __unused int isdgram,
-    vnode_t vp, NFSPROC_T *p, struct nfsexstuff *exp)
+    vnode_t vp, struct nfsexstuff *exp)
 {
 	uint32_t *tl, *layp;
 	nfsv4stateid_t stateid;
 	int error = 0, fnd, kind, layouttype, iomode, maxcnt, reclaim;
 	uint64_t offset, len;
+	struct thread *p = curthread;
 
 	layp = NULL;
 	if (nfs_rootfhset == 0 || nfsd_checkrootexp(nd) != 0) {
@@ -4654,11 +4783,234 @@ nfsmout:
 }
 
 /*
+ * nfsv4 layout error service
+ */
+APPLESTATIC int
+nfsrvd_layouterror(struct nfsrv_descript *nd, __unused int isdgram,
+    vnode_t vp, struct nfsexstuff *exp)
+{
+	uint32_t *tl;
+	nfsv4stateid_t stateid;
+	int cnt, error = 0, i, stat;
+	int opnum __unused;
+	char devid[NFSX_V4DEVICEID];
+	uint64_t offset, len;
+
+	if (nfs_rootfhset == 0 || nfsd_checkrootexp(nd) != 0) {
+		nd->nd_repstat = NFSERR_WRONGSEC;
+		goto nfsmout;
+	}
+	NFSM_DISSECT(tl, uint32_t *, 2 * NFSX_HYPER + NFSX_STATEID +
+	    NFSX_UNSIGNED);
+	offset = fxdr_hyper(tl); tl += 2;
+	len = fxdr_hyper(tl); tl += 2;
+	stateid.seqid = fxdr_unsigned(uint32_t, *tl++);
+	NFSBCOPY(tl, stateid.other, NFSX_STATEIDOTHER);
+	tl += (NFSX_STATEIDOTHER / NFSX_UNSIGNED);
+	cnt = fxdr_unsigned(int, *tl);
+	NFSD_DEBUG(4, "layouterror off=%ju len=%ju cnt=%d\n", (uintmax_t)offset,
+	    (uintmax_t)len, cnt);
+	/*
+	 * For the special stateid of other all 0s and seqid == 1, set
+	 * the stateid to the current stateid, if it is set.
+	 */
+	if (stateid.seqid == 1 && stateid.other[0] == 0 &&
+	    stateid.other[1] == 0 && stateid.other[2] == 0) {
+		if ((nd->nd_flag & ND_CURSTATEID) != 0) {
+			stateid = nd->nd_curstateid;
+			stateid.seqid = 0;
+		} else {
+			nd->nd_repstat = NFSERR_BADSTATEID;
+			goto nfsmout;
+		}
+	}
+
+	/*
+	 * Ignore offset, len and stateid for now.
+	 */
+	for (i = 0; i < cnt; i++) {
+		NFSM_DISSECT(tl, uint32_t *, NFSX_V4DEVICEID + 2 *
+		    NFSX_UNSIGNED);
+		NFSBCOPY(tl, devid, NFSX_V4DEVICEID);
+		tl += (NFSX_V4DEVICEID / NFSX_UNSIGNED);
+		stat = fxdr_unsigned(int, *tl++);
+		opnum = fxdr_unsigned(int, *tl);
+		NFSD_DEBUG(4, "nfsrvd_layouterr op=%d stat=%d\n", opnum, stat);
+		/*
+		 * Except for NFSERR_ACCES and NFSERR_STALE errors,
+		 * disable the mirror.
+		 */
+		if (stat != NFSERR_ACCES && stat != NFSERR_STALE)
+			nfsrv_delds(devid, curthread);
+	}
+nfsmout:
+	vput(vp);
+	NFSEXITCODE2(error, nd);
+	return (error);
+}
+
+/*
+ * nfsv4 layout stats service
+ */
+APPLESTATIC int
+nfsrvd_layoutstats(struct nfsrv_descript *nd, __unused int isdgram,
+    vnode_t vp, struct nfsexstuff *exp)
+{
+	uint32_t *tl;
+	nfsv4stateid_t stateid;
+	int cnt, error = 0;
+	int layouttype __unused;
+	char devid[NFSX_V4DEVICEID] __unused;
+	uint64_t offset, len, readcount, readbytes, writecount, writebytes
+	    __unused;
+
+	if (nfs_rootfhset == 0 || nfsd_checkrootexp(nd) != 0) {
+		nd->nd_repstat = NFSERR_WRONGSEC;
+		goto nfsmout;
+	}
+	NFSM_DISSECT(tl, uint32_t *, 6 * NFSX_HYPER + NFSX_STATEID +
+	    NFSX_V4DEVICEID + 2 * NFSX_UNSIGNED);
+	offset = fxdr_hyper(tl); tl += 2;
+	len = fxdr_hyper(tl); tl += 2;
+	stateid.seqid = fxdr_unsigned(uint32_t, *tl++);
+	NFSBCOPY(tl, stateid.other, NFSX_STATEIDOTHER);
+	tl += (NFSX_STATEIDOTHER / NFSX_UNSIGNED);
+	readcount = fxdr_hyper(tl); tl += 2;
+	readbytes = fxdr_hyper(tl); tl += 2;
+	writecount = fxdr_hyper(tl); tl += 2;
+	writebytes = fxdr_hyper(tl); tl += 2;
+	NFSBCOPY(tl, devid, NFSX_V4DEVICEID);
+	tl += (NFSX_V4DEVICEID / NFSX_UNSIGNED);
+	layouttype = fxdr_unsigned(int, *tl++);
+	cnt = fxdr_unsigned(int, *tl);
+	error = nfsm_advance(nd, NFSM_RNDUP(cnt), -1);
+	if (error != 0)
+		goto nfsmout;
+	NFSD_DEBUG(4, "layoutstats cnt=%d\n", cnt);
+	/*
+	 * For the special stateid of other all 0s and seqid == 1, set
+	 * the stateid to the current stateid, if it is set.
+	 */
+	if (stateid.seqid == 1 && stateid.other[0] == 0 &&
+	    stateid.other[1] == 0 && stateid.other[2] == 0) {
+		if ((nd->nd_flag & ND_CURSTATEID) != 0) {
+			stateid = nd->nd_curstateid;
+			stateid.seqid = 0;
+		} else {
+			nd->nd_repstat = NFSERR_BADSTATEID;
+			goto nfsmout;
+		}
+	}
+
+	/*
+	 * No use for the stats for now.
+	 */
+nfsmout:
+	vput(vp);
+	NFSEXITCODE2(error, nd);
+	return (error);
+}
+
+/*
+ * nfsv4 io_advise service
+ */
+APPLESTATIC int
+nfsrvd_ioadvise(struct nfsrv_descript *nd, __unused int isdgram,
+    vnode_t vp, struct nfsexstuff *exp)
+{
+	uint32_t *tl;
+	nfsv4stateid_t stateid;
+	nfsattrbit_t hints;
+	int error = 0, ret;
+	off_t offset, len;
+
+	if (nfs_rootfhset == 0 || nfsd_checkrootexp(nd) != 0) {
+		nd->nd_repstat = NFSERR_WRONGSEC;
+		goto nfsmout;
+	}
+	NFSM_DISSECT(tl, uint32_t *, NFSX_STATEID + 2 * NFSX_HYPER);
+	stateid.seqid = fxdr_unsigned(uint32_t, *tl++);
+	NFSBCOPY(tl, stateid.other, NFSX_STATEIDOTHER);
+	tl += (NFSX_STATEIDOTHER / NFSX_UNSIGNED);
+	offset = fxdr_hyper(tl); tl += 2;
+	len = fxdr_hyper(tl);
+	error = nfsrv_getattrbits(nd, &hints, NULL, NULL);
+	if (error != 0)
+		goto nfsmout;
+	/*
+	 * For the special stateid of other all 0s and seqid == 1, set
+	 * the stateid to the current stateid, if it is set.
+	 */
+	if (stateid.seqid == 1 && stateid.other[0] == 0 &&
+	    stateid.other[1] == 0 && stateid.other[2] == 0) {
+		if ((nd->nd_flag & ND_CURSTATEID) != 0) {
+			stateid = nd->nd_curstateid;
+			stateid.seqid = 0;
+		} else {
+			nd->nd_repstat = NFSERR_BADSTATEID;
+			goto nfsmout;
+		}
+	}
+
+	if (offset < 0) {
+		nd->nd_repstat = NFSERR_INVAL;
+		goto nfsmout;
+	}
+	if (len < 0)
+		len = 0;
+	if (vp->v_type != VREG) {
+		if (vp->v_type == VDIR)
+			nd->nd_repstat = NFSERR_ISDIR;
+		else
+			nd->nd_repstat = NFSERR_WRONGTYPE;
+		goto nfsmout;
+	}
+
+	/*
+	 * For now, we can only handle WILLNEED and DONTNEED and don't use
+	 * the stateid.
+	 */
+	if ((NFSISSET_ATTRBIT(&hints, NFSV4IOHINT_WILLNEED) &&
+	    !NFSISSET_ATTRBIT(&hints, NFSV4IOHINT_DONTNEED)) ||
+	    (NFSISSET_ATTRBIT(&hints, NFSV4IOHINT_DONTNEED) &&
+	    !NFSISSET_ATTRBIT(&hints, NFSV4IOHINT_WILLNEED))) {
+		NFSVOPUNLOCK(vp);
+		if (NFSISSET_ATTRBIT(&hints, NFSV4IOHINT_WILLNEED)) {
+			ret = VOP_ADVISE(vp, offset, len, POSIX_FADV_WILLNEED);
+			NFSZERO_ATTRBIT(&hints);
+			if (ret == 0)
+				NFSSETBIT_ATTRBIT(&hints, NFSV4IOHINT_WILLNEED);
+			else
+				NFSSETBIT_ATTRBIT(&hints, NFSV4IOHINT_NORMAL);
+		} else {
+			ret = VOP_ADVISE(vp, offset, len, POSIX_FADV_DONTNEED);
+			NFSZERO_ATTRBIT(&hints);
+			if (ret == 0)
+				NFSSETBIT_ATTRBIT(&hints, NFSV4IOHINT_DONTNEED);
+			else
+				NFSSETBIT_ATTRBIT(&hints, NFSV4IOHINT_NORMAL);
+		}
+		vrele(vp);
+	} else {
+		NFSZERO_ATTRBIT(&hints);
+		NFSSETBIT_ATTRBIT(&hints, NFSV4IOHINT_NORMAL);
+		vput(vp);
+	}
+	nfsrv_putattrbit(nd, &hints);
+	NFSEXITCODE2(error, nd);
+	return (error);
+nfsmout:
+	vput(vp);
+	NFSEXITCODE2(error, nd);
+	return (error);
+}
+
+/*
  * nfsv4 getdeviceinfo service
  */
 APPLESTATIC int
 nfsrvd_getdevinfo(struct nfsrv_descript *nd, __unused int isdgram,
-    __unused vnode_t vp, NFSPROC_T *p, __unused struct nfsexstuff *exp)
+    __unused vnode_t vp, __unused struct nfsexstuff *exp)
 {
 	uint32_t *tl, maxcnt, notify[NFSV4_NOTIFYBITMAP];
 	int cnt, devaddrlen, error = 0, i, layouttype;
@@ -4730,11 +5082,12 @@ nfsmout:
  */
 APPLESTATIC int
 nfsrvd_teststateid(struct nfsrv_descript *nd, __unused int isdgram,
-    __unused vnode_t vp, NFSPROC_T *p, __unused struct nfsexstuff *exp)
+    __unused vnode_t vp, __unused struct nfsexstuff *exp)
 {
 	uint32_t *tl;
 	nfsv4stateid_t *stateidp = NULL, *tstateidp;
 	int cnt, error = 0, i, ret;
+	struct thread *p = curthread;
 
 	if (nfs_rootfhset == 0 || nfsd_checkrootexp(nd) != 0) {
 		nd->nd_repstat = NFSERR_WRONGSEC;
@@ -4770,11 +5123,745 @@ nfsmout:
 }
 
 /*
+ * nfs allocate service
+ */
+APPLESTATIC int
+nfsrvd_allocate(struct nfsrv_descript *nd, __unused int isdgram,
+    vnode_t vp, struct nfsexstuff *exp)
+{
+	uint32_t *tl;
+	struct nfsvattr forat;
+	int error = 0, forat_ret = 1, gotproxystateid;
+	off_t off, len;
+	struct nfsstate st, *stp = &st;
+	struct nfslock lo, *lop = &lo;
+	nfsv4stateid_t stateid;
+	nfsquad_t clientid;
+	nfsattrbit_t attrbits;
+
+	if (nfs_rootfhset == 0 || nfsd_checkrootexp(nd) != 0) {
+		nd->nd_repstat = NFSERR_WRONGSEC;
+		goto nfsmout;
+	}
+	gotproxystateid = 0;
+	NFSM_DISSECT(tl, uint32_t *, NFSX_STATEID + 2 * NFSX_HYPER);
+	stp->ls_flags = (NFSLCK_CHECK | NFSLCK_WRITEACCESS);
+	lop->lo_flags = NFSLCK_WRITE;
+	stp->ls_ownerlen = 0;
+	stp->ls_op = NULL;
+	stp->ls_uid = nd->nd_cred->cr_uid;
+	stp->ls_stateid.seqid = fxdr_unsigned(u_int32_t, *tl++);
+	clientid.lval[0] = stp->ls_stateid.other[0] = *tl++;
+	clientid.lval[1] = stp->ls_stateid.other[1] = *tl++;
+	if ((nd->nd_flag & ND_IMPLIEDCLID) != 0) {
+		if ((nd->nd_flag & ND_NFSV41) != 0)
+			clientid.qval = nd->nd_clientid.qval;
+		else if (nd->nd_clientid.qval != clientid.qval)
+			printf("EEK2 multiple clids\n");
+	} else {
+		if ((nd->nd_flag & ND_NFSV41) != 0)
+			printf("EEK! no clientid from session\n");
+		nd->nd_flag |= ND_IMPLIEDCLID;
+		nd->nd_clientid.qval = clientid.qval;
+	}
+	stp->ls_stateid.other[2] = *tl++;
+	/*
+	 * Don't allow this to be done for a DS.
+	 */
+	if ((nd->nd_flag & ND_DSSERVER) != 0)
+		nd->nd_repstat = NFSERR_NOTSUPP;
+	/* However, allow the proxy stateid. */
+	if (stp->ls_stateid.seqid == 0xffffffff &&
+	    stp->ls_stateid.other[0] == 0x55555555 &&
+	    stp->ls_stateid.other[1] == 0x55555555 &&
+	    stp->ls_stateid.other[2] == 0x55555555)
+		gotproxystateid = 1;
+	off = fxdr_hyper(tl); tl += 2;
+	lop->lo_first = off;
+	len = fxdr_hyper(tl);
+	lop->lo_end = off + len;
+	/*
+	 * Paranoia, just in case it wraps around, which shouldn't
+	 * ever happen anyhow.
+	 */
+	if (nd->nd_repstat == 0 && (lop->lo_end < lop->lo_first || len <= 0))
+		nd->nd_repstat = NFSERR_INVAL;
+
+	if (nd->nd_repstat == 0 && vnode_vtype(vp) != VREG)
+		nd->nd_repstat = NFSERR_WRONGTYPE;
+	NFSZERO_ATTRBIT(&attrbits);
+	NFSSETBIT_ATTRBIT(&attrbits, NFSATTRBIT_OWNER);
+	forat_ret = nfsvno_getattr(vp, &forat, nd, curthread, 1, &attrbits);
+	if (nd->nd_repstat == 0)
+		nd->nd_repstat = forat_ret;
+	if (nd->nd_repstat == 0 && (forat.na_uid != nd->nd_cred->cr_uid ||
+	     NFSVNO_EXSTRICTACCESS(exp)))
+		nd->nd_repstat = nfsvno_accchk(vp, VWRITE, nd->nd_cred, exp,
+		    curthread, NFSACCCHK_ALLOWOWNER, NFSACCCHK_VPISLOCKED,
+		    NULL);
+	if (nd->nd_repstat == 0 && gotproxystateid == 0)
+		nd->nd_repstat = nfsrv_lockctrl(vp, &stp, &lop, NULL, clientid,
+		    &stateid, exp, nd, curthread);
+
+	if (nd->nd_repstat == 0)
+		nd->nd_repstat = nfsvno_allocate(vp, off, len, nd->nd_cred,
+		    curthread);
+	vput(vp);
+	NFSEXITCODE2(0, nd);
+	return (0);
+nfsmout:
+	vput(vp);
+	NFSEXITCODE2(error, nd);
+	return (error);
+}
+
+/*
+ * nfs copy service
+ */
+APPLESTATIC int
+nfsrvd_copy_file_range(struct nfsrv_descript *nd, __unused int isdgram,
+    vnode_t vp, vnode_t tovp, struct nfsexstuff *exp, struct nfsexstuff *toexp)
+{
+	uint32_t *tl;
+	struct nfsvattr at;
+	int cnt, error = 0, ret;
+	off_t inoff, outoff;
+	uint64_t len;
+	size_t xfer;
+	struct nfsstate inst, outst, *instp = &inst, *outstp = &outst;
+	struct nfslock inlo, outlo, *inlop = &inlo, *outlop = &outlo;
+	nfsquad_t clientid;
+	nfsv4stateid_t stateid;
+	nfsattrbit_t attrbits;
+	void *rl_rcookie, *rl_wcookie;
+
+	rl_rcookie = rl_wcookie = NULL;
+	if (nfs_rootfhset == 0 || nfsd_checkrootexp(nd) != 0) {
+		nd->nd_repstat = NFSERR_WRONGSEC;
+		goto nfsmout;
+	}
+	if (nfsrv_devidcnt > 0) {
+		/*
+		 * For a pNFS server, reply NFSERR_NOTSUPP so that the client
+		 * will do the copy via I/O on the DS(s).
+		 */
+		nd->nd_repstat = NFSERR_NOTSUPP;
+		goto nfsmout;
+	}
+	if (vp == tovp) {
+		/* Copying a byte range within the same file is not allowed. */
+		nd->nd_repstat = NFSERR_INVAL;
+		goto nfsmout;
+	}
+	NFSM_DISSECT(tl, uint32_t *, 2 * NFSX_STATEID + 3 * NFSX_HYPER +
+	    3 * NFSX_UNSIGNED);
+	instp->ls_flags = (NFSLCK_CHECK | NFSLCK_READACCESS);
+	inlop->lo_flags = NFSLCK_READ;
+	instp->ls_ownerlen = 0;
+	instp->ls_op = NULL;
+	instp->ls_uid = nd->nd_cred->cr_uid;
+	instp->ls_stateid.seqid = fxdr_unsigned(uint32_t, *tl++);
+	clientid.lval[0] = instp->ls_stateid.other[0] = *tl++;
+	clientid.lval[1] = instp->ls_stateid.other[1] = *tl++;
+	if ((nd->nd_flag & ND_IMPLIEDCLID) != 0)
+		clientid.qval = nd->nd_clientid.qval;
+	instp->ls_stateid.other[2] = *tl++;
+	outstp->ls_flags = (NFSLCK_CHECK | NFSLCK_WRITEACCESS);
+	outlop->lo_flags = NFSLCK_WRITE;
+	outstp->ls_ownerlen = 0;
+	outstp->ls_op = NULL;
+	outstp->ls_uid = nd->nd_cred->cr_uid;
+	outstp->ls_stateid.seqid = fxdr_unsigned(uint32_t, *tl++);
+	outstp->ls_stateid.other[0] = *tl++;
+	outstp->ls_stateid.other[1] = *tl++;
+	outstp->ls_stateid.other[2] = *tl++;
+	inoff = fxdr_hyper(tl); tl += 2;
+	inlop->lo_first = inoff;
+	outoff = fxdr_hyper(tl); tl += 2;
+	outlop->lo_first = outoff;
+	len = fxdr_hyper(tl); tl += 2;
+	if (len == 0) {
+		/* len == 0 means to EOF. */
+		inlop->lo_end = OFF_MAX;
+		outlop->lo_end = OFF_MAX;
+	} else {
+		inlop->lo_end = inlop->lo_first + len;
+		outlop->lo_end = outlop->lo_first + len;
+	}
+
+	/*
+	 * At this time only consecutive, synchronous copy is supported,
+	 * so ca_consecutive and ca_synchronous can be ignored.
+	 */
+	tl += 2;
+
+	cnt = fxdr_unsigned(int, *tl);
+	if ((nd->nd_flag & ND_DSSERVER) != 0 || cnt != 0)
+		nd->nd_repstat = NFSERR_NOTSUPP;
+	if (nd->nd_repstat == 0 && (inoff > OFF_MAX || outoff > OFF_MAX ||
+	    inlop->lo_end > OFF_MAX || outlop->lo_end > OFF_MAX ||
+	    inlop->lo_end < inlop->lo_first || outlop->lo_end <
+	    outlop->lo_first))
+		nd->nd_repstat = NFSERR_INVAL;
+
+	if (nd->nd_repstat == 0 && vnode_vtype(vp) != VREG)
+		nd->nd_repstat = NFSERR_WRONGTYPE;
+
+	/* Check permissions for the input file. */
+	NFSZERO_ATTRBIT(&attrbits);
+	NFSSETBIT_ATTRBIT(&attrbits, NFSATTRBIT_OWNER);
+	ret = nfsvno_getattr(vp, &at, nd, curthread, 1, &attrbits);
+	if (nd->nd_repstat == 0)
+		nd->nd_repstat = ret;
+	if (nd->nd_repstat == 0 && (at.na_uid != nd->nd_cred->cr_uid ||
+	     NFSVNO_EXSTRICTACCESS(exp)))
+		nd->nd_repstat = nfsvno_accchk(vp, VREAD, nd->nd_cred, exp,
+		    curthread, NFSACCCHK_ALLOWOWNER, NFSACCCHK_VPISLOCKED,
+		    NULL);
+	if (nd->nd_repstat == 0)
+		nd->nd_repstat = nfsrv_lockctrl(vp, &instp, &inlop, NULL,
+		    clientid, &stateid, exp, nd, curthread);
+	NFSVOPUNLOCK(vp);
+	if (nd->nd_repstat != 0)
+		goto out;
+
+	error = NFSVOPLOCK(tovp, LK_SHARED);
+	if (error != 0)
+		goto out;
+	if (vnode_vtype(tovp) != VREG)
+		nd->nd_repstat = NFSERR_WRONGTYPE;
+
+	/* For the output file, we only need the Owner attribute. */
+	ret = nfsvno_getattr(tovp, &at, nd, curthread, 1, &attrbits);
+	if (nd->nd_repstat == 0)
+		nd->nd_repstat = ret;
+	if (nd->nd_repstat == 0 && (at.na_uid != nd->nd_cred->cr_uid ||
+	     NFSVNO_EXSTRICTACCESS(exp)))
+		nd->nd_repstat = nfsvno_accchk(tovp, VWRITE, nd->nd_cred, toexp,
+		    curthread, NFSACCCHK_ALLOWOWNER, NFSACCCHK_VPISLOCKED,
+		    NULL);
+	if (nd->nd_repstat == 0)
+		nd->nd_repstat = nfsrv_lockctrl(tovp, &outstp, &outlop, NULL,
+		    clientid, &stateid, toexp, nd, curthread);
+	NFSVOPUNLOCK(tovp);
+
+	/* Range lock the byte ranges for both invp and outvp. */
+	if (nd->nd_repstat == 0) {
+		for (;;) {
+			if (len == 0) {
+				rl_wcookie = vn_rangelock_wlock(tovp, outoff,
+				    OFF_MAX);
+				rl_rcookie = vn_rangelock_tryrlock(vp, inoff,
+				    OFF_MAX);
+			} else {
+				rl_wcookie = vn_rangelock_wlock(tovp, outoff,
+				    outoff + len);
+				rl_rcookie = vn_rangelock_tryrlock(vp, inoff,
+				    inoff + len);
+			}
+			if (rl_rcookie != NULL)
+				break;
+			vn_rangelock_unlock(tovp, rl_wcookie);
+			if (len == 0)
+				rl_rcookie = vn_rangelock_rlock(vp, inoff,
+				    OFF_MAX);
+			else
+				rl_rcookie = vn_rangelock_rlock(vp, inoff,
+				    inoff + len);
+			vn_rangelock_unlock(vp, rl_rcookie);
+		}
+
+		error = NFSVOPLOCK(vp, LK_SHARED);
+		if (error == 0) {
+			ret = nfsvno_getattr(vp, &at, nd, curthread, 1, NULL);
+			if (ret == 0) {
+				/*
+				 * Since invp is range locked, na_size should
+				 * not change.
+				 */
+				if (len == 0 && at.na_size > inoff) {
+					/*
+					 * If len == 0, set it based on invp's 
+					 * size. If offset is past EOF, just
+					 * leave len == 0.
+					 */
+					len = at.na_size - inoff;
+				} else if (nfsrv_linux42server == 0 &&
+				    inoff + len > at.na_size) {
+					/*
+					 * RFC-7862 says that NFSERR_INVAL must
+					 * be returned when inoff + len exceeds
+					 * the file size, however the NFSv4.2
+					 * Linux client likes to do this, so
+					 * only check if nfsrv_linux42server
+					 * is not set.
+					 */
+					nd->nd_repstat = NFSERR_INVAL;
+				}
+			}
+			NFSVOPUNLOCK(vp);
+			if (ret != 0 && nd->nd_repstat == 0)
+				nd->nd_repstat = ret;
+		} else if (nd->nd_repstat == 0)
+			nd->nd_repstat = error;
+	}
+
+	/*
+	 * Do the actual copy to an upper limit of vfs.nfs.maxcopyrange.
+	 * This limit is applied to ensure that the RPC replies in a
+	 * reasonable time.
+	 */
+	if (len > nfs_maxcopyrange)
+		xfer = nfs_maxcopyrange;
+	else
+		xfer = len;
+	if (nd->nd_repstat == 0) {
+		nd->nd_repstat = vn_copy_file_range(vp, &inoff, tovp, &outoff,
+		    &xfer, 0, nd->nd_cred, nd->nd_cred, NULL);
+		if (nd->nd_repstat == 0)
+			len = xfer;
+	}
+
+	/* Unlock the ranges. */
+	if (rl_rcookie != NULL)
+		vn_rangelock_unlock(vp, rl_rcookie);
+	if (rl_wcookie != NULL)
+		vn_rangelock_unlock(tovp, rl_wcookie);
+
+	if (nd->nd_repstat == 0) {
+		NFSM_BUILD(tl, uint32_t *, 4 * NFSX_UNSIGNED + NFSX_HYPER +
+		    NFSX_VERF);
+		*tl++ = txdr_unsigned(0);	/* No callback ids. */
+		txdr_hyper(len, tl); tl += 2;
+		*tl++ = txdr_unsigned(NFSWRITE_UNSTABLE);
+		*tl++ = txdr_unsigned(nfsboottime.tv_sec);
+		*tl++ = txdr_unsigned(nfsboottime.tv_usec);
+		*tl++ = newnfs_true;
+		*tl = newnfs_true;
+	}
+out:
+	vrele(vp);
+	vrele(tovp);
+	NFSEXITCODE2(error, nd);
+	return (error);
+nfsmout:
+	vput(vp);
+	vrele(tovp);
+	NFSEXITCODE2(error, nd);
+	return (error);
+}
+
+/*
+ * nfs seek service
+ */
+APPLESTATIC int
+nfsrvd_seek(struct nfsrv_descript *nd, __unused int isdgram,
+    vnode_t vp, struct nfsexstuff *exp)
+{
+	uint32_t *tl;
+	struct nfsvattr at;
+	int content, error = 0;
+	off_t off;
+	u_long cmd;
+	nfsattrbit_t attrbits;
+	bool eof;
+
+	if (nfs_rootfhset == 0 || nfsd_checkrootexp(nd) != 0) {
+		nd->nd_repstat = NFSERR_WRONGSEC;
+		goto nfsmout;
+	}
+	NFSM_DISSECT(tl, uint32_t *, NFSX_STATEID + NFSX_HYPER + NFSX_UNSIGNED);
+	/* Ignore the stateid for now. */
+	tl += (NFSX_STATEID / NFSX_UNSIGNED);
+	off = fxdr_hyper(tl); tl += 2;
+	content = fxdr_unsigned(int, *tl);
+	if (content == NFSV4CONTENT_DATA)
+		cmd = FIOSEEKDATA;
+	else if (content == NFSV4CONTENT_HOLE)
+		cmd = FIOSEEKHOLE;
+	else
+		nd->nd_repstat = NFSERR_BADXDR;
+	if (nd->nd_repstat == 0 && vnode_vtype(vp) == VDIR)
+		nd->nd_repstat = NFSERR_ISDIR;
+	if (nd->nd_repstat == 0 && vnode_vtype(vp) != VREG)
+		nd->nd_repstat = NFSERR_WRONGTYPE;
+	if (nd->nd_repstat == 0 && off < 0)
+		nd->nd_repstat = NFSERR_NXIO;
+	if (nd->nd_repstat == 0) {
+		/* Check permissions for the input file. */
+		NFSZERO_ATTRBIT(&attrbits);
+		NFSSETBIT_ATTRBIT(&attrbits, NFSATTRBIT_OWNER);
+		nd->nd_repstat = nfsvno_getattr(vp, &at, nd, curthread, 1,
+		    &attrbits);
+	}
+	if (nd->nd_repstat == 0 && (at.na_uid != nd->nd_cred->cr_uid ||
+	     NFSVNO_EXSTRICTACCESS(exp)))
+		nd->nd_repstat = nfsvno_accchk(vp, VREAD, nd->nd_cred, exp,
+		    curthread, NFSACCCHK_ALLOWOWNER, NFSACCCHK_VPISLOCKED,
+		    NULL);
+	if (nd->nd_repstat != 0)
+		goto nfsmout;
+
+	/* nfsvno_seek() unlocks and vrele()s the vp. */
+	nd->nd_repstat = nfsvno_seek(nd, vp, cmd, &off, content, &eof,
+	    nd->nd_cred, curthread);
+	if (nd->nd_repstat == 0 && eof && content == NFSV4CONTENT_DATA &&
+	    nfsrv_linux42server != 0)
+		nd->nd_repstat = NFSERR_NXIO;
+	if (nd->nd_repstat == 0) {
+		NFSM_BUILD(tl, uint32_t *, NFSX_UNSIGNED + NFSX_HYPER);
+		if (eof)
+			*tl++ = newnfs_true;
+		else
+			*tl++ = newnfs_false;
+		txdr_hyper(off, tl);
+	}
+	NFSEXITCODE2(error, nd);
+	return (error);
+nfsmout:
+	vput(vp);
+	NFSEXITCODE2(error, nd);
+	return (error);
+}
+
+/*
+ * nfs get extended attribute service
+ */
+APPLESTATIC int
+nfsrvd_getxattr(struct nfsrv_descript *nd, __unused int isdgram,
+    vnode_t vp, __unused struct nfsexstuff *exp)
+{
+	uint32_t *tl;
+	struct mbuf *mp = NULL, *mpend = NULL;
+	int error, len;
+	char *name;
+	struct thread *p = curthread;
+
+	error = 0;
+	if (nfs_rootfhset == 0 || nfsd_checkrootexp(nd) != 0) {
+		nd->nd_repstat = NFSERR_WRONGSEC;
+		goto nfsmout;
+	}
+	NFSM_DISSECT(tl, uint32_t *, NFSX_UNSIGNED);
+	len = fxdr_unsigned(int, *tl);
+	if (len <= 0) {
+		nd->nd_repstat = NFSERR_BADXDR;
+		goto nfsmout;
+	}
+	if (len > EXTATTR_MAXNAMELEN) {
+		nd->nd_repstat = NFSERR_NOXATTR;
+		goto nfsmout;
+	}
+	name = malloc(len + 1, M_TEMP, M_WAITOK);
+	nd->nd_repstat = nfsrv_mtostr(nd, name, len);
+	if (nd->nd_repstat == 0)
+		nd->nd_repstat = nfsvno_getxattr(vp, name, nd->nd_maxresp,
+		    nd->nd_cred, p, &mp, &mpend, &len);
+	if (nd->nd_repstat == ENOATTR)
+		nd->nd_repstat = NFSERR_NOXATTR;
+	else if (nd->nd_repstat == EOPNOTSUPP)
+		nd->nd_repstat = NFSERR_NOTSUPP;
+	if (nd->nd_repstat == 0) {
+		NFSM_BUILD(tl, uint32_t *, NFSX_UNSIGNED);
+		*tl = txdr_unsigned(len);
+		if (len > 0) {
+			nd->nd_mb->m_next = mp;
+			nd->nd_mb = mpend;
+			nd->nd_bpos = mtod(mpend, caddr_t) + mpend->m_len;
+		}
+	}
+	free(name, M_TEMP);
+
+nfsmout:
+	if (nd->nd_repstat == 0)
+		nd->nd_repstat = error;
+	vput(vp);
+	NFSEXITCODE2(0, nd);
+	return (0);
+}
+
+/*
+ * nfs set extended attribute service
+ */
+APPLESTATIC int
+nfsrvd_setxattr(struct nfsrv_descript *nd, __unused int isdgram,
+    vnode_t vp, __unused struct nfsexstuff *exp)
+{
+	uint32_t *tl;
+	struct nfsvattr ova, nva;
+	nfsattrbit_t attrbits;
+	int error, len, opt;
+	char *name;
+	size_t siz;
+	struct thread *p = curthread;
+
+	error = 0;
+	name = NULL;
+	if (nfs_rootfhset == 0 || nfsd_checkrootexp(nd) != 0) {
+		nd->nd_repstat = NFSERR_WRONGSEC;
+		goto nfsmout;
+	}
+	NFSM_DISSECT(tl, uint32_t *, 2 * NFSX_UNSIGNED);
+	opt = fxdr_unsigned(int, *tl++);
+	len = fxdr_unsigned(int, *tl);
+	if (len <= 0) {
+		nd->nd_repstat = NFSERR_BADXDR;
+		goto nfsmout;
+	}
+	if (len > EXTATTR_MAXNAMELEN) {
+		nd->nd_repstat = NFSERR_NOXATTR;
+		goto nfsmout;
+	}
+	name = malloc(len + 1, M_TEMP, M_WAITOK);
+	error = nfsrv_mtostr(nd, name, len);
+	if (error != 0)
+		goto nfsmout;
+	NFSM_DISSECT(tl, uint32_t *, NFSX_UNSIGNED);
+	len = fxdr_unsigned(int, *tl);
+	if (len < 0 || len > IOSIZE_MAX) {
+		nd->nd_repstat = NFSERR_XATTR2BIG;
+		goto nfsmout;
+	}
+	switch (opt) {
+	case NFSV4SXATTR_CREATE:
+		error = VOP_GETEXTATTR(vp, EXTATTR_NAMESPACE_USER, name, NULL,
+		    &siz, nd->nd_cred, p);
+		if (error != ENOATTR)
+			nd->nd_repstat = NFSERR_EXIST;
+		error = 0;
+		break;
+	case NFSV4SXATTR_REPLACE:
+		error = VOP_GETEXTATTR(vp, EXTATTR_NAMESPACE_USER, name, NULL,
+		    &siz, nd->nd_cred, p);
+		if (error != 0)
+			nd->nd_repstat = NFSERR_NOXATTR;
+		break;
+	case NFSV4SXATTR_EITHER:
+		break;
+	default:
+		nd->nd_repstat = NFSERR_BADXDR;
+	}
+	if (nd->nd_repstat != 0)
+		goto nfsmout;
+
+	/* Now, do the Set Extended attribute, with Change before and after. */
+	NFSZERO_ATTRBIT(&attrbits);
+	NFSSETBIT_ATTRBIT(&attrbits, NFSATTRBIT_CHANGE);
+	nd->nd_repstat = nfsvno_getattr(vp, &ova, nd, p, 1, &attrbits);
+	if (nd->nd_repstat == 0) {
+		nd->nd_repstat = nfsvno_setxattr(vp, name, len, nd->nd_md,
+		    nd->nd_dpos, nd->nd_cred, p);
+		if (nd->nd_repstat == ENXIO)
+			nd->nd_repstat = NFSERR_XATTR2BIG;
+	}
+	if (nd->nd_repstat == 0 && len > 0)
+		nd->nd_repstat = nfsm_advance(nd, NFSM_RNDUP(len), -1);
+	if (nd->nd_repstat == 0)
+		nd->nd_repstat = nfsvno_getattr(vp, &nva, nd, p, 1, &attrbits);
+	if (nd->nd_repstat == 0) {
+		NFSM_BUILD(tl, uint32_t *, 2 * NFSX_HYPER + NFSX_UNSIGNED);
+		*tl++ = newnfs_true;
+		txdr_hyper(ova.na_filerev, tl); tl += 2;
+		txdr_hyper(nva.na_filerev, tl);
+	}
+
+nfsmout:
+	free(name, M_TEMP);
+	if (nd->nd_repstat == 0)
+		nd->nd_repstat = error;
+	vput(vp);
+	NFSEXITCODE2(0, nd);
+	return (0);
+}
+
+/*
+ * nfs remove extended attribute service
+ */
+APPLESTATIC int
+nfsrvd_rmxattr(struct nfsrv_descript *nd, __unused int isdgram,
+    vnode_t vp, __unused struct nfsexstuff *exp)
+{
+	uint32_t *tl;
+	struct nfsvattr ova, nva;
+	nfsattrbit_t attrbits;
+	int error, len;
+	char *name;
+	struct thread *p = curthread;
+
+	error = 0;
+	name = NULL;
+	if (nfs_rootfhset == 0 || nfsd_checkrootexp(nd) != 0) {
+		nd->nd_repstat = NFSERR_WRONGSEC;
+		goto nfsmout;
+	}
+	NFSM_DISSECT(tl, uint32_t *, NFSX_UNSIGNED);
+	len = fxdr_unsigned(int, *tl);
+	if (len <= 0) {
+		nd->nd_repstat = NFSERR_BADXDR;
+		goto nfsmout;
+	}
+	if (len > EXTATTR_MAXNAMELEN) {
+		nd->nd_repstat = NFSERR_NOXATTR;
+		goto nfsmout;
+	}
+	name = malloc(len + 1, M_TEMP, M_WAITOK);
+	error = nfsrv_mtostr(nd, name, len);
+	if (error != 0)
+		goto nfsmout;
+
+	if ((nd->nd_flag & ND_IMPLIEDCLID) == 0) {
+		printf("EEK! nfsrvd_rmxattr: no implied clientid\n");
+		error = NFSERR_NOXATTR;
+		goto nfsmout;
+	}
+	/*
+	 * Now, do the Remove Extended attribute, with Change before and
+	 * after.
+	*/
+	NFSZERO_ATTRBIT(&attrbits);
+	NFSSETBIT_ATTRBIT(&attrbits, NFSATTRBIT_CHANGE);
+	nd->nd_repstat = nfsvno_getattr(vp, &ova, nd, p, 1, &attrbits);
+	if (nd->nd_repstat == 0) {
+		nd->nd_repstat = nfsvno_rmxattr(nd, vp, name, nd->nd_cred, p);
+		if (nd->nd_repstat == ENOATTR)
+			nd->nd_repstat = NFSERR_NOXATTR;
+	}
+	if (nd->nd_repstat == 0)
+		nd->nd_repstat = nfsvno_getattr(vp, &nva, nd, p, 1, &attrbits);
+	if (nd->nd_repstat == 0) {
+		NFSM_BUILD(tl, uint32_t *, 2 * NFSX_HYPER + NFSX_UNSIGNED);
+		*tl++ = newnfs_true;
+		txdr_hyper(ova.na_filerev, tl); tl += 2;
+		txdr_hyper(nva.na_filerev, tl);
+	}
+
+nfsmout:
+	free(name, M_TEMP);
+	if (nd->nd_repstat == 0)
+		nd->nd_repstat = error;
+	vput(vp);
+	NFSEXITCODE2(0, nd);
+	return (0);
+}
+
+/*
+ * nfs list extended attribute service
+ */
+APPLESTATIC int
+nfsrvd_listxattr(struct nfsrv_descript *nd, __unused int isdgram,
+    vnode_t vp, __unused struct nfsexstuff *exp)
+{
+	uint32_t cnt, *tl, len, len2, i, pos, retlen;
+	int error;
+	uint64_t cookie, cookie2;
+	u_char *buf;
+	bool eof;
+	struct thread *p = curthread;
+
+	error = 0;
+	buf = NULL;
+	if (nfs_rootfhset == 0 || nfsd_checkrootexp(nd) != 0) {
+		nd->nd_repstat = NFSERR_WRONGSEC;
+		goto nfsmout;
+	}
+	NFSM_DISSECT(tl, uint32_t *, NFSX_HYPER + NFSX_UNSIGNED);
+	/*
+	 * The cookie doesn't need to be in net byte order, but FreeBSD
+	 * does so to make it more readable in packet traces.
+	 */
+	cookie = fxdr_hyper(tl); tl += 2;
+	len = fxdr_unsigned(uint32_t, *tl);
+	if (len == 0 || cookie >= IOSIZE_MAX) {
+		nd->nd_repstat = NFSERR_BADXDR;
+		goto nfsmout;
+	}
+	if (len > nd->nd_maxresp - NFS_MAXXDR)
+		len = nd->nd_maxresp - NFS_MAXXDR;
+	len2 = len;
+	nd->nd_repstat = nfsvno_listxattr(vp, cookie, nd->nd_cred, p, &buf,
+	    &len, &eof);
+	if (nd->nd_repstat == EOPNOTSUPP)
+		nd->nd_repstat = NFSERR_NOTSUPP;
+	if (nd->nd_repstat == 0) {
+		cookie2 = cookie + len;
+		if (cookie2 < cookie)
+			nd->nd_repstat = NFSERR_BADXDR;
+	}
+	if (nd->nd_repstat == 0) {
+		/* Now copy the entries out. */
+		retlen = NFSX_HYPER + 2 * NFSX_UNSIGNED;
+		if (len == 0 && retlen <= len2) {
+			/* The cookie was at eof. */
+			NFSM_BUILD(tl, uint32_t *, NFSX_HYPER + 2 *
+			    NFSX_UNSIGNED);
+			txdr_hyper(cookie2, tl); tl += 2;
+			*tl++ = txdr_unsigned(0);
+			*tl = newnfs_true;
+			goto nfsmout;
+		}
+
+		/* Sanity check the cookie. */
+		for (pos = 0; pos < len; pos += (i + 1)) {
+			if (pos == cookie)
+				break;
+			i = buf[pos];
+		}
+		if (pos != cookie) {
+			nd->nd_repstat = NFSERR_INVAL;
+			goto nfsmout;
+		}
+
+		/* Loop around copying the entrie(s) out. */
+		cnt = 0;
+		len -= cookie;
+		i = buf[pos];
+		while (i < len && len2 >= retlen + NFSM_RNDUP(i) +
+		    NFSX_UNSIGNED) {
+			if (cnt == 0) {
+				NFSM_BUILD(tl, uint32_t *, NFSX_HYPER +
+				    NFSX_UNSIGNED);
+				txdr_hyper(cookie2, tl); tl += 2;
+			}
+			retlen += nfsm_strtom(nd, &buf[pos + 1], i);
+			len -= (i + 1);
+			pos += (i + 1);
+			i = buf[pos];
+			cnt++;
+		}
+		/*
+		 * eof is set true/false by nfsvno_listxattr(), but if we
+		 * can't copy all entries returned by nfsvno_listxattr(),
+		 * we are not at eof.
+		 */
+		if (len > 0)
+			eof = false;
+		if (cnt > 0) {
+			/* *tl is set above. */
+			*tl = txdr_unsigned(cnt);
+			NFSM_BUILD(tl, uint32_t *, NFSX_UNSIGNED);
+			if (eof)
+				*tl = newnfs_true;
+			else
+				*tl = newnfs_false;
+		} else
+			nd->nd_repstat = NFSERR_TOOSMALL;
+	}
+
+nfsmout:
+	free(buf, M_TEMP);
+	if (nd->nd_repstat == 0)
+		nd->nd_repstat = error;
+	vput(vp);
+	NFSEXITCODE2(0, nd);
+	return (0);
+}
+
+/*
  * nfsv4 service not supported
  */
 APPLESTATIC int
 nfsrvd_notsupp(struct nfsrv_descript *nd, __unused int isdgram,
-    __unused vnode_t vp, __unused NFSPROC_T *p, __unused struct nfsexstuff *exp)
+    __unused vnode_t vp, __unused struct nfsexstuff *exp)
 {
 
 	nd->nd_repstat = NFSERR_NOTSUPP;

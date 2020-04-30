@@ -22,7 +22,7 @@
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2011 Pawel Jakub Dawidek. All rights reserved.
- * Copyright (c) 2011, 2016 by Delphix. All rights reserved.
+ * Copyright (c) 2011, 2017 by Delphix. All rights reserved.
  * Copyright (c) 2013 Martin Matuska <mm@FreeBSD.org>. All rights reserved.
  */
 
@@ -73,6 +73,13 @@ struct libzfs_handle {
 	int libzfs_storeerr; /* stuff error messages into buffer */
 	void *libzfs_sharehdl; /* libshare handle */
 	boolean_t libzfs_mnttab_enable;
+	/*
+	 * We need a lock to handle the case where parallel mount
+	 * threads are populating the mnttab cache simultaneously. The
+	 * lock only protects the integrity of the avl tree, and does
+	 * not protect the contents of the mnttab entries themselves.
+	 */
+	pthread_mutex_t libzfs_mnttab_cache_lock;
 	avl_tree_t libzfs_mnttab_cache;
 	int libzfs_pool_iter;
 	libzfs_fru_t **libzfs_fru_hash;
@@ -130,7 +137,7 @@ typedef enum {
 	SHARED_SMB = 0x4
 } zfs_share_type_t;
 
-#define	CONFIG_BUF_MINSIZE	65536
+#define	CONFIG_BUF_MINSIZE	262144
 
 int zfs_error(libzfs_handle_t *, int, const char *);
 int zfs_error_fmt(libzfs_handle_t *, int, const char *, ...);

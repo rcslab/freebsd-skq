@@ -36,7 +36,9 @@ __FBSDID("$FreeBSD$");
 #include <sys/bus.h>
 #include <sys/cpuset.h>
 #include <sys/kernel.h>
+#include <sys/lock.h>
 #include <sys/module.h>
+#include <sys/mutex.h>
 #include <sys/proc.h>
 #include <sys/rman.h>
 #ifdef SMP
@@ -421,7 +423,7 @@ bcm_lintc_intr(void *arg)
 	reg &= ~BCM_LINTC_PENDING_MASK;
 	if (reg != 0)
 		device_printf(sc->bls_dev, "Unknown interrupt(s) %x\n", reg);
-	else if (num == 0)
+	else if (num == 0 && bootverbose)
 		device_printf(sc->bls_dev, "Spurious interrupt detected\n");
 
 	return (FILTER_HANDLED);
@@ -658,6 +660,8 @@ bcm_lintc_probe(device_t dev)
 
 	if (!ofw_bus_is_compatible(dev, "brcm,bcm2836-l1-intc"))
 		return (ENXIO);
+	if (!ofw_bus_has_prop(dev, "interrupt-controller"))
+		return (ENXIO);
 	device_set_desc(dev, "BCM2836 Interrupt Controller");
 	return (BUS_PROBE_DEFAULT);
 }
@@ -730,12 +734,12 @@ static device_method_t bcm_lintc_methods[] = {
 };
 
 static driver_t bcm_lintc_driver = {
-	"local_intc",
+	"lintc",
 	bcm_lintc_methods,
 	sizeof(struct bcm_lintc_softc),
 };
 
 static devclass_t bcm_lintc_devclass;
 
-EARLY_DRIVER_MODULE(local_intc, simplebus, bcm_lintc_driver, bcm_lintc_devclass,
+EARLY_DRIVER_MODULE(lintc, simplebus, bcm_lintc_driver, bcm_lintc_devclass,
     0, 0, BUS_PASS_INTERRUPT);

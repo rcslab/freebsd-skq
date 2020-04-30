@@ -34,6 +34,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/malloc.h>
 #include <sys/kobj.h>
 #include <sys/mbuf.h>
+#include <sys/sysctl.h>
 
 #include <kgssapi/gssapi.h>
 #include <kgssapi/gssapi_impl.h>
@@ -41,12 +42,8 @@ __FBSDID("$FreeBSD$");
 #include "kcrypto.h"
 
 static struct krb5_encryption_class *krb5_encryption_classes[] = {
-	&krb5_des_encryption_class,
-	&krb5_des3_encryption_class,
 	&krb5_aes128_encryption_class,
 	&krb5_aes256_encryption_class,
-	&krb5_arcfour_encryption_class,
-	&krb5_arcfour_56_encryption_class,
 	NULL
 };
 

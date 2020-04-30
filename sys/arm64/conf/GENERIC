@@ -25,11 +25,11 @@ makeoptions	DEBUG=-g		# Build kernel with gdb(1) debug symbols
 makeoptions	WITH_CTF=1		# Run ctfconvert(1) for DTrace support
 
 options 	SCHED_ULE		# ULE scheduler
+options 	NUMA			# Non-Uniform Memory Architecture support
 options 	PREEMPTION		# Enable kernel thread preemption
 options 	VIMAGE			# Subsystem virtualization, e.g. VNET
 options 	INET			# InterNETworking
 options 	INET6			# IPv6 communications protocols
-options 	IPSEC			# IP (v4/v6) security
 options 	IPSEC_SUPPORT		# Allow kldload of ipsec and tcpmd5
 options 	TCP_HHOOK		# hhook(9) framework for TCP
 options 	TCP_OFFLOAD		# TCP offload
@@ -54,6 +54,7 @@ options 	GEOM_RAID		# Soft RAID functionality.
 options 	GEOM_LABEL		# Provides labelization
 options 	COMPAT_FREEBSD32	# Compatible with FreeBSD/arm
 options 	COMPAT_FREEBSD11	# Compatible with FreeBSD11
+options 	COMPAT_FREEBSD12	# Compatible with FreeBSD12
 options 	SCSI_DELAY=5000		# Delay (in ms) before probing SCSI
 options 	KTRACE			# ktrace(1) support
 options 	STACK			# stack(9) support
@@ -98,19 +99,24 @@ options 	VERBOSE_SYSINIT=0	# Support debug.verbose_sysinit, off by default
 #options 	KCOV			# Kernel Coverage Sanitizer
 # Warning: KUBSAN can result in a kernel too large for loader to load
 #options 	KUBSAN			# Kernel Undefined Behavior Sanitizer
+#options 	KCSAN			# Kernel Concurrency Sanitizer
 
 # Kernel dump features.
 options 	EKCD			# Support for encrypted kernel dumps
 options 	GZIO			# gzip-compressed kernel and user dumps
 options 	ZSTDIO			# zstd-compressed kernel and user dumps
+options 	DEBUGNET		# debugnet networking
 options 	NETDUMP			# netdump(4) client support
 
 # SoC support
 options 	SOC_ALLWINNER_A64
 options 	SOC_ALLWINNER_H5
+options 	SOC_ALLWINNER_H6
 options 	SOC_CAVM_THUNDERX
 options 	SOC_HISI_HI6220
+options 	SOC_INTEL_STRATIX10
 options 	SOC_BRCM_BCM2837
+options 	SOC_BRCM_BCM2838
 options 	SOC_MARVELL_8K
 options 	SOC_ROCKCHIP_RK3328
 options 	SOC_ROCKCHIP_RK3399
@@ -141,6 +147,7 @@ device		cpufreq
 
 # Bus drivers
 device		pci
+device		pci_n1sdp	# ARM Neoverse N1 SDP PCI
 device		al_pci		# Annapurna Alpine PCI-E
 options 	PCI_HP			# PCI-Express native HotPlug
 options 	PCI_IOV		# PCI SR-IOV support
@@ -162,6 +169,13 @@ device  	smc		# SMSC LAN91C111
 device		vnic		# Cavium ThunderX NIC
 device		al_eth		# Annapurna Alpine Ethernet NIC
 device		dwc_rk		# Rockchip Designware
+device		dwc_socfpga	# Altera SOCFPGA Ethernet MAC
+device		genet		# Broadcom on RPi4
+
+# Etherswitch devices
+device		etherswitch	# Enable etherswitch support
+device		miiproxy	# Required for etherswitch
+device		e6000sw		# Marvell mv88e6085 based switches
 
 # Block devices
 device		ahci
@@ -171,6 +185,11 @@ device		da
 # ATA/SCSI peripherals
 device		pass		# Passthrough device (direct ATA/SCSI access)
 
+# NVM Express (NVMe) support
+device		nvme		# base NVMe driver
+options 	NVME_USE_NVD=0	# prefer the cam(4) based nda(4) driver
+device		nvd		# expose NVMe namespaces as disks, depends on nvme
+
 # MMC/SD/SDIO Card slot support
 device		sdhci
 device		sdhci_xenon		# Marvell Xenon SD/MMC controller
@@ -178,6 +197,10 @@ device		aw_mmc			# Allwinner SD/MMC controller
 device		mmc			# mmc/sd bus
 device		mmcsd			# mmc/sd flash cards
 device		dwmmc
+device		dwmmc_altera
+device		dwmmc_hisi
+device		rk_dwmmc
+device		rk_emmcphy
 
 # Serial (COM) ports
 device		uart		# Generic UART driver
@@ -189,14 +212,17 @@ device		uart_snps
 device		pl011
 
 # USB support
-device		aw_ehci			# Allwinner EHCI USB interface (USB 2.0)
 device		aw_usbphy		# Allwinner USB PHY
+device		rk_usb2phy		# Rockchip USB2PHY
+device		rk_typec_phy		# Rockchip TypeC PHY
 device		dwcotg			# DWC OTG controller
 device		ohci			# OHCI USB interface
 device		ehci			# EHCI USB interface (USB 2.0)
 device		ehci_mv			# Marvell EHCI USB interface
-device		xhci			# XHCI PCI->USB interface (USB 3.0)
-device		xhci_mv			# Marvell XHCI USB interface
+device		xhci			# XHCI USB interface (USB 3.0)
+device		dwc3			# Synopsys DWC controller
+device		aw_dwc3			# Allwinner DWC3 controller
+device		rk_dwc3			# Rockchip DWC3 controller
 device		usb			# USB Bus (required)
 device		ukbd			# Keyboard
 device		umass			# Disks/Mass storage - Requires scbus and da
@@ -206,17 +232,28 @@ device		muge
 device		smcphy
 device		smsc
 
+# Sound support
+device sound
+device a10_codec
+
+# DMA controller
+device		a31_dmac
+
 # GPIO / PINCTRL
+device		a37x0_gpio	# Marvell Armada 37x0 GPIO controller
 device		aw_gpio		# Allwinner GPIO controller
+device		dwgpio		# Synopsys DesignWare APB GPIO Controller
 device		gpio
 device		gpioled
 device		fdt_pinctrl
+device		gpioregulator
 device		mv_gpio		# Marvell GPIO controller
 device		mvebu_pinctrl	# Marvell Pinmux Controller
 device		rk_gpio		# RockChip GPIO Controller
 device		rk_pinctrl	# RockChip Pinmux Controller
 
 # I2C
+device		a37x0_iic	# Armada 37x0 I2C controller
 device		aw_rsb		# Allwinner Reduced Serial Bus
 device		bcm2835_bsc	# Broadcom BCM283x I2C bus
 device		iicbus
@@ -224,6 +261,7 @@ device		iic
 device		twsi		# Allwinner I2C controller
 device		rk_i2c		# RockChip I2C controller
 device		syr827		# Silergy SYR827 PMIC
+device		sy8106a		# SY8106A Buck Regulator
 
 # Clock and reset controllers
 device		aw_ccu		# Allwinner clock controller
@@ -232,6 +270,7 @@ device		aw_ccu		# Allwinner clock controller
 device		aw_nmi		# Allwinner NMI support
 device		mv_cp110_icu	# Marvell CP110 ICU
 device		mv_ap806_gicp	# Marvell AP806 GICP
+device		mv_ap806_sei	# Marvell AP806 SEI
 
 # Real-time clock support
 device		aw_rtc		# Allwinner Real-time Clock
@@ -253,11 +292,14 @@ device		mv_thermal	# Marvell Thermal Sensor Controller
 
 # SPI
 device		spibus
+device		a37x0_spi	# Marvell Armada 37x0 SPI Controller
 device		bcm2835_spi	# Broadcom BCM283x SPI bus
+device		rk_spi		# RockChip SPI controller
 
 # PWM
 device		pwm
 device		aw_pwm
+device		rk_pwm
 
 # Console
 device		vt
@@ -269,14 +311,14 @@ device		vt_efifb
 device		evdev			# input event device support
 options		EVDEV_SUPPORT		# evdev support in legacy drivers
 device		uinput			# install /dev/uinput cdev
+device		aw_cir
 
 # Pseudo devices.
 device		crypto		# core crypto support
 device		loop		# Network loopback
-device		random		# Entropy device
 device		ether		# Ethernet support
 device		vlan		# 802.1Q VLAN support
-device		tun		# Packet tunnel.
+device		tuntap		# Packet tunnel.
 device		md		# Memory "disks"
 device		gif		# IPv6 and IPv4 tunneling
 device		firmware	# firmware assist module
@@ -292,6 +334,9 @@ device		regulator
 device		syscon
 device		aw_syscon
 
+# IO Domains
+device		rk_iodomain
+
 # The `bpf' device enables the Berkeley Packet Filter.
 # Be aware of the administrative consequences of enabling this!
 # Note that 'bpf' is required for DHCP.
@@ -304,4 +349,4 @@ options 	FDT
 device		acpi
 
 # DTBs
-makeoptions	MODULES_EXTRA="dtb/allwinner dtb/rockchip dtb/rpi"
+makeoptions	MODULES_EXTRA="dtb/allwinner dtb/mv dtb/rockchip dtb/rpi"

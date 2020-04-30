@@ -10,6 +10,7 @@ TESTS_SUBDIRS+=		${_audit}
 TESTS_SUBDIRS+=		auditpipe
 TESTS_SUBDIRS+=		capsicum
 TESTS_SUBDIRS+=		${_cddl}
+TESTS_SUBDIRS+=		devrandom
 TESTS_SUBDIRS+=		fifo
 TESTS_SUBDIRS+=		file
 TESTS_SUBDIRS+=		fs
@@ -18,7 +19,9 @@ TESTS_SUBDIRS+=		kern
 TESTS_SUBDIRS+=		kqueue
 TESTS_SUBDIRS+=		mac
 TESTS_SUBDIRS+=		mqueue
+TESTS_SUBDIRS+=		net
 TESTS_SUBDIRS+=		netinet
+TESTS_SUBDIRS+=		netinet6
 TESTS_SUBDIRS+=		netipsec
 TESTS_SUBDIRS+=		netmap
 TESTS_SUBDIRS+=		netpfil
@@ -38,5 +41,7 @@ _cddl=	cddl
 
 # Items not integrated into kyua runs by default
 SUBDIR+=		pjdfstest
+
+SUBDIR+=		common
 
 .include <bsd.test.mk>

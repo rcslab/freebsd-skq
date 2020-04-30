@@ -93,7 +93,7 @@ static MALLOC_DEFINE(M_NETGRAPH_IFACE, "netgraph_iface", "netgraph iface node");
 #define M_NETGRAPH_IFACE M_NETGRAPH
 #endif
 
-static SYSCTL_NODE(_net_graph, OID_AUTO, iface, CTLFLAG_RW, 0,
+static SYSCTL_NODE(_net_graph, OID_AUTO, iface, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
     "Point to point netgraph interface");
 VNET_DEFINE_STATIC(int, ng_iface_max_nest) = 2;
 #define	V_ng_iface_max_nest	VNET(ng_iface_max_nest)
@@ -690,6 +690,7 @@ ng_iface_rcvdata(hook_p hook, item_p item)
 	const priv_p priv = NG_NODE_PRIVATE(NG_HOOK_NODE(hook));
 	const iffam_p iffam = get_iffam_from_hook(priv, hook);
 	struct ifnet *const ifp = priv->ifp;
+	struct epoch_tracker et;
 	struct mbuf *m;
 	int isr;
 
@@ -731,7 +732,9 @@ ng_iface_rcvdata(hook_p hook, item_p item)
 	}
 	random_harvest_queue(m, sizeof(*m), RANDOM_NET_NG);
 	M_SETFIB(m, ifp->if_fib);
+	NET_EPOCH_ENTER(et);
 	netisr_dispatch(isr, m);
+	NET_EPOCH_EXIT(et);
 	return (0);
 }
 

@@ -24,6 +24,20 @@ CFLAGS+=	-std=iso9899:1999
 .else # CSTD
 CFLAGS+=	-std=${CSTD}
 .endif # CSTD
+
+.if !empty(CXXSTD)
+CXXFLAGS+=	-std=${CXXSTD}
+.endif
+
+#
+# Turn off -Werror for gcc 4.2.1. The compiler is on the glide path out of the
+# system, and any warnings specific to it are no longer relevant as there are
+# too many false positives.
+#
+.if ${COMPILER_VERSION} <  50000
+NO_WERROR.gcc=	yes
+.endif
+
 # -pedantic is problematic because it also imposes namespace restrictions
 #CFLAGS+=	-pedantic
 .if defined(WARNS)
@@ -80,6 +94,9 @@ CWARNFLAGS.clang+=	-Wno-unused-local-typedef
 .if ${COMPILER_TYPE} == "clang" && ${COMPILER_VERSION} >= 40000
 CWARNFLAGS.clang+=	-Wno-address-of-packed-member
 .endif
+.if ${COMPILER_TYPE} == "gcc" && ${COMPILER_VERSION} >= 90100
+CWARNFLAGS.gcc+=	-Wno-address-of-packed-member
+.endif
 .if ${COMPILER_TYPE} == "clang" && ${COMPILER_VERSION} >= 70000 && \
     ${MACHINE_CPUARCH} == "arm" && !${MACHINE_ARCH:Marmv[67]*}
 CWARNFLAGS.clang+=	-Wno-atomic-alignment
@@ -94,6 +111,11 @@ CWARNFLAGS.clang+=	-Wno-parentheses
 .if defined(NO_WARRAY_BOUNDS)
 CWARNFLAGS.clang+=	-Wno-array-bounds
 .endif # NO_WARRAY_BOUNDS
+.if defined(NO_WMISLEADING_INDENTATION) && \
+    ((${COMPILER_TYPE} == "clang" && ${COMPILER_VERSION} >= 100000) || \
+     (${COMPILER_TYPE} == "gcc" && ${COMPILER_VERSION} >= 60100))
+CWARNFLAGS+=		-Wno-misleading-indentation
+.endif # NO_WMISLEADING_INDENTATION
 .endif # WARNS
 
 .if defined(FORMAT_AUDIT)
@@ -123,6 +145,7 @@ CWARNFLAGS+=	-Wno-error=address			\
 		-Wno-error=bool-compare			\
 		-Wno-error=cast-align			\
 		-Wno-error=clobbered			\
+		-Wno-error=deprecated-declarations	\
 		-Wno-error=enum-compare			\
 		-Wno-error=extra			\
 		-Wno-error=inline			\
@@ -136,8 +159,7 @@ CWARNFLAGS+=	-Wno-error=address			\
 
 # GCC 6.1.0
 .if ${COMPILER_TYPE} == "gcc" && ${COMPILER_VERSION} >= 60100
-CWARNFLAGS+=	-Wno-error=misleading-indentation	\
-		-Wno-error=nonnull-compare		\
+CWARNFLAGS+=	-Wno-error=nonnull-compare		\
 		-Wno-error=shift-negative-value		\
 		-Wno-error=tautological-compare		\
 		-Wno-error=unused-const-variable
@@ -181,13 +203,24 @@ FORMAT_EXTENSIONS=	-fformat-extensions
 CWARNFLAGS+=	-Wno-unknown-pragmas
 .endif # IGNORE_PRAGMA
 
-# We need this conditional because many places that use it
-# only enable it for some files with CLFAGS.$FILE+=${CLANG_NO_IAS}.
-# unconditionally, and can't easily use the CFLAGS.clang=
-# mechanism.
+# This warning is utter nonsense
+CFLAGS+=	-Wno-format-zero-length
+
 .if ${COMPILER_TYPE} == "clang"
-CLANG_NO_IAS=	 -no-integrated-as
+# The headers provided by clang are incompatible with the FreeBSD headers.
+# If the version of clang is not one that has been patched to omit the
+# incompatible headers, we need to compile with -nobuiltininc and add the
+# resource dir to the end of the search paths. This ensures that headers such as
+# immintrin.h are still found but stddef.h, etc. are picked up from FreeBSD.
+#
+# XXX: This is a hack to support complete external installs of clang while
+# we work to synchronize our decleration guards with those in the clang tree.
+.if ${MK_CLANG_BOOTSTRAP:Uno} == "no" && \
+    ${COMPILER_RESOURCE_DIR} != "unknown" && !defined(BOOTSTRAPPING)
+CFLAGS+=-nobuiltininc -idirafter ${COMPILER_RESOURCE_DIR}/include
 .endif
+.endif
+
 CLANG_OPT_SMALL= -mstack-alignment=8 -mllvm -inline-threshold=3\
 		 -mllvm -simplifycfg-dup-ret
 .if ${COMPILER_VERSION} >= 30500 && ${COMPILER_VERSION} < 30700
@@ -196,10 +229,6 @@ CLANG_OPT_SMALL+= -mllvm -enable-gvn=false
 CLANG_OPT_SMALL+= -mllvm -enable-load-pre=false
 .endif
 CFLAGS.clang+=	 -Qunused-arguments
-.if ${MACHINE_CPUARCH} == "sparc64"
-# Don't emit .cfi directives, since we must use GNU as on sparc64, for now.
-CFLAGS.clang+=	 -fno-dwarf2-cfi-asm
-.endif # SPARC64
 # The libc++ headers use c++11 extensions.  These are normally silenced because
 # they are treated as system headers, but we explicitly disable that warning
 # suppression when building the base system to catch bugs in our headers.
@@ -229,17 +258,35 @@ DEBUG_FILES_CFLAGS?= -g
 .if ${MK_WARNS} != "no"
 CFLAGS+=	${CWARNFLAGS:M*} ${CWARNFLAGS.${COMPILER_TYPE}}
 CFLAGS+=	${CWARNFLAGS.${.IMPSRC:T}}
+CXXFLAGS+=	${CXXWARNFLAGS:M*} ${CXXWARNFLAGS.${COMPILER_TYPE}}
+CXXFLAGS+=	${CXXWARNFLAGS.${.IMPSRC:T}}
 .endif
 
 CFLAGS+=	 ${CFLAGS.${COMPILER_TYPE}}
 CXXFLAGS+=	 ${CXXFLAGS.${COMPILER_TYPE}}
 
 AFLAGS+=	${AFLAGS.${.IMPSRC:T}}
+AFLAGS+=	${AFLAGS.${.TARGET:T}}
 ACFLAGS+=	${ACFLAGS.${.IMPSRC:T}}
+ACFLAGS+=	${ACFLAGS.${.TARGET:T}}
 CFLAGS+=	${CFLAGS.${.IMPSRC:T}}
 CXXFLAGS+=	${CXXFLAGS.${.IMPSRC:T}}
 
 LDFLAGS+=	${LDFLAGS.${LINKER_TYPE}}
+
+# Only allow .TARGET when not using PROGS as it has the same syntax
+# per PROG which is ambiguous with this syntax. This is only needed
+# for PROG_VARS vars.
+.if !defined(_RECURSING_PROGS)
+.if ${MK_WARNS} != "no"
+CFLAGS+=	${CWARNFLAGS.${.TARGET:T}}
+.endif
+CFLAGS+=	${CFLAGS.${.TARGET:T}}
+CXXFLAGS+=	${CXXFLAGS.${.TARGET:T}}
+LDFLAGS+=	${LDFLAGS.${.TARGET:T}}
+LDADD+=		${LDADD.${.TARGET:T}}
+LIBADD+=	${LIBADD.${.TARGET:T}}
+.endif
 
 .if defined(SRCTOP)
 # Prevent rebuilding during install to support read-only objdirs.
@@ -263,7 +310,7 @@ PHONY_NOTMAIN = analyze afterdepend afterinstall all beforedepend beforeinstall 
 .NOTMAIN: ${PHONY_NOTMAIN:Nall}
 
 .if ${MK_STAGING} != "no"
-.if defined(_SKIP_BUILD) || (!make(all) && !make(clean*))
+.if defined(_SKIP_BUILD) || (!make(all) && !make(clean*) && !make(*clean))
 _SKIP_STAGING?= yes
 .endif
 .if ${_SKIP_STAGING:Uno} == "yes"

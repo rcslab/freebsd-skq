@@ -1,5 +1,5 @@
 dnl Process this file with autoconf to produce a configure script.
-AC_INIT([file],[5.34],[christos@astron.com])
+AC_INIT([file],[5.38],[christos@astron.com])
 AM_INIT_AUTOMAKE([subdir-objects foreign])
 m4_ifdef([AM_SILENT_RULES], [AM_SILENT_RULES([yes])])
 
@@ -35,12 +35,22 @@ fi], [
 ])
 
 AC_MSG_CHECKING(for zlib support)
-AC_ARG_ENABLE(zlib,
+AC_ARG_ENABLE([zlib],
 [AS_HELP_STRING([--disable-zlib], [disable zlib compression support @<:@default=auto@:>@])])
 AC_MSG_RESULT($enable_zlib)
 
+AC_MSG_CHECKING(for bzlib support)
+AC_ARG_ENABLE([bzlib],
+[AS_HELP_STRING([--disable-bzlib], [disable bz2lib compression support @<:@default=auto@:>@])])
+AC_MSG_RESULT($enable_bzlib)
+
+AC_MSG_CHECKING(for xzlib support)
+AC_ARG_ENABLE([xzlib],
+[AS_HELP_STRING([--disable-xzlib], [disable liblzma/xz compression support @<:@default=auto@:>@])])
+AC_MSG_RESULT($enable_xzlib)
+
 AC_MSG_CHECKING(for libseccomp support)
-AC_ARG_ENABLE(libseccomp,
+AC_ARG_ENABLE([libseccomp],
 [AS_HELP_STRING([--disable-libseccomp], [disable libseccomp sandboxing @<:@default=auto@:>@])])
 AC_MSG_RESULT($enable_libseccomp)
 
@@ -90,25 +100,27 @@ dnl Checks for headers
 AC_HEADER_STDC
 AC_HEADER_MAJOR
 AC_HEADER_SYS_WAIT
-AC_CHECK_HEADERS(stdint.h fcntl.h locale.h stdint.h inttypes.h unistd.h)
-AC_CHECK_HEADERS(stddef.h utime.h wchar.h wctype.h limits.h)
-AC_CHECK_HEADERS(getopt.h err.h xlocale.h signal.h)
-AC_CHECK_HEADERS(sys/mman.h sys/stat.h sys/types.h sys/utime.h sys/time.h)
+AC_CHECK_HEADERS(stdint.h fcntl.h inttypes.h unistd.h)
+AC_CHECK_HEADERS(utime.h wchar.h wctype.h)
+AC_CHECK_HEADERS(getopt.h err.h xlocale.h)
+AC_CHECK_HEADERS(sys/mman.h sys/stat.h sys/types.h sys/utime.h sys/time.h sys/sysmacros.h)
 if test "$enable_zlib" != "no"; then
   AC_CHECK_HEADERS(zlib.h)
 fi
-AC_CHECK_TYPE([sig_t],[AC_DEFINE([HAVE_SIG_T],1,[Have sig_t type])],,[
-#ifdef HAVE_SIGNAL_H
-#include <signal.h>
-#endif])
+if test "$enable_bzlib" != "no"; then
+  AC_CHECK_HEADERS(bzlib.h)
+fi
+if test "$enable_xzlib" != "no"; then
+  AC_CHECK_HEADERS(lzma.h)
+fi
+AC_CHECK_TYPE([sig_t],[AC_DEFINE([HAVE_SIG_T],1,[Have sig_t type])],,[#include <signal.h>])
 
 dnl Checks for typedefs, structures, and compiler characteristics.
-AC_C_CONST
 AC_TYPE_OFF_T
 AC_TYPE_SIZE_T
 AC_CHECK_MEMBERS([struct stat.st_rdev])
 
-AC_CHECK_MEMBERS([struct tm.tm_gmtoff])
+AC_CHECK_MEMBERS([struct tm.tm_gmtoff],,,[#include <time.h>])
 AC_STRUCT_TIMEZONE
 AC_STRUCT_TIMEZONE_DAYLIGHT
 AC_SYS_LARGEFILE
@@ -154,7 +166,7 @@ else
 fi])
 
 dnl Checks for functions
-AC_CHECK_FUNCS(strerror strndup strtoul mkstemp mkostemp utimes utime wcwidth strtof newlocale uselocale freelocale setlocale)
+AC_CHECK_FUNCS(strndup mkstemp mkostemp utimes utime wcwidth strtof newlocale uselocale freelocale memmem)
 
 dnl Provide implementation of some required functions if necessary
 AC_REPLACE_FUNCS(getopt_long asprintf vasprintf strlcpy strlcat getline ctime_r asctime_r localtime_r gmtime_r pread strcasestr fmtcheck dprintf)
@@ -162,6 +174,12 @@ AC_REPLACE_FUNCS(getopt_long asprintf vasprintf strlcpy strlcat getline ctime_r 
 dnl Checks for libraries
 if test "$enable_zlib" != "no"; then
   AC_CHECK_LIB(z, gzopen)
+fi
+if test "$enable_bzlib" != "no"; then
+  AC_CHECK_LIB(bz2, BZ2_bzCompressInit)
+fi
+if test "$enable_xzlib" != "no"; then
+  AC_CHECK_LIB(lzma, lzma_stream_decoder)
 fi
 if test "$enable_libseccomp" != "no"; then
     AC_CHECK_LIB(seccomp, seccomp_init)
@@ -178,8 +196,25 @@ if test "$enable_zlib" = "yes"; then
   if test "$ac_cv_header_zlib_h$ac_cv_lib_z_gzopen" != "yesyes"; then
     AC_MSG_ERROR([zlib support requested but not found])
   fi
-elif  test "$ac_cv_header_zlib_h$ac_cv_lib_z_gzopen" = "yesyes"; then
+fi
+if  test "$ac_cv_header_zlib_h$ac_cv_lib_z_gzopen" = "yesyes"; then
   AC_DEFINE([ZLIBSUPPORT], 1, [Enable zlib compression support])
+fi
+if test "$enable_bzlib" = "yes"; then
+  if test "$ac_cv_header_bzlib_h$ac_cv_lib_bz2_BZ2_bzCompressInit" != "yesyes"; then
+    AC_MSG_ERROR([bzlib support requested but not found])
+  fi
+fi
+if  test "$ac_cv_header_bzlib_h$ac_cv_lib_bz2_BZ2_bzCompressInit" = "yesyes"; then
+  AC_DEFINE([BZLIBSUPPORT], 1, [Enable bzlib compression support])
+fi
+if test "$enable_xzlib" = "yes"; then
+  if test "$ac_cv_header_lzma_h$ac_cv_lib_lzma_lzma_stream_decoder" != "yesyes"; then
+    AC_MSG_ERROR([xzlib support requested but not found])
+  fi
+fi
+if  test "$ac_cv_header_lzma_h$ac_cv_lib_lzma_lzma_stream_decoder" = "yesyes"; then
+  AC_DEFINE([XZLIBSUPPORT], 1, [Enable xzlib compression support])
 fi
 
 AC_CONFIG_FILES([Makefile src/Makefile magic/Makefile tests/Makefile doc/Makefile python/Makefile])

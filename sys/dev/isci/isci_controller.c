@@ -428,7 +428,8 @@ int isci_controller_allocate_memory(struct ISCI_CONTROLLER *controller)
 	uncached_controller_memory->size = sci_mdl_decorator_get_memory_size(
 	    controller->mdl, SCI_MDE_ATTRIBUTE_PHYSICALLY_CONTIGUOUS);
 
-	error = isci_allocate_dma_buffer(device, uncached_controller_memory);
+	error = isci_allocate_dma_buffer(device, controller,
+	    uncached_controller_memory);
 
 	if (error != 0)
 	    return (error);
@@ -443,7 +444,8 @@ int isci_controller_allocate_memory(struct ISCI_CONTROLLER *controller)
 	    SCI_MDE_ATTRIBUTE_CACHEABLE | SCI_MDE_ATTRIBUTE_PHYSICALLY_CONTIGUOUS
 	);
 
-	error = isci_allocate_dma_buffer(device, cached_controller_memory);
+	error = isci_allocate_dma_buffer(device, controller,
+	    cached_controller_memory);
 
 	if (error != 0)
 	    return (error);
@@ -456,7 +458,7 @@ int isci_controller_allocate_memory(struct ISCI_CONTROLLER *controller)
 	request_memory->size =
 	    controller->queue_depth * isci_io_request_get_object_size();
 
-	error = isci_allocate_dma_buffer(device, request_memory);
+	error = isci_allocate_dma_buffer(device, controller, request_memory);
 
 	if (error != 0)
 	    return (error);
@@ -475,10 +477,11 @@ int isci_controller_allocate_memory(struct ISCI_CONTROLLER *controller)
 	 *  will enable better performance than creating the DMA maps every time we get
 	 *  an I/O.
 	 */
-	status = bus_dma_tag_create(bus_get_dma_tag(device), 0x1, 0x0,
-	    BUS_SPACE_MAXADDR, BUS_SPACE_MAXADDR, NULL, NULL,
-	    isci_io_request_get_max_io_size(),
-	    SCI_MAX_SCATTER_GATHER_ELEMENTS, max_segment_size, 0, NULL, NULL,
+	status = bus_dma_tag_create(bus_get_dma_tag(device), 0x1,
+	    ISCI_DMA_BOUNDARY, BUS_SPACE_MAXADDR, BUS_SPACE_MAXADDR,
+	    NULL, NULL, isci_io_request_get_max_io_size(),
+	    SCI_MAX_SCATTER_GATHER_ELEMENTS, max_segment_size, 0,
+	    busdma_lock_mutex, &controller->lock,
 	    &controller->buffer_dma_tag);
 
 	sci_pool_initialize(controller->request_pool);
@@ -580,21 +583,6 @@ void isci_controller_domain_discovery_complete(
 			/* Unfreeze simq to allow initial scan to proceed. */
 			xpt_release_simq(isci_controller->sim, TRUE);
 
-#if __FreeBSD_version < 800000
-			/* When driver is loaded after boot, we need to
-			 *  explicitly rescan here for versions <8.0, because
-			 *  CAM only automatically scans new buses at boot
-			 *  time.
-			 */
-			union ccb *ccb = xpt_alloc_ccb_nowait();
-
-			xpt_create_path(&ccb->ccb_h.path, NULL,
-			    cam_sim_path(isci_controller->sim),
-			    CAM_TARGET_WILDCARD, CAM_LUN_WILDCARD);
-
-			xpt_rescan(ccb);
-#endif
-
 			if (next_index < driver->controller_count) {
 				/*  There are more controllers that need to
 				 *   start.  So start the next one.
@@ -686,9 +674,7 @@ void isci_action(struct cam_sim *sim, union ccb *ccb)
 			cpi->hba_eng_cnt = 0;
 			cpi->max_target = SCI_MAX_REMOTE_DEVICES - 1;
 			cpi->max_lun = ISCI_MAX_LUN;
-#if __FreeBSD_version >= 800102
 			cpi->maxio = isci_io_request_get_max_io_size();
-#endif
 			cpi->unit_number = cam_sim_unit(sim);
 			cpi->bus_id = bus;
 			cpi->initiator_id = SCI_MAX_REMOTE_DEVICES;
@@ -749,11 +735,9 @@ void isci_action(struct cam_sim *sim, union ccb *ccb)
 		}
 		isci_io_request_execute_scsi_io(ccb, controller);
 		break;
-#if __FreeBSD_version >= 900026
 	case XPT_SMP_IO:
 		isci_io_request_execute_smp_io(ccb, controller);
 		break;
-#endif
 	case XPT_SET_TRAN_SETTINGS:
 		ccb->ccb_h.status &= ~CAM_STATUS_MASK;
 		ccb->ccb_h.status |= CAM_REQ_CMP;

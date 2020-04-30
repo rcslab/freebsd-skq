@@ -31,6 +31,9 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
+#include "opt_geom.h"
+#include "opt_zstdio.h"
+
 #include <sys/param.h>
 #include <sys/bio.h>
 #include <sys/endian.h>
@@ -51,9 +54,10 @@ __FBSDID("$FreeBSD$");
 #include <geom/uzip/g_uzip_dapi.h>
 #include <geom/uzip/g_uzip_zlib.h>
 #include <geom/uzip/g_uzip_lzma.h>
+#ifdef ZSTDIO
+#include <geom/uzip/g_uzip_zstd.h>
+#endif
 #include <geom/uzip/g_uzip_wrkthr.h>
-
-#include "opt_geom.h"
 
 MALLOC_DEFINE(M_GEOM_UZIP, "geom_uzip", "GEOM UZIP data structures");
 
@@ -99,7 +103,8 @@ TUNABLE_STR("kern.geom.uzip.noattach_to", g_uzip_noattach_to,
     sizeof(g_uzip_noattach_to));
 
 SYSCTL_DECL(_kern_geom);
-SYSCTL_NODE(_kern_geom, OID_AUTO, uzip, CTLFLAG_RW, 0, "GEOM_UZIP stuff");
+SYSCTL_NODE(_kern_geom, OID_AUTO, uzip, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "GEOM_UZIP stuff");
 static u_int g_uzip_debug = GEOM_UZIP_DBG_DEFAULT;
 SYSCTL_UINT(_kern_geom_uzip, OID_AUTO, debug, CTLFLAG_RWTUN, &g_uzip_debug, 0,
     "Debug level (0-4)");
@@ -139,13 +144,12 @@ static void g_uzip_read_done(struct bio *bp);
 static void g_uzip_do(struct g_uzip_softc *, struct bio *bp);
 
 static void
-g_uzip_softc_free(struct g_uzip_softc *sc, struct g_geom *gp)
+g_uzip_softc_free(struct g_geom *gp)
 {
+	struct g_uzip_softc *sc = gp->softc;
 
-	if (gp != NULL) {
-		DPRINTF(GUZ_DBG_INFO, ("%s: %d requests, %d cached\n",
-		    gp->name, sc->req_total, sc->req_cached));
-	}
+	DPRINTF(GUZ_DBG_INFO, ("%s: %d requests, %d cached\n",
+	    gp->name, sc->req_total, sc->req_cached));
 
 	mtx_lock(&sc->queue_mtx);
 	sc->wrkthr_flags |= GUZ_SHUTDOWN;
@@ -162,6 +166,7 @@ g_uzip_softc_free(struct g_uzip_softc *sc, struct g_geom *gp)
 	mtx_destroy(&sc->last_mtx);
 	free(sc->last_buf, M_GEOM_UZIP);
 	free(sc, M_GEOM_UZIP);
+	gp->softc = NULL;
 }
 
 static int
@@ -503,13 +508,27 @@ g_uzip_orphan(struct g_consumer *cp)
 {
 	struct g_geom *gp;
 
-	g_trace(G_T_TOPOLOGY, "%s(%p/%s)", __func__, cp, cp->provider->name);
 	g_topology_assert();
-
+	G_VALID_CONSUMER(cp);
 	gp = cp->geom;
-	g_uzip_softc_free(gp->softc, gp);
-	gp->softc = NULL;
+	g_trace(G_T_TOPOLOGY, "%s(%p/%s)", __func__, cp, gp->name);
 	g_wither_geom(gp, ENXIO);
+
+	/*
+	 * We can safely free the softc now if there are no accesses,
+	 * otherwise g_uzip_access() will do that after the last close.
+	 */
+	if ((cp->acr + cp->acw + cp->ace) == 0)
+		g_uzip_softc_free(gp);
+}
+
+static void
+g_uzip_spoiled(struct g_consumer *cp)
+{
+
+	g_trace(G_T_TOPOLOGY, "%s(%p/%s)", __func__, cp, cp->geom->name);
+	cp->flags |= G_CF_ORPHAN;
+	g_uzip_orphan(cp);
 }
 
 static int
@@ -517,6 +536,7 @@ g_uzip_access(struct g_provider *pp, int dr, int dw, int de)
 {
 	struct g_geom *gp;
 	struct g_consumer *cp;
+	int error;
 
 	gp = pp->geom;
 	cp = LIST_FIRST(&gp->consumer);
@@ -525,22 +545,17 @@ g_uzip_access(struct g_provider *pp, int dr, int dw, int de)
 	if (cp->acw + dw > 0)
 		return (EROFS);
 
-	return (g_access(cp, dr, dw, de));
-}
+	error = g_access(cp, dr, dw, de);
 
-static void
-g_uzip_spoiled(struct g_consumer *cp)
-{
-	struct g_geom *gp;
+	/*
+	 * Free the softc if all providers have been closed and this geom
+	 * is being removed.
+	 */
+	if (error == 0 && (gp->flags & G_GEOM_WITHER) != 0 &&
+	    (cp->acr + cp->acw + cp->ace) == 0)
+		g_uzip_softc_free(gp);
 
-	G_VALID_CONSUMER(cp);
-	gp = cp->geom;
-	g_trace(G_T_TOPOLOGY, "%s(%p/%s)", __func__, cp, gp->name);
-	g_topology_assert();
-
-	g_uzip_softc_free(gp->softc, gp);
-	gp->softc = NULL;
-	g_wither_geom(gp, ENXIO);
+	return (error);
 }
 
 static int
@@ -594,7 +609,7 @@ g_uzip_parse_toc(struct g_uzip_softc *sc, struct g_provider *pp,
 			 * block whose offset is larger than ours and assume
 			 * it's going to be the next one.
 			 */
-			for (j = i + 1; j < sc->nblocks; j++) {
+			for (j = i + 1; j < sc->nblocks + 1; j++) {
 				if (sc->toc[j].offset > max_offset) {
 					break;
 				}
@@ -664,8 +679,10 @@ g_uzip_taste(struct g_class *mp, struct g_provider *pp, int flags)
 	struct g_uzip_softc *sc;
 	enum {
 		G_UZIP = 1,
-		G_ULZMA
+		G_ULZMA,
+		G_ZSTD,
 	} type;
+	char cloop_version;
 
 	g_trace(G_T_TOPOLOGY, "%s(%s,%s)", __func__, mp->name, pp->name);
 	g_topology_assert();
@@ -712,11 +729,12 @@ g_uzip_taste(struct g_class *mp, struct g_provider *pp, int flags)
 		goto e3;
 	}
 
+	cloop_version = header->magic[CLOOP_OFS_VERSN];
 	switch (header->magic[CLOOP_OFS_COMPR]) {
 	case CLOOP_COMP_LZMA:
 	case CLOOP_COMP_LZMA_DDP:
 		type = G_ULZMA;
-		if (header->magic[CLOOP_OFS_VERSN] < CLOOP_MINVER_LZMA) {
+		if (cloop_version < CLOOP_MINVER_LZMA) {
 			DPRINTF(GUZ_DBG_ERR, ("%s: image version too old\n",
 			    gp->name));
 			goto e3;
@@ -727,13 +745,31 @@ g_uzip_taste(struct g_class *mp, struct g_provider *pp, int flags)
 	case CLOOP_COMP_LIBZ:
 	case CLOOP_COMP_LIBZ_DDP:
 		type = G_UZIP;
-		if (header->magic[CLOOP_OFS_VERSN] < CLOOP_MINVER_ZLIB) {
+		if (cloop_version < CLOOP_MINVER_ZLIB) {
 			DPRINTF(GUZ_DBG_ERR, ("%s: image version too old\n",
 			    gp->name));
 			goto e3;
 		}
 		DPRINTF(GUZ_DBG_INFO, ("%s: GEOM_UZIP_ZLIB image found\n",
 		    gp->name));
+		break;
+	case CLOOP_COMP_ZSTD:
+	case CLOOP_COMP_ZSTD_DDP:
+		if (cloop_version < CLOOP_MINVER_ZSTD) {
+			DPRINTF(GUZ_DBG_ERR, ("%s: image version too old\n",
+			    gp->name));
+			goto e3;
+		}
+#ifdef ZSTDIO
+		DPRINTF(GUZ_DBG_INFO, ("%s: GEOM_UZIP_ZSTD image found.\n",
+		    gp->name));
+		type = G_ZSTD;
+#else
+		DPRINTF(GUZ_DBG_ERR, ("%s: GEOM_UZIP_ZSTD image found, but "
+		    "this kernel was configured with Zstd disabled.\n",
+		    gp->name));
+		goto e3;
+#endif
 		break;
 	default:
 		DPRINTF(GUZ_DBG_ERR, ("%s: unsupported image type\n",
@@ -774,6 +810,13 @@ g_uzip_taste(struct g_class *mp, struct g_provider *pp, int flags)
 	}
 	DPRINTF(GUZ_DBG_INFO, ("%s: %u offsets in the first sector\n",
 	       gp->name, offsets_read));
+
+	/*
+	 * The following invalidates the "header" pointer into the first
+	 * block's "buf."
+	 */
+	header = NULL;
+
 	for (blk = 1; offsets_read < total_offsets; blk++) {
 		uint32_t nread;
 
@@ -805,20 +848,41 @@ g_uzip_taste(struct g_class *mp, struct g_provider *pp, int flags)
 		goto e5;
 	}
 
-	if (type == G_UZIP) {
+	switch (type) {
+	case G_UZIP:
 		sc->dcp = g_uzip_zlib_ctor(sc->blksz);
-	} else {
+		break;
+	case G_ULZMA:
 		sc->dcp = g_uzip_lzma_ctor(sc->blksz);
-	}
-	if (sc->dcp == NULL) {
+		break;
+#ifdef ZSTDIO
+	case G_ZSTD:
+		sc->dcp = g_uzip_zstd_ctor(sc->blksz);
+		break;
+#endif
+	default:
 		goto e5;
 	}
 
 	/*
-	 * "Fake" last+1 block, to make it easier for the TOC parser to
-	 * iterate without making the last element a special case.
+	 * The last+1 block was not always initialized by earlier versions of
+	 * mkuzip(8).  However, *if* it is initialized, the difference between
+	 * its offset and the prior block's offset represents the length of the
+	 * final real compressed block, and this is significant to the
+	 * decompressor.
 	 */
-	sc->toc[sc->nblocks].offset = pp->mediasize;
+	if (cloop_version >= CLOOP_MINVER_RELIABLE_LASTBLKSZ &&
+	    sc->toc[sc->nblocks].offset != 0) {
+		if (sc->toc[sc->nblocks].offset > pp->mediasize) {
+			DPRINTF(GUZ_DBG_ERR,
+			    ("%s: bogus n+1 offset %ju > mediasize %ju\n",
+			     gp->name, (uintmax_t)sc->toc[sc->nblocks].offset,
+			     (uintmax_t)pp->mediasize));
+			goto e6;
+		}
+	} else {
+		sc->toc[sc->nblocks].offset = pp->mediasize;
+	}
 	/* Massage TOC (table of contents), make sure it is sound */
 	if (g_uzip_parse_toc(sc, pp, gp) != 0) {
 		DPRINTF(GUZ_DBG_ERR, ("%s: TOC error\n", gp->name));
@@ -901,10 +965,8 @@ g_uzip_destroy_geom(struct gctl_req *req, struct g_class *mp, struct g_geom *gp)
 	if (pp->acr > 0 || pp->acw > 0 || pp->ace > 0)
 		return (EBUSY);
 
-	g_uzip_softc_free(gp->softc, gp);
-	gp->softc = NULL;
 	g_wither_geom(gp, ENXIO);
-
+	g_uzip_softc_free(gp);
 	return (0);
 }
 
@@ -921,5 +983,6 @@ static struct g_class g_uzip_class = {
 };
 
 DECLARE_GEOM_CLASS(g_uzip_class, g_uzip);
+MODULE_DEPEND(g_uzip, xz, 1, 1, 1);
 MODULE_DEPEND(g_uzip, zlib, 1, 1, 1);
 MODULE_VERSION(geom_uzip, 0);

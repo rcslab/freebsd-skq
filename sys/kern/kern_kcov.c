@@ -41,6 +41,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/conf.h>
+#include <sys/eventhandler.h>
 #include <sys/kcov.h>
 #include <sys/kernel.h>
 #include <sys/limits.h>
@@ -148,7 +149,8 @@ static struct cdevsw kcov_cdevsw = {
 	.d_name =	"kcov",
 };
 
-SYSCTL_NODE(_kern, OID_AUTO, kcov, CTLFLAG_RW, 0, "Kernel coverage");
+SYSCTL_NODE(_kern, OID_AUTO, kcov, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "Kernel coverage");
 
 static u_int kcov_max_entries = KCOV_MAXENTRIES;
 SYSCTL_UINT(_kern_kcov, OID_AUTO, max_entries, CTLFLAG_RW,
@@ -247,11 +249,16 @@ trace_cmp(uint64_t type, uint64_t arg1, uint64_t arg2, uint64_t ret)
 	if (index * 4 + 4 + 1 > info->entries)
 		return (false);
 
-	buf[index * 4 + 1] = type;
-	buf[index * 4 + 2] = arg1;
-	buf[index * 4 + 3] = arg2;
-	buf[index * 4 + 4] = ret;
-	buf[0] = index + 1;
+	while (1) {
+		buf[index * 4 + 1] = type;
+		buf[index * 4 + 2] = arg1;
+		buf[index * 4 + 3] = arg2;
+		buf[index * 4 + 4] = ret;
+
+		if (atomic_cmpset_64(&buf[0], index, index + 1))
+			break;
+		buf[0] = index;
+	}
 
 	return (true);
 }
@@ -315,7 +322,6 @@ kcov_close(struct cdev *dev, int fflag, int devtype, struct thread *td)
 	struct kcov_info *info;
 	int error;
 
-
 	if ((error = devfs_get_cdevpriv((void **)&info)) != 0)
 		return (error);
 
@@ -377,8 +383,9 @@ kcov_alloc(struct kcov_info *info, size_t entries)
 	VM_OBJECT_WLOCK(info->bufobj);
 	for (n = 0; n < pages; n++) {
 		m = vm_page_grab(info->bufobj, n,
-		    VM_ALLOC_NOBUSY | VM_ALLOC_ZERO | VM_ALLOC_WIRED);
-		m->valid = VM_PAGE_BITS_ALL;
+		    VM_ALLOC_ZERO | VM_ALLOC_WIRED);
+		vm_page_valid(m);
+		vm_page_xunbusy(m);
 		pmap_qenter(info->kvaddr + n * PAGE_SIZE, &m, 1);
 	}
 	VM_OBJECT_WUNLOCK(info->bufobj);
@@ -402,10 +409,7 @@ kcov_free(struct kcov_info *info)
 		VM_OBJECT_WLOCK(info->bufobj);
 		m = vm_page_lookup(info->bufobj, 0);
 		for (i = 0; i < info->bufsize / PAGE_SIZE; i++) {
-			vm_page_lock(m);
 			vm_page_unwire_noq(m);
-			vm_page_unlock(m);
-
 			m = vm_page_next(m);
 		}
 		VM_OBJECT_WUNLOCK(info->bufobj);

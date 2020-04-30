@@ -386,8 +386,6 @@ enum pqisrc_ctrl_mode{
 #define IS_AIO_PATH(dev)				(dev->aio_enabled)
 #define IS_RAID_PATH(dev)				(!dev->aio_enabled)
 
-#define DEV_RESET(dvp)                          (dvp->reset_in_progress)
-
 /* SOP data direction flags */
 #define SOP_DATA_DIR_NONE			0x00
 #define SOP_DATA_DIR_FROM_DEVICE		0x01
@@ -858,8 +856,8 @@ typedef struct OS_SPECIFIC {
 	struct cam_path         *path;
 	struct task		event_task;
 	struct cdev             *cdev;
-	struct callout_handle   wellness_periodic;	/* periodic event handling */
-	struct callout_handle   heartbeat_timeout_id;	/* heart beat event handling */
+	struct callout          wellness_periodic;	/* periodic event handling */
+	struct callout          heartbeat_timeout_id;	/* heart beat event handling */
 	eventhandler_tag        eh;
 } OS_SPECIFIC_T;
 

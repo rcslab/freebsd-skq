@@ -34,6 +34,7 @@
 #include <machine/hypervisor.h>
 #include <machine/param.h>
 #include <machine/pte.h>
+#include <machine/vm.h>
 #include <machine/vmparam.h>
 
 #define	VIRT_BITS	48
@@ -42,9 +43,23 @@
 	.globl	kernbase
 	.set	kernbase, KERNBASE
 
-#define	DEVICE_MEM	0
-#define	NORMAL_UNCACHED	1
-#define	NORMAL_MEM	2
+
+/* U-Boot booti related constants. */
+#if defined(LINUX_BOOT_ABI)
+#define FDT_MAGIC		0xEDFE0DD0	/* FDT blob Magic */
+
+#ifndef UBOOT_IMAGE_OFFSET
+#define	UBOOT_IMAGE_OFFSET	0		/* Image offset from start of */
+#endif						/*  2 MiB page */
+
+#ifndef UBOOT_IMAGE_SIZE			/* Total size of image */
+#define	UBOOT_IMAGE_SIZE	 _end - _start
+#endif
+
+#ifndef UBOOT_IMAGE_FLAGS
+#define	UBOOT_IMAGE_FLAGS	0		/* LE kernel, unspecified */
+#endif						/*  page size */
+#endif /* defined(LINUX_BOOT_ABI) */
 
 /*
  * We assume:
@@ -57,6 +72,21 @@
 	.text
 	.globl _start
 _start:
+#if defined(LINUX_BOOT_ABI)
+	/* U-boot image header */
+	b	1f			/* code 0 */
+	.long	0			/* code 1 */
+	.quad	UBOOT_IMAGE_OFFSET	/* Image offset in 2 MiB page, LE */
+	.quad	UBOOT_IMAGE_SIZE	/* Image size, LE */
+	.quad	UBOOT_IMAGE_FLAGS	/* Flags for kernel. LE */
+	.quad 	0			/* Reserved */
+	.quad 	0			/* Reserved */
+	.quad 	0			/* Reserved */
+	.long 	0x644d5241		/* Magic  "ARM\x64", LE */
+	.long 	0			/* Reserved for PE COFF offset*/
+1:
+#endif /* defined(LINUX_BOOT_ABI) */
+
 	/* Drop to EL1 */
 	bl	drop_to_el1
 
@@ -123,17 +153,19 @@ virtdone:
 	sub	x26, x26, x29
 	sub	x24, x24, x29
 
-	sub	sp, sp, #(64 * 4)
+	sub	sp, sp, #BOOTPARAMS_SIZE
 	mov	x0, sp
 
 	/* Degate the delda so it is VA -> PA */
 	neg	x29, x29
 
-	str	x1,  [x0]	/* modulep */
-	str	x26, [x0, 8]	/* kern_l1pt */
-	str	x29, [x0, 16]	/* kern_delta */
-	str	x25, [x0, 24]	/* kern_stack */
-	str	x24, [x0, 32]	/* kern_l0pt */
+	str	x1,  [x0, #BP_MODULEP]
+	str	x26, [x0, #BP_KERN_L1PT]
+	str	x29, [x0, #BP_KERN_DELTA]
+	adr	x25, initstack
+	str	x25, [x0, #BP_KERN_STACK]
+	str	x24, [x0, #BP_KERN_L0PT]
+	str	x23, [x0, #BP_BOOT_EL]
 
 	/* trace back starts here */
 	mov	fp, #0
@@ -182,11 +214,10 @@ ENTRY(mpentry)
 	br	x15
 
 mp_virtdone:
-	ldr	x4, =secondary_stacks
-	mov	x5, #(PAGE_SIZE * KSTACK_PAGES)
-	mul	x5, x0, x5
-	add	sp, x4, x5
-
+	/* Start using the AP boot stack */
+	ldr	x4, =bootstack
+	ldr	x4, [x4]
+	mov	sp, x4
 	b	init_secondary
 END(mpentry)
 #endif
@@ -196,9 +227,9 @@ END(mpentry)
  * registers and drop to EL1.
  */
 drop_to_el1:
-	mrs	x1, CurrentEL
-	lsr	x1, x1, #2
-	cmp	x1, #0x2
+	mrs	x23, CurrentEL
+	lsr	x23, x23, #2
+	cmp	x23, #0x2
 	b.eq	1f
 	ret
 1:
@@ -352,17 +383,56 @@ create_pagetables:
 
 	/* Find the size of the kernel */
 	mov	x6, #(KERNBASE)
+
+#if defined(LINUX_BOOT_ABI)
+	/* X19 is used as 'map FDT data' flag */
+	mov	x19, xzr
+
+	/* No modules or FDT pointer ? */
+	cbz	x0, booti_no_fdt
+
+	/* Test if modulep points to modules descriptor or to FDT */
+	ldr	w8, [x0]
+	ldr	w7, =FDT_MAGIC
+	cmp	w7, w8
+	b.eq	booti_fdt
+#endif
+
+	/* Booted with modules pointer */
 	/* Find modulep - begin */
 	sub	x8, x0, x6
 	/* Add two 2MiB pages for the module data and round up */
 	ldr	x7, =(3 * L2_SIZE - 1)
 	add	x8, x8, x7
+	b	common
+
+#if defined(LINUX_BOOT_ABI)
+booti_fdt:
+	/* Booted by U-Boot booti with FDT data */
+	/* Set 'map FDT data' flag */
+	mov	x19, #1
+
+booti_no_fdt:
+	/* Booted by U-Boot booti without FTD data */
+	/* Find the end - begin */
+	ldr     x7, .Lend
+	sub     x8, x7, x6
+
+	/*
+	 * Add one 2MiB page for copy of FDT data (maximum FDT size),
+	 * one for metadata and round up
+	 */
+	ldr	x7, =(3 * L2_SIZE - 1)
+	add	x8, x8, x7
+#endif
+
+common:
 	/* Get the number of l2 pages to allocate, rounded down */
 	lsr	x10, x8, #(L2_SHIFT)
 
 	/* Create the kernel space L2 table */
 	mov	x6, x26
-	mov	x7, #NORMAL_MEM
+	mov	x7, #VM_MEMATTR_WRITE_BACK
 	mov	x8, #(KERNBASE & L2_BLOCK_MASK)
 	mov	x9, x28
 	bl	build_l2_block_pagetable
@@ -391,22 +461,37 @@ create_pagetables:
 	bl	link_l0_pagetable
 
 	/*
-	 * Build the TTBR0 maps.
+	 * Build the TTBR0 maps.  As TTBR0 maps, they must specify ATTR_S1_nG.
+	 * They are only needed early on, so the VA = PA map is uncached.
 	 */
 	add	x27, x24, #PAGE_SIZE
 
 	mov	x6, x27		/* The initial page table */
 #if defined(SOCDEV_PA) && defined(SOCDEV_VA)
 	/* Create a table for the UART */
-	mov	x7, #DEVICE_MEM
+	mov	x7, #(ATTR_S1_nG | ATTR_S1_IDX(VM_MEMATTR_DEVICE))
 	mov	x8, #(SOCDEV_VA)	/* VA start */
 	mov	x9, #(SOCDEV_PA)	/* PA start */
 	mov	x10, #1
 	bl	build_l1_block_pagetable
 #endif
 
+#if defined(LINUX_BOOT_ABI)
+	/* Map FDT data ? */
+	cbz	x19, 1f
+
+	/* Create the identity mapping for FDT data (2 MiB max) */
+	mov	x7, #(ATTR_S1_nG | ATTR_S1_IDX(VM_MEMATTR_UNCACHEABLE))
+	mov	x9, x0
+	mov	x8, x0		/* VA start (== PA start) */
+	mov	x10, #1
+	bl	build_l1_block_pagetable
+
+1:
+#endif
+
 	/* Create the VA = PA map */
-	mov	x7, #NORMAL_UNCACHED /* Uncached as it's only needed early on */
+	mov	x7, #(ATTR_S1_nG | ATTR_S1_IDX(VM_MEMATTR_UNCACHEABLE))
 	mov	x9, x27
 	mov	x8, x9		/* VA start (== PA start) */
 	mov	x10, #1
@@ -496,7 +581,7 @@ link_l1_pagetable:
 /*
  * Builds count 1 GiB page table entry
  *  x6  = L1 table
- *  x7  = Type (0 = Device, 1 = Normal)
+ *  x7  = Variable lower block attributes
  *  x8  = VA start
  *  x9  = PA start (trashed)
  *  x10 = Entry count
@@ -511,8 +596,7 @@ build_l1_block_pagetable:
 	and	x11, x11, #Ln_ADDR_MASK
 
 	/* Build the L1 block entry */
-	lsl	x12, x7, #2
-	orr	x12, x12, #L1_BLOCK
+	orr	x12, x7, #L1_BLOCK
 	orr	x12, x12, #(ATTR_AF)
 #ifdef SMP
 	orr	x12, x12, ATTR_SH(ATTR_SH_IS)
@@ -555,6 +639,7 @@ build_l2_block_pagetable:
 	lsl	x12, x7, #2
 	orr	x12, x12, #L2_BLOCK
 	orr	x12, x12, #(ATTR_AF)
+	orr	x12, x12, #(ATTR_S1_UXN)
 #ifdef SMP
 	orr	x12, x12, ATTR_SH(ATTR_SH_IS)
 #endif
@@ -597,14 +682,45 @@ start_mmu:
 	msr	mair_el1, x2
 
 	/*
-	 * Setup TCR according to PARange bits from ID_AA64MMFR0_EL1.
+	 * Setup TCR according to the PARange and ASIDBits fields
+	 * from ID_AA64MMFR0_EL1 and the HAFDBS field from the
+	 * ID_AA64MMFR1_EL1.  More precisely, set TCR_EL1.AS
+	 * to 1 only if the ASIDBits field equals 0b0010.
 	 */
 	ldr	x2, tcr
 	mrs	x3, id_aa64mmfr0_el1
-	bfi	x2, x3, #32, #3
+
+	/* Copy the bottom 3 bits from id_aa64mmfr0_el1 into TCR.IPS */
+	bfi	x2, x3, #(TCR_IPS_SHIFT), #(TCR_IPS_WIDTH)
+	and	x3, x3, #(ID_AA64MMFR0_ASIDBits_MASK)
+
+	/* Check if the HW supports 16 bit ASIDS */
+	cmp	x3, #(ID_AA64MMFR0_ASIDBits_16)
+	/* If so x3 == 1, else x3 == 0 */
+	cset	x3, eq
+	/* Set TCR.AS with x3 */
+	bfi	x2, x3, #(TCR_ASID_SHIFT), #(TCR_ASID_WIDTH)
+
+	/*
+	 * Check if the HW supports access flag and dirty state updates,
+	 * and set TCR_EL1.HA and TCR_EL1.HD accordingly.
+	 */
+	mrs	x3, id_aa64mmfr1_el1
+	and	x3, x3, #(ID_AA64MMFR1_HAFDBS_MASK)
+	cmp	x3, #1
+	b.ne	1f
+	orr 	x2, x2, #(TCR_HA)
+	b	2f
+1:
+	cmp	x3, #2
+	b.ne	2f
+	orr 	x2, x2, #(TCR_HA | TCR_HD)
+2:
 	msr	tcr_el1, x2
 
-	/* Setup SCTLR */
+	/*
+	 * Setup SCTLR.
+	 */
 	ldr	x2, sctlr_set
 	ldr	x3, sctlr_clear
 	mrs	x1, sctlr_el1
@@ -617,12 +733,12 @@ start_mmu:
 
 	.align 3
 mair:
-	.quad	MAIR_ATTR(MAIR_DEVICE_nGnRnE, 0) |	\
-		MAIR_ATTR(MAIR_NORMAL_NC, 1) |		\
-		MAIR_ATTR(MAIR_NORMAL_WB, 2) |		\
-		MAIR_ATTR(MAIR_NORMAL_WT, 3)
+	.quad	MAIR_ATTR(MAIR_DEVICE_nGnRnE, VM_MEMATTR_DEVICE)    |	\
+		MAIR_ATTR(MAIR_NORMAL_NC, VM_MEMATTR_UNCACHEABLE)   |	\
+		MAIR_ATTR(MAIR_NORMAL_WB, VM_MEMATTR_WRITE_BACK)    |	\
+		MAIR_ATTR(MAIR_NORMAL_WT, VM_MEMATTR_WRITE_THROUGH)
 tcr:
-	.quad (TCR_TxSZ(64 - VIRT_BITS) | TCR_ASID_16 | TCR_TG1_4K | \
+	.quad (TCR_TxSZ(64 - VIRT_BITS) | TCR_TG1_4K | \
 	    TCR_CACHE_ATTRS | TCR_SMP_ATTRS)
 sctlr_set:
 	/* Bits to set */

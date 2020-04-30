@@ -40,13 +40,13 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
-#include <sys/types.h>
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/sysent.h>
 #include <sys/proc.h>
 #include <sys/signalvar.h>
 #include <sys/exec.h>
+#include <sys/ktr.h>
 #include <sys/imgact.h>
 #include <sys/ucontext.h>
 #include <sys/lock.h>
@@ -147,12 +147,10 @@ sendsig(sig_t catcher, ksiginfo_t *ksi, sigset_t *mask)
 		/* fill siginfo structure */
 		sf.sf_si = ksi->ksi_info;
 		sf.sf_si.si_signo = sig;
-		sf.sf_si.si_code = ksi->ksi_code;
-		sf.sf_si.si_addr = (void*)(intptr_t)regs->badvaddr;
 	} else {
 		/* Old FreeBSD-style arguments. */
 		regs->a1 = ksi->ksi_code;
-		regs->a3 = regs->badvaddr;
+		regs->a3 = (uintptr_t)ksi->ksi_addr;
 		/* sf.sf_ahu.sf_handler = catcher; */
 	}
 
@@ -410,7 +408,7 @@ set_fpregs(struct thread *td, struct fpreg *fpregs)
  * code by the MIPS elf abi).
  */
 void
-exec_setregs(struct thread *td, struct image_params *imgp, u_long stack)
+exec_setregs(struct thread *td, struct image_params *imgp, uintptr_t stack)
 {
 
 	bzero((caddr_t)td->td_frame, sizeof(struct trapframe));

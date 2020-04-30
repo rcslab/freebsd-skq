@@ -127,6 +127,7 @@ void	gv_post_event(struct gv_softc *, int, void *, void *, intmax_t,
 void	gv_worker_exit(struct gv_softc *);
 struct gv_event *gv_get_event(struct gv_softc *);
 void	gv_remove_event(struct gv_softc *, struct gv_event *);
+void	gv_drive_done(struct gv_drive *);
 void	gv_drive_tasted(struct gv_softc *, struct g_provider *);
 void	gv_drive_lost(struct gv_softc *, struct gv_drive *);
 void	gv_setup_objects(struct gv_softc *);
@@ -157,28 +158,9 @@ int	gv_sync_complete(struct gv_plex *, struct bio *);
 
 extern	u_int	g_vinum_debug;
 
-#define	G_VINUM_DEBUG(lvl, ...)	do {					\
-	if (g_vinum_debug >= (lvl)) {					\
-		printf("GEOM_VINUM");					\
-		if (g_vinum_debug > 0)					\
-			printf("[%u]", lvl);				\
-		printf(": ");						\
-		printf(__VA_ARGS__);					\
-		printf("\n");						\
-	}								\
-} while (0)
-
-#define	G_VINUM_LOGREQ(lvl, bp, ...)	do {				\
-	if (g_vinum_debug >= (lvl)) {					\
-		printf("GEOM_VINUM");					\
-		if (g_vinum_debug > 0)					\
-			printf("[%u]", lvl);				\
-		printf(": ");						\
-		printf(__VA_ARGS__);					\
-		printf(" ");						\
-		g_print_bio(bp);					\
-		printf("\n");						\
-	}								\
-} while (0)
+#define	G_VINUM_DEBUG(lvl, ...) \
+    _GEOM_DEBUG("GEOM_VINUM", g_vinum_debug, (lvl), NULL, __VA_ARGS__)
+#define	G_VINUM_LOGREQ(lvl, bp, ...) \
+    _GEOM_DEBUG("GEOM_VINUM", g_vinum_debug, (lvl), (bp), __VA_ARGS__)
 
 #endif /* !_GEOM_VINUM_H_ */

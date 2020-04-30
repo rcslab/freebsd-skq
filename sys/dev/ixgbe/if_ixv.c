@@ -35,6 +35,7 @@
 
 #include "opt_inet.h"
 #include "opt_inet6.h"
+#include "opt_rss.h"
 
 #include "ixgbe.h"
 #include "ifdi_if.h"
@@ -220,7 +221,7 @@ static struct if_shared_ctx ixv_sctx_init = {
 	.isc_vendor_info = ixv_vendor_info_array,
 	.isc_driver_version = ixv_driver_version,
 	.isc_driver = &ixv_if_driver,
-	.isc_flags = IFLIB_TSO_INIT_IP,
+	.isc_flags = IFLIB_IS_VF | IFLIB_TSO_INIT_IP,
 
 	.isc_nrxd_min = {MIN_RXD},
 	.isc_ntxd_min = {MIN_TXD},
@@ -268,7 +269,6 @@ ixv_if_tx_queues_alloc(if_ctx_t ctx, caddr_t *vaddrs, uint64_t *paddrs,
 
 		txr->me = i;
 		txr->adapter =  que->adapter = adapter;
-		adapter->active_queues |= (u64)1 << txr->me;
 
 		/* Allocate report status array */
 		if (!(txr->tx_rsq = (qidx_t *)malloc(sizeof(qidx_t) * scctx->isc_ntxd[0], M_DEVBUF, M_NOWAIT | M_ZERO))) {
@@ -418,8 +418,8 @@ ixv_if_attach_pre(if_ctx_t ctx)
 	/* SYSCTL APIs */
 	SYSCTL_ADD_PROC(device_get_sysctl_ctx(dev),
 	    SYSCTL_CHILDREN(device_get_sysctl_tree(dev)), OID_AUTO, "debug",
-	    CTLTYPE_INT | CTLFLAG_RW, adapter, 0, ixv_sysctl_debug, "I",
-	    "Debug Info");
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_NEEDGIANT,
+	    adapter, 0, ixv_sysctl_debug, "I", "Debug Info");
 
 	/* Determine hardware revision */
 	ixv_identify_hardware(ctx);
@@ -495,7 +495,7 @@ ixv_if_attach_pre(if_ctx_t ctx)
 	scctx->isc_tx_csum_flags = CSUM_IP | CSUM_TCP | CSUM_UDP | CSUM_TSO |
 	    CSUM_IP6_TCP | CSUM_IP6_UDP | CSUM_IP6_TSO;
 	scctx->isc_tx_nsegments = IXGBE_82599_SCATTER;
-	scctx->isc_msix_bar = PCIR_BAR(MSIX_82598_BAR);
+	scctx->isc_msix_bar = pci_msix_table_bar(dev);
 	scctx->isc_tx_tso_segments_max = scctx->isc_tx_nsegments;
 	scctx->isc_tx_tso_size_max = IXGBE_TSO_SIZE;
 	scctx->isc_tx_tso_segsize_max = PAGE_SIZE;
@@ -629,14 +629,7 @@ ixv_if_init(if_ctx_t ctx)
 	/* Setup Multicast table */
 	ixv_if_multi_set(ctx);
 
-	/*
-	 * Determine the correct mbuf pool
-	 * for doing jumbo/headersplit
-	 */
-	if (ifp->if_mtu > ETHERMTU)
-		adapter->rx_mbuf_sz = MJUMPAGESIZE;
-	else
-		adapter->rx_mbuf_sz = MCLBYTES;
+	adapter->rx_mbuf_sz = iflib_get_rx_mbuf_sz(ctx);
 
 	/* Configure RX settings */
 	ixv_initialize_receive_units(ctx);
@@ -1045,8 +1038,6 @@ ixv_if_msix_intr_assign(if_ctx_t ctx, int msix)
 		}
 
 		rx_que->msix = vector;
-		adapter->active_queues |= (u64)(1 << rx_que->msix);
-
 	}
 
 	for (int i = 0; i < adapter->num_tx_queues; i++) {
@@ -1464,7 +1455,12 @@ ixv_initialize_receive_units(if_ctx_t ctx)
 			    scctx->isc_nrxd[0] - 1);
 	}
 
-	ixv_initialize_rss_mapping(adapter);
+	/*
+	 * Do not touch RSS and RETA settings for older hardware
+	 * as those are shared among PF and all VF.
+	 */
+	if (adapter->hw.mac.type >= ixgbe_mac_X550_vf)
+		ixv_initialize_rss_mapping(adapter);
 } /* ixv_initialize_receive_units */
 
 /************************************************************************
@@ -1807,7 +1803,7 @@ ixv_add_stats_sysctls(struct adapter *adapter)
 		struct tx_ring *txr = &tx_que->txr;
 		snprintf(namebuf, QUEUE_NAME_LEN, "queue%d", i);
 		queue_node = SYSCTL_ADD_NODE(ctx, child, OID_AUTO, namebuf,
-		    CTLFLAG_RD, NULL, "Queue Name");
+		    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "Queue Name");
 		queue_list = SYSCTL_CHILDREN(queue_node);
 
 		SYSCTL_ADD_UQUAD(ctx, queue_list, OID_AUTO, "tso_tx",
@@ -1820,7 +1816,7 @@ ixv_add_stats_sysctls(struct adapter *adapter)
 		struct rx_ring *rxr = &rx_que->rxr;
 		snprintf(namebuf, QUEUE_NAME_LEN, "queue%d", i);
 		queue_node = SYSCTL_ADD_NODE(ctx, child, OID_AUTO, namebuf,
-		    CTLFLAG_RD, NULL, "Queue Name");
+		    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "Queue Name");
 		queue_list = SYSCTL_CHILDREN(queue_node);
 
 		SYSCTL_ADD_UQUAD(ctx, queue_list, OID_AUTO, "irqs",
@@ -1834,7 +1830,8 @@ ixv_add_stats_sysctls(struct adapter *adapter)
 	}
 
 	stat_node = SYSCTL_ADD_NODE(ctx, child, OID_AUTO, "mac",
-	    CTLFLAG_RD, NULL, "VF Statistics (read from HW registers)");
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL,
+	    "VF Statistics (read from HW registers)");
 	stat_list = SYSCTL_CHILDREN(stat_node);
 
 	SYSCTL_ADD_UQUAD(ctx, stat_list, OID_AUTO, "good_pkts_rcvd",
@@ -1899,7 +1896,6 @@ ixv_init_device_features(struct adapter *adapter)
 {
 	adapter->feat_cap = IXGBE_FEATURE_NETMAP
 	                  | IXGBE_FEATURE_VF
-	                  | IXGBE_FEATURE_RSS
 	                  | IXGBE_FEATURE_LEGACY_TX;
 
 	/* A tad short on feature flags for VFs, atm. */
@@ -1912,6 +1908,7 @@ ixv_init_device_features(struct adapter *adapter)
 	case ixgbe_mac_X550EM_x_vf:
 	case ixgbe_mac_X550EM_a_vf:
 		adapter->feat_cap |= IXGBE_FEATURE_NEEDS_CTXD;
+		adapter->feat_cap |= IXGBE_FEATURE_RSS;
 		break;
 	default:
 		break;

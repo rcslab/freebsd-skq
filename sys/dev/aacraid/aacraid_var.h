@@ -33,9 +33,7 @@
  */
 
 #include <sys/bio.h>
-#if __FreeBSD_version >= 800000
 #include <sys/callout.h>
-#endif
 #include <sys/lock.h>
 #include <sys/mutex.h>
 #include <sys/taskqueue.h>
@@ -49,45 +47,24 @@
 
 #define	AAC_DRIVER_MAJOR_VERSION	3
 #define	AAC_DRIVER_MINOR_VERSION	2
-#define	AAC_DRIVER_BUGFIX_LEVEL		5
+#define	AAC_DRIVER_BUGFIX_LEVEL		10
 #define	AAC_DRIVER_TYPE			AAC_TYPE_RELEASE
 
 #ifndef AAC_DRIVER_BUILD
 # define AAC_DRIVER_BUILD 1
 #endif
 
-#if __FreeBSD_version <= 601000
-#define bus_get_dma_tag(x)	NULL
-#endif
-
 /* **************************** NewBUS interrupt Crock ************************/
-#if __FreeBSD_version < 700031
-#define	aac_bus_setup_intr(d, i, f, U, if, ifa, hp)	\
-	bus_setup_intr(d, i, f, if, ifa, hp)
-#else
 #define	aac_bus_setup_intr	bus_setup_intr
-#endif
 
 /* **************************** NewBUS CAM Support ****************************/
-#if __FreeBSD_version < 700049
-#define aac_xpt_bus_register(sim, parent, bus)	\
-	xpt_bus_register(sim, bus)
-#else
 #define aac_xpt_bus_register	xpt_bus_register
-#endif
 
 /**************************** Kernel Thread Support ***************************/
-#if __FreeBSD_version > 800001
 #define aac_kthread_create(func, farg, proc_ptr, flags, stackpgs, fmtstr, arg) \
 	kproc_create(func, farg, proc_ptr, flags, stackpgs, fmtstr, arg)
 #define	aac_kthread_exit(status)	\
 	kproc_exit(status)
-#else
-#define aac_kthread_create(func, farg, proc_ptr, flags, stackpgs, fmtstr, arg) \
-	kthread_create(func, farg, proc_ptr, flags, stackpgs, fmtstr, arg)
-#define	aac_kthread_exit(status)	\
-	kthread_exit(status)
-#endif
 
 /*
  * Driver Parameter Definitions
@@ -362,11 +339,7 @@ struct aac_softc
 	void			*aac_intr[AAC_MAX_MSIX]; /* interrupt handle */
 	struct aac_msix_ctx	aac_msix[AAC_MAX_MSIX]; /* context */
 	eventhandler_tag	eh;
-#if __FreeBSD_version >= 800000
 	struct callout	aac_daemontime;		/* clock daemon callout */
-#else	
-	struct callout_handle	timeout_id;	/* timeout handle */
-#endif
 
 	/* controller features, limits and status */
 	int			aac_state;
@@ -481,9 +454,12 @@ struct aac_softc
 	u_int32_t	aac_feature_bits;		/* feature bits from suppl. info */
 	u_int32_t	aac_support_opt2;		/* supp. options from suppl. info */
 	u_int32_t	aac_max_aif;			/* max. AIF count */
+	u_int32_t	doorbell_mask;			/* for IOP reset */
 	u_int32_t	aac_max_msix;			/* max. MSI-X vectors */
 	u_int32_t	aac_vector_cap;			/* MSI-X vector capab.*/
 	int		msi_enabled;			/* MSI/MSI-X enabled */
+	int		msi_tupelo;		/* Series 6 support for */
+						/* single MSI interrupt */
 #define AAC_CAM_TARGET_WILDCARD ~0
 	void			(*cam_rescan_cb)(struct aac_softc *, uint32_t,
 				    uint32_t);

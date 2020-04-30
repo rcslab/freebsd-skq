@@ -30,8 +30,6 @@ LIBADD=	edit
 CFLAGS+=-DSHELL -I. -I${.CURDIR}
 # for debug:
 # DEBUG_FLAGS+= -g -DDEBUG=2 -fno-inline
-WARNS?=	2
-WFORMAT=0
 
 .PATH:	${.CURDIR}/bltin \
 	${.CURDIR:H}/kill \
@@ -48,6 +46,7 @@ builtins.h: .NOMETA
 builtins.c builtins.h: mkbuiltins builtins.def
 	sh ${.CURDIR}/mkbuiltins ${.CURDIR}
 
+DEPENDOBJS+= mknodes mksyntax
 mknodes mksyntax: ${BUILD_TOOLS_META}
 
 .ORDER: nodes.c nodes.h

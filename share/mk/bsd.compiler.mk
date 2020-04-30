@@ -19,6 +19,8 @@
 # COMPILER_FEATURES will contain one or more of the following, based on
 # compiler support for that feature:
 #
+# - c++17:     supports full (or nearly full) C++17 programming environment.
+# - c++14:     supports full (or nearly full) C++14 programming environment.
 # - c++11:     supports full (or nearly full) C++11 programming environment.
 # - retpoline: supports the retpoline speculative execution vulnerability
 #              mitigation.
@@ -141,7 +143,7 @@ _cc_vars+=XCC X_
 # The value is only used/exported for the same environment that impacts
 # CC and COMPILER_* settings here.
 _exported_vars=	${X_}COMPILER_TYPE ${X_}COMPILER_VERSION \
-		${X_}COMPILER_FREEBSD_VERSION
+		${X_}COMPILER_FREEBSD_VERSION ${X_}COMPILER_RESOURCE_DIR
 ${X_}_cc_hash=	${${cc}}${MACHINE}${PATH}
 ${X_}_cc_hash:=	${${X_}_cc_hash:hash}
 # Only import if none of the vars are set somehow else.
@@ -153,8 +155,8 @@ _can_export=	no
 .endfor
 .if ${_can_export} == yes
 .for var in ${_exported_vars}
-.if defined(${var}.${${X_}_cc_hash})
-${var}=	${${var}.${${X_}_cc_hash}}
+.if defined(${var}__${${X_}_cc_hash})
+${var}=	${${var}__${${X_}_cc_hash}}
 .endif
 .endfor
 .endif
@@ -185,7 +187,7 @@ ${X_}COMPILER_TYPE:=	clang
 . endif
 .endif
 .if !defined(${X_}COMPILER_VERSION)
-${X_}COMPILER_VERSION!=echo "${_v:M[1-9].[0-9]*}" | awk -F. '{print $$1 * 10000 + $$2 * 100 + $$3;}'
+${X_}COMPILER_VERSION!=echo "${_v:M[1-9]*.[0-9]*}" | awk -F. '{print $$1 * 10000 + $$2 * 100 + $$3;}'
 .endif
 .undef _v
 .endif
@@ -199,10 +201,22 @@ ${X_}COMPILER_FREEBSD_VERSION=	unknown
 .endif
 .endif
 
+.if !defined(${X_}COMPILER_RESOURCE_DIR)
+${X_}COMPILER_RESOURCE_DIR!=	${${cc}:N${CCACHE_BIN}} -print-resource-dir 2>/dev/null || echo unknown
+.endif
+
 ${X_}COMPILER_FEATURES=
-.if ${${X_}COMPILER_TYPE} == "clang" || \
+.if (${${X_}COMPILER_TYPE} == "clang" && ${${X_}COMPILER_VERSION} >= 30300) || \
 	(${${X_}COMPILER_TYPE} == "gcc" && ${${X_}COMPILER_VERSION} >= 40800)
 ${X_}COMPILER_FEATURES+=	c++11
+.endif
+.if (${${X_}COMPILER_TYPE} == "clang" && ${${X_}COMPILER_VERSION} >= 30400) || \
+	(${${X_}COMPILER_TYPE} == "gcc" && ${${X_}COMPILER_VERSION} >= 50000)
+${X_}COMPILER_FEATURES+=	c++14
+.endif
+.if (${${X_}COMPILER_TYPE} == "clang" && ${${X_}COMPILER_VERSION} >= 50000) || \
+	(${${X_}COMPILER_TYPE} == "gcc" && ${${X_}COMPILER_VERSION} >= 70000)
+${X_}COMPILER_FEATURES+=	c++17
 .endif
 .if ${${X_}COMPILER_TYPE} == "clang" && ${${X_}COMPILER_VERSION} >= 60000
 ${X_}COMPILER_FEATURES+=	retpoline
@@ -214,14 +228,15 @@ X_COMPILER_TYPE=	${COMPILER_TYPE}
 X_COMPILER_VERSION=	${COMPILER_VERSION}
 X_COMPILER_FREEBSD_VERSION=	${COMPILER_FREEBSD_VERSION}
 X_COMPILER_FEATURES=	${COMPILER_FEATURES}
+X_COMPILER_RESOURCE_DIR=	${COMPILER_RESOURCE_DIR}
 .endif	# ${cc} == "CC" || (${cc} == "XCC" && ${XCC} != ${CC})
 
 # Export the values so sub-makes don't have to look them up again, using the
 # hash key computed above.
 .for var in ${_exported_vars}
-${var}.${${X_}_cc_hash}:=	${${var}}
-.export-env ${var}.${${X_}_cc_hash}
-.undef ${var}.${${X_}_cc_hash}
+${var}__${${X_}_cc_hash}:=	${${var}}
+.export-env ${var}__${${X_}_cc_hash}
+.undef ${var}__${${X_}_cc_hash}
 .endfor
 
 .endif	# ${cc} == "CC" || !empty(XCC)

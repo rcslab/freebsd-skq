@@ -144,7 +144,7 @@ struct if_data {
 #define	IFF_DEBUG	0x4		/* (n) turn on debugging */
 #define	IFF_LOOPBACK	0x8		/* (i) is a loopback net */
 #define	IFF_POINTOPOINT	0x10		/* (i) is a point-to-point link */
-/*			0x20		   was IFF_SMART */
+#define	IFF_KNOWSEPOCH	0x20		/* (i) calls if_input in net epoch */
 #define	IFF_DRV_RUNNING	0x40		/* (d) resources allocated */
 #define	IFF_NOARP	0x80		/* (n) no address resolution protocol */
 #define	IFF_PROMISC	0x100		/* (n) receive all packets */
@@ -178,7 +178,7 @@ struct if_data {
 #define	IFF_CANTCHANGE \
 	(IFF_BROADCAST|IFF_POINTOPOINT|IFF_DRV_RUNNING|IFF_DRV_OACTIVE|\
 	    IFF_SIMPLEX|IFF_MULTICAST|IFF_ALLMULTI|IFF_PROMISC|\
-	    IFF_DYING|IFF_CANTCONFIG)
+	    IFF_DYING|IFF_CANTCONFIG|IFF_KNOWSEPOCH)
 
 /*
  * Values for if_link_state.
@@ -246,6 +246,9 @@ struct if_data {
 #define	IFCAP_HWSTATS		0x800000 /* manages counters internally */
 #define	IFCAP_TXRTLMT		0x1000000 /* hardware supports TX rate limiting */
 #define	IFCAP_HWRXTSTMP		0x2000000 /* hardware rx timestamping */
+#define	IFCAP_NOMAP		0x4000000 /* can TX unmapped mbufs */
+#define	IFCAP_TXTLS4		0x8000000 /* can do TLS encryption and segmentation for TCP */
+#define	IFCAP_TXTLS6		0x10000000 /* can do TLS encryption and segmentation for TCP6 */
 
 #define IFCAP_HWCSUM_IPV6	(IFCAP_RXCSUM_IPV6 | IFCAP_TXCSUM_IPV6)
 
@@ -253,6 +256,7 @@ struct if_data {
 #define	IFCAP_TSO	(IFCAP_TSO4 | IFCAP_TSO6)
 #define	IFCAP_WOL	(IFCAP_WOL_UCAST | IFCAP_WOL_MCAST | IFCAP_WOL_MAGIC)
 #define	IFCAP_TOE	(IFCAP_TOE4 | IFCAP_TOE6)
+#define	IFCAP_TXTLS	(IFCAP_TXTLS4 | IFCAP_TXTLS6)
 
 #define	IFCAP_CANTCHANGE	(IFCAP_NETMAP)
 
@@ -580,6 +584,16 @@ struct ifrsshash {
 };
 
 #define	IFNET_PCP_NONE	0xff	/* PCP disabled */
+
+#define	IFDR_MSG_SIZE		64
+#define	IFDR_REASON_MSG		1
+#define	IFDR_REASON_VENDOR	2
+struct ifdownreason {
+	char		ifdr_name[IFNAMSIZ];
+	uint32_t	ifdr_reason;
+	uint32_t	ifdr_vendor;
+	char		ifdr_msg[IFDR_MSG_SIZE];
+};
 
 #endif /* __BSD_VISIBLE */
 

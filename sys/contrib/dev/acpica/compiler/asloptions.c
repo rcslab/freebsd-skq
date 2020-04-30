@@ -8,7 +8,7 @@
  *
  * 1. Copyright Notice
  *
- * Some or all of this work - Copyright (c) 1999 - 2019, Intel Corp.
+ * Some or all of this work - Copyright (c) 1999 - 2020, Intel Corp.
  * All rights reserved.
  *
  * 2. License
@@ -219,7 +219,7 @@ AslCommandLine (
         {
             exit (-1);
         }
-        exit (1);
+        exit (0);
     }
 
     /* Next parameter must be the input filename */
@@ -837,6 +837,11 @@ AslDoOptions (
             AslGbl_HexOutputFlag = HEX_OUTPUT_C;
             break;
 
+    case 'p': /* data table flex/bison prototype */
+
+            AslGbl_DtLexBisonPrototype = TRUE;
+            break;
+
         case 's':
 
             AslGbl_HexOutputFlag = HEX_OUTPUT_ASL;
@@ -890,7 +895,6 @@ AslDoOptions (
              */
             AslGbl_VerboseErrors = FALSE;
             AslGbl_DoSignon = FALSE;
-            AslGbl_Files[ASL_FILE_STDERR].Handle = stdout;
             break;
 
         case 'o':
@@ -938,7 +942,7 @@ AslDoOptions (
                 return (-1);
             }
 
-            Status = AslExpectException (AcpiGbl_Optarg);
+            Status = AslLogExpectedException (AcpiGbl_Optarg);
             if (ACPI_FAILURE (Status))
             {
                 return (-1);

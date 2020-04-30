@@ -45,7 +45,6 @@ __FBSDID("$FreeBSD$");
 #include <fs/nfs/nfsport.h>
 
 extern struct nfsstatsv1 nfsstatsv1;
-extern struct nfsv4_opflag nfsv4_opflag[NFSV41_NOPS];
 extern int ncl_mbuf_mlen;
 extern enum vtype newnv2tov_type[8];
 extern enum vtype nv34tov_type[8];
@@ -88,8 +87,8 @@ nfsm_uiombuf(struct nfsrv_descript *nd, struct uio *uiop, int siz)
 					NFSMCLGET(mp, M_WAITOK);
 				else
 					NFSMGET(mp);
-				mbuf_setlen(mp, 0);
-				mbuf_setnext(mp2, mp);
+				mp->m_len = 0;
+				mp2->m_next = mp;
 				mp2 = mp;
 				mlen = M_TRAILINGSPACE(mp);
 			}
@@ -98,17 +97,16 @@ nfsm_uiombuf(struct nfsrv_descript *nd, struct uio *uiop, int siz)
 			/* Not Yet.. */
 			if (uiop->uio_iov->iov_op != NULL)
 				(*(uiop->uio_iov->iov_op))
-				(uiocp, NFSMTOD(mp, caddr_t) + mbuf_len(mp),
+				(uiocp, mtod(mp, caddr_t) + mp->m_len,
 				    xfer);
 			else
 #endif
 			if (uiop->uio_segflg == UIO_SYSSPACE)
-			    NFSBCOPY(uiocp, NFSMTOD(mp, caddr_t) + mbuf_len(mp),
+			    NFSBCOPY(uiocp, mtod(mp, caddr_t) + mp->m_len,
 				xfer);
 			else
-			    copyin(CAST_USER_ADDR_T(uiocp), NFSMTOD(mp, caddr_t)
-				+ mbuf_len(mp), xfer);
-			mbuf_setlen(mp, mbuf_len(mp) + xfer);
+			    copyin(uiocp, mtod(mp, caddr_t) + mp->m_len, xfer);
+			mp->m_len += xfer;
 			left -= xfer;
 			uiocp += xfer;
 			uiop->uio_offset += xfer;
@@ -123,16 +121,16 @@ nfsm_uiombuf(struct nfsrv_descript *nd, struct uio *uiop, int siz)
 	if (rem > 0) {
 		if (rem > M_TRAILINGSPACE(mp)) {
 			NFSMGET(mp);
-			mbuf_setlen(mp, 0);
-			mbuf_setnext(mp2, mp);
+			mp->m_len = 0;
+			mp2->m_next = mp;
 		}
-		cp = NFSMTOD(mp, caddr_t) + mbuf_len(mp);
+		cp = mtod(mp, caddr_t) + mp->m_len;
 		for (left = 0; left < rem; left++)
 			*cp++ = '\0';
-		mbuf_setlen(mp, mbuf_len(mp) + rem);
+		mp->m_len += rem;
 		nd->nd_bpos = cp;
 	} else
-		nd->nd_bpos = NFSMTOD(mp, caddr_t) + mbuf_len(mp);
+		nd->nd_bpos = mtod(mp, caddr_t) + mp->m_len;
 	nd->nd_mb = mp;
 }
 
@@ -160,7 +158,7 @@ nfsm_uiombuflist(struct uio *uiop, int siz, struct mbuf **mbp, char **cpp)
 		NFSMCLGET(mp, M_WAITOK);
 	else
 		NFSMGET(mp);
-	mbuf_setlen(mp, 0);
+	mp->m_len = 0;
 	firstmp = mp2 = mp;
 	while (siz > 0) {
 		left = uiop->uio_iov->iov_len;
@@ -175,19 +173,19 @@ nfsm_uiombuflist(struct uio *uiop, int siz, struct mbuf **mbp, char **cpp)
 					NFSMCLGET(mp, M_WAITOK);
 				else
 					NFSMGET(mp);
-				mbuf_setlen(mp, 0);
-				mbuf_setnext(mp2, mp);
+				mp->m_len = 0;
+				mp2->m_next = mp;
 				mp2 = mp;
 				mlen = M_TRAILINGSPACE(mp);
 			}
 			xfer = (left > mlen) ? mlen : left;
 			if (uiop->uio_segflg == UIO_SYSSPACE)
-				NFSBCOPY(uiocp, NFSMTOD(mp, caddr_t) +
-				    mbuf_len(mp), xfer);
+				NFSBCOPY(uiocp, mtod(mp, caddr_t) +
+				    mp->m_len, xfer);
 			else
-				copyin(uiocp, NFSMTOD(mp, caddr_t) +
-				    mbuf_len(mp), xfer);
-			mbuf_setlen(mp, mbuf_len(mp) + xfer);
+				copyin(uiocp, mtod(mp, caddr_t) +
+				    mp->m_len, xfer);
+			mp->m_len += xfer;
 			left -= xfer;
 			uiocp += xfer;
 			uiop->uio_offset += xfer;
@@ -200,7 +198,7 @@ nfsm_uiombuflist(struct uio *uiop, int siz, struct mbuf **mbp, char **cpp)
 		siz -= uiosiz;
 	}
 	if (cpp != NULL)
-		*cpp = NFSMTOD(mp, caddr_t) + mbuf_len(mp);
+		*cpp = mtod(mp, caddr_t) + mp->m_len;
 	if (mbp != NULL)
 		*mbp = mp;
 	return (firstmp);

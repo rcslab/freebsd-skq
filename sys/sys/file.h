@@ -123,6 +123,10 @@ typedef int fo_mmap_t(struct file *fp, vm_map_t map, vm_offset_t *addr,
 		    vm_size_t size, vm_prot_t prot, vm_prot_t cap_maxprot,
 		    int flags, vm_ooffset_t foff, struct thread *td);
 typedef int fo_aio_queue_t(struct file *fp, struct kaiocb *job);
+typedef int fo_add_seals_t(struct file *fp, int flags);
+typedef int fo_get_seals_t(struct file *fp, int *flags);
+typedef int fo_fallocate_t(struct file *fp, off_t offset, off_t len,
+		    struct thread *td);
 typedef	int fo_flags_t;
 
 struct fileops {
@@ -141,6 +145,9 @@ struct fileops {
 	fo_fill_kinfo_t	*fo_fill_kinfo;
 	fo_mmap_t	*fo_mmap;
 	fo_aio_queue_t	*fo_aio_queue;
+	fo_add_seals_t	*fo_add_seals;
+	fo_get_seals_t	*fo_get_seals;
+	fo_fallocate_t	*fo_fallocate;
 	fo_flags_t	fo_flags;	/* DFLAG_* below */
 };
 
@@ -179,7 +186,10 @@ struct file {
 	/*
 	 *  DTYPE_VNODE specific fields.
 	 */
-	int		f_seqcount;	/* (a) Count of sequential accesses. */
+	union {
+		int16_t	f_seqcount;	/* (a) Count of sequential accesses. */
+		int	f_pipegen;
+	};
 	off_t		f_nextoff;	/* next expected read/write offset. */
 	union {
 		struct cdev_privdata *fvn_cdevpriv;
@@ -201,7 +211,6 @@ struct file {
 
 #define	FOFFSET_LOCKED       0x1
 #define	FOFFSET_LOCK_WAITING 0x2
-#define	FDEVFS_VNODE	     0x4
 
 #endif /* _KERNEL || _WANT_FILE */
 
@@ -235,11 +244,10 @@ extern struct fileops badfileops;
 extern struct fileops socketops;
 extern int maxfiles;		/* kernel limit on number of open files */
 extern int maxfilesperproc;	/* per process limit on number of open files */
-extern volatile int openfiles;	/* actual number of open files */
 
 int fget(struct thread *td, int fd, cap_rights_t *rightsp, struct file **fpp);
 int fget_mmap(struct thread *td, int fd, cap_rights_t *rightsp,
-    u_char *maxprotp, struct file **fpp);
+    vm_prot_t *maxprotp, struct file **fpp);
 int fget_read(struct thread *td, int fd, cap_rights_t *rightsp,
     struct file **fpp);
 int fget_write(struct thread *td, int fd, cap_rights_t *rightsp,
@@ -281,8 +289,12 @@ _fnoop(void)
 	return (0);
 }
 
-#define	fhold(fp)							\
-	(refcount_acquire(&(fp)->f_count))
+static __inline __result_use_check bool
+fhold(struct file *fp)
+{
+	return (refcount_acquire_checked(&fp->f_count));
+}
+
 #define	fdrop(fp, td)							\
 	(refcount_release(&(fp)->f_count) ? _fdrop((fp), (td)) : _fnoop())
 
@@ -417,6 +429,33 @@ fo_aio_queue(struct file *fp, struct kaiocb *job)
 {
 
 	return ((*fp->f_ops->fo_aio_queue)(fp, job));
+}
+
+static __inline int
+fo_add_seals(struct file *fp, int seals)
+{
+
+	if (fp->f_ops->fo_add_seals == NULL)
+		return (EINVAL);
+	return ((*fp->f_ops->fo_add_seals)(fp, seals));
+}
+
+static __inline int
+fo_get_seals(struct file *fp, int *seals)
+{
+
+	if (fp->f_ops->fo_get_seals == NULL)
+		return (EINVAL);
+	return ((*fp->f_ops->fo_get_seals)(fp, seals));
+}
+
+static __inline int
+fo_fallocate(struct file *fp, off_t offset, off_t len, struct thread *td)
+{
+
+	if (fp->f_ops->fo_fallocate == NULL)
+		return (ENODEV);
+	return ((*fp->f_ops->fo_fallocate)(fp, offset, len, td));
 }
 
 #endif /* _KERNEL */

@@ -29,7 +29,7 @@
 __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
-#include <sys/types.h>
+#include <sys/eventhandler.h>
 #include <sys/sockio.h>
 #include <sys/mbuf.h>
 #include <sys/malloc.h>
@@ -288,7 +288,8 @@ static const STRUCT_USB_HOST_ID uhso_devs[] = {
 #undef UHSO_DEV
 };
 
-static SYSCTL_NODE(_hw_usb, OID_AUTO, uhso, CTLFLAG_RW, 0, "USB uhso");
+static SYSCTL_NODE(_hw_usb, OID_AUTO, uhso, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "USB uhso");
 static int uhso_autoswitch = 1;
 SYSCTL_INT(_hw_usb_uhso, OID_AUTO, auto_switch, CTLFLAG_RWTUN,
     &uhso_autoswitch, 0, "Automatically switch to modem mode");
@@ -599,7 +600,8 @@ uhso_attach(device_t self)
 	    CTLFLAG_RD, uhso_port[UHSO_IFACE_PORT(sc->sc_type)], 0,
 	    "Port available at this interface");
 	SYSCTL_ADD_PROC(sctx, SYSCTL_CHILDREN(soid), OID_AUTO, "radio",
-	    CTLTYPE_INT | CTLFLAG_RWTUN, sc, 0, uhso_radio_sysctl, "I", "Enable radio");
+	    CTLTYPE_INT | CTLFLAG_RWTUN | CTLFLAG_MPSAFE, sc, 0,
+	    uhso_radio_sysctl, "I", "Enable radio");
 
 	/*
 	 * The default interface description on most Option devices isn't
@@ -619,7 +621,7 @@ uhso_attach(device_t self)
 		    CTLFLAG_RD, &sc->sc_ttys, 0, "Number of attached serial ports");
 
 		tree = SYSCTL_ADD_NODE(sctx, SYSCTL_CHILDREN(soid), OID_AUTO,
-		    "port", CTLFLAG_RD, NULL, "Serial ports");
+		    "port", CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "Serial ports");
 	}
 
 	/*
@@ -638,7 +640,7 @@ uhso_attach(device_t self)
 		desc = uhso_port_type_sysctl[port];
 
 		tty_node = SYSCTL_ADD_NODE(sctx, SYSCTL_CHILDREN(tree), OID_AUTO,
-		    desc, CTLFLAG_RD, NULL, "");
+		    desc, CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "");
 
 		ht->ht_name[0] = 0;
 		if (sc->sc_ttys == 1)
@@ -1664,6 +1666,7 @@ tr_setup:
 static void
 uhso_if_rxflush(void *arg)
 {
+	struct epoch_tracker et;
 	struct uhso_softc *sc = arg;
 	struct ifnet *ifp = sc->sc_ifp;
 	uint8_t *cp;
@@ -1677,6 +1680,7 @@ uhso_if_rxflush(void *arg)
 
 	m = NULL;
 	mwait = sc->sc_mwait;
+	NET_EPOCH_ENTER(et);
 	for (;;) {
 		if (m == NULL) {
 			if ((m = mbufq_dequeue(&sc->sc_rxq)) == NULL)
@@ -1787,6 +1791,7 @@ uhso_if_rxflush(void *arg)
 		m = m0 != NULL ? m0 : NULL;
 		mtx_lock(&sc->sc_mtx);
 	}
+	NET_EPOCH_EXIT(et);
 	sc->sc_mwait = mwait;
 }
 

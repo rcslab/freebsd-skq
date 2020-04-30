@@ -199,7 +199,7 @@ struct mqueue_msg {
 	/* following real data... */
 };
 
-static SYSCTL_NODE(_kern, OID_AUTO, mqueue, CTLFLAG_RW, 0,
+static SYSCTL_NODE(_kern, OID_AUTO, mqueue, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
 	"POSIX real time message queue");
 
 static int	default_maxmsg  = 10;
@@ -725,7 +725,7 @@ do_recycle(void *context, int pending __unused)
 
 	vn_lock(vp, LK_EXCLUSIVE | LK_RETRY);
 	vrecycle(vp);
-	VOP_UNLOCK(vp, 0);
+	VOP_UNLOCK(vp);
 	vdrop(vp);
 }
 
@@ -893,7 +893,7 @@ mqfs_lookupx(struct vop_cachedlookup_args *ap)
 			return (EIO);
 		if ((flags & ISLASTCN) && nameiop != LOOKUP)
 			return (EINVAL);
-		VOP_UNLOCK(dvp, 0);
+		VOP_UNLOCK(dvp);
 		KASSERT(pd->mn_parent, ("non-root directory has no parent"));
 		pn = pd->mn_parent;
 		error = mqfs_allocv(dvp->v_mount, vpp, pn);
@@ -2042,6 +2042,12 @@ kern_kmq_open(struct thread *td, const char *upath, int flags, mode_t mode,
 	len = strlen(path);
 	if (len < 2 || path[0] != '/' || strchr(path + 1, '/') != NULL)
 		return (EINVAL);
+	/*
+	 * "." and ".." are magic directories, populated on the fly, and cannot
+	 * be opened as queues.
+	 */
+	if (strcmp(path, "/.") == 0 || strcmp(path, "/..") == 0)
+		return (EINVAL);
 	AUDIT_ARG_UPATH1_CANON(path);
 
 	error = falloc(td, &fp, &fd, O_CLOEXEC);
@@ -2141,6 +2147,8 @@ sys_kmq_unlink(struct thread *td, struct kmq_unlink_args *uap)
 
 	len = strlen(path);
 	if (len < 2 || path[0] != '/' || strchr(path + 1, '/') != NULL)
+		return (EINVAL);
+	if (strcmp(path, "/.") == 0 || strcmp(path, "/..") == 0)
 		return (EINVAL);
 	AUDIT_ARG_UPATH1_CANON(path);
 
@@ -2275,13 +2283,14 @@ sys_kmq_timedreceive(struct thread *td, struct kmq_timedreceive_args *uap)
 	if (uap->abs_timeout != NULL) {
 		error = copyin(uap->abs_timeout, &ets, sizeof(ets));
 		if (error != 0)
-			return (error);
+			goto out;
 		abs_timeout = &ets;
 	} else
 		abs_timeout = NULL;
 	waitok = !(fp->f_flag & O_NONBLOCK);
 	error = mqueue_receive(mq, uap->msg_ptr, uap->msg_len,
 		uap->msg_prio, waitok, abs_timeout);
+out:
 	fdrop(fp, td);
 	return (error);
 }
@@ -2301,13 +2310,14 @@ sys_kmq_timedsend(struct thread *td, struct kmq_timedsend_args *uap)
 	if (uap->abs_timeout != NULL) {
 		error = copyin(uap->abs_timeout, &ets, sizeof(ets));
 		if (error != 0)
-			return (error);
+			goto out;
 		abs_timeout = &ets;
 	} else
 		abs_timeout = NULL;
 	waitok = !(fp->f_flag & O_NONBLOCK);
 	error = mqueue_send(mq, uap->msg_ptr, uap->msg_len,
 		uap->msg_prio, waitok, abs_timeout);
+out:
 	fdrop(fp, td);
 	return (error);
 }
@@ -2659,6 +2669,7 @@ static struct fileops mqueueops = {
 	.fo_chown		= mqf_chown,
 	.fo_sendfile		= invfo_sendfile,
 	.fo_fill_kinfo		= mqf_fill_kinfo,
+	.fo_flags		= DFLAG_PASSABLE,
 };
 
 static struct vop_vector mqfs_vnodeops = {
@@ -2680,6 +2691,7 @@ static struct vop_vector mqfs_vnodeops = {
 	.vop_mkdir		= VOP_EOPNOTSUPP,
 	.vop_rmdir		= VOP_EOPNOTSUPP
 };
+VFS_VOP_VECTOR_REGISTER(mqfs_vnodeops);
 
 static struct vfsops mqfs_vfsops = {
 	.vfs_init 		= mqfs_init,
@@ -2796,7 +2808,7 @@ freebsd32_kmq_timedsend(struct thread *td,
 	if (uap->abs_timeout != NULL) {
 		error = copyin(uap->abs_timeout, &ets32, sizeof(ets32));
 		if (error != 0)
-			return (error);
+			goto out;
 		CP(ets32, ets, tv_sec);
 		CP(ets32, ets, tv_nsec);
 		abs_timeout = &ets;
@@ -2805,6 +2817,7 @@ freebsd32_kmq_timedsend(struct thread *td,
 	waitok = !(fp->f_flag & O_NONBLOCK);
 	error = mqueue_send(mq, uap->msg_ptr, uap->msg_len,
 		uap->msg_prio, waitok, abs_timeout);
+out:
 	fdrop(fp, td);
 	return (error);
 }
@@ -2826,7 +2839,7 @@ freebsd32_kmq_timedreceive(struct thread *td,
 	if (uap->abs_timeout != NULL) {
 		error = copyin(uap->abs_timeout, &ets32, sizeof(ets32));
 		if (error != 0)
-			return (error);
+			goto out;
 		CP(ets32, ets, tv_sec);
 		CP(ets32, ets, tv_nsec);
 		abs_timeout = &ets;
@@ -2835,6 +2848,7 @@ freebsd32_kmq_timedreceive(struct thread *td,
 	waitok = !(fp->f_flag & O_NONBLOCK);
 	error = mqueue_receive(mq, uap->msg_ptr, uap->msg_len,
 		uap->msg_prio, waitok, abs_timeout);
+out:
 	fdrop(fp, td);
 	return (error);
 }

@@ -155,6 +155,7 @@ struct e1000_hw;
 #define E1000_DEV_ID_PCH_ICP_I219_V8		0x15E0
 #define E1000_DEV_ID_PCH_ICP_I219_LM9		0x15E1
 #define E1000_DEV_ID_PCH_ICP_I219_V9		0x15E2
+#define E1000_DEV_ID_PCH_ICP_I219_V10		0x0D4F
 #define E1000_DEV_ID_82576			0x10C9
 #define E1000_DEV_ID_82576_FIBER		0x10E6
 #define E1000_DEV_ID_82576_SERDES		0x10E7
@@ -785,8 +786,8 @@ struct e1000_nvm_operations {
 
 struct e1000_mac_info {
 	struct e1000_mac_operations ops;
-	u8 addr[ETH_ADDR_LEN];
-	u8 perm_addr[ETH_ADDR_LEN];
+	u8 addr[ETHER_ADDR_LEN];
+	u8 perm_addr[ETHER_ADDR_LEN];
 
 	enum e1000_mac_type type;
 

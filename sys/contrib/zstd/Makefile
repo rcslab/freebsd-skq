@@ -69,6 +69,7 @@ test: MOREFLAGS += -g -DDEBUGLEVEL=$(DEBUGLEVEL) -Werror
 test:
 	MOREFLAGS="$(MOREFLAGS)" $(MAKE) -j -C $(PRGDIR) allVariants
 	$(MAKE) -C $(TESTDIR) $@
+	ZSTD=../../programs/zstd $(MAKE) -C doc/educational_decoder test
 
 ## shortest: same as `make check`
 .PHONY: shortest
@@ -99,8 +100,8 @@ man:
 contrib: lib
 	$(MAKE) -C contrib/pzstd all
 	$(MAKE) -C contrib/seekable_format/examples all
-	$(MAKE) -C contrib/adaptive-compression all
 	$(MAKE) -C contrib/largeNbDicts all
+	cd contrib/single_file_decoder/ ; ./build_test.sh
 
 .PHONY: cleanTabs
 cleanTabs:
@@ -116,7 +117,6 @@ clean:
 	@$(MAKE) -C contrib/gen_html $@ > $(VOID)
 	@$(MAKE) -C contrib/pzstd $@ > $(VOID)
 	@$(MAKE) -C contrib/seekable_format/examples $@ > $(VOID)
-	@$(MAKE) -C contrib/adaptive-compression $@ > $(VOID)
 	@$(MAKE) -C contrib/largeNbDicts $@ > $(VOID)
 	@$(RM) zstd$(EXT) zstdmt$(EXT) tmp*
 	@$(RM) -r lz4
@@ -156,7 +156,7 @@ list:
 	    done \
 	} | column -t -s $$'\t'
 
-.PHONY: install clangtest armtest usan asan uasan
+.PHONY: install armtest usan asan uasan
 install:
 	@$(MAKE) -C $(ZSTDDIR) $@
 	@$(MAKE) -C $(PRGDIR) $@
@@ -188,7 +188,7 @@ gcc7build: clean
 .PHONY: clangbuild
 clangbuild: clean
 	clang -v
-	CXX=clang++ CC=clang $(MAKE) all MOREFLAGS="-Werror -Wconversion -Wno-sign-conversion -Wdocumentation"
+	CXX=clang++ CC=clang CFLAGS="-Werror -Wconversion -Wno-sign-conversion -Wdocumentation" $(MAKE) all
 
 m32build: clean
 	gcc -v
@@ -231,10 +231,6 @@ gcc5test: clean
 gcc6test: clean
 	gcc-6 -v
 	$(MAKE) all CC=gcc-6 MOREFLAGS="-Werror"
-
-clangtest: clean
-	clang -v
-	$(MAKE) all CXX=clang++ CC=clang MOREFLAGS="-Werror -Wconversion -Wno-sign-conversion -Wdocumentation"
 
 armtest: clean
 	$(MAKE) -C $(TESTDIR) datagen   # use native, faster

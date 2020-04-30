@@ -5,9 +5,9 @@
 SRCS=		crt1.c crti.S crtn.S
 OBJS=		${SRCS:N*.h:R:S/$/.o/g}
 OBJS+=		crtsavres.o Scrt1.o gcrt1.o
-CFLAGS+=	-I${.CURDIR:H}/common \
+CFLAGS+=	-I${.CURDIR} -I${.CURDIR:H}/common \
 		-I${SRCTOP}/lib/libc/include \
-		-mlongcall -DCRT_IRELOC_SUPPRESS
+		-mlongcall -DCRT_IRELOC_RELA
 
 FILES=		${OBJS}
 FILESMODE=	${LIBMODE}
@@ -18,7 +18,7 @@ FILESDIR=	${LIBDIR}
 .undef LIBRARIES_ONLY
 
 CLEANFILES=	${OBJS}
-CLEANFILES+=	crt1.s crtsavres.s gcrt1.s Scrt1.s
+CLEANFILES+=	crt1.s crtsavres.S gcrt1.s Scrt1.s
 
 # See the comment in lib/csu/common/crtbrand.c for the reason crt1.c is not
 # directly compiled to .o files.
@@ -28,7 +28,7 @@ crt1.s: crt1.c
 	sed ${SED_FIX_NOTE} ${.TARGET}
 
 # On powerpc64 crtsavres is an empty file
-crtsavres.s:
+crtsavres.S:
 	touch ${.TARGET}
 
 crt1.o: crt1.s

@@ -67,7 +67,9 @@
 #ifndef _BUS_DMA_H_
 #define _BUS_DMA_H_
 
+#ifdef _KERNEL
 #include <sys/_bus_dma.h>
+#endif
 
 /*
  * Machine independent interface for mapping physical addresses to peripheral
@@ -109,6 +111,7 @@
 /* Forwards needed by prototypes below. */
 union ccb;
 struct bio;
+struct cryptop;
 struct mbuf;
 struct memdesc;
 struct pmap;
@@ -133,6 +136,7 @@ typedef struct bus_dma_segment {
 	bus_size_t	ds_len;		/* length of transfer */
 } bus_dma_segment_t;
 
+#ifdef _KERNEL
 /*
  * A function that returns 1 if the address cannot be accessed by
  * a device and 0 if it can be.
@@ -175,6 +179,24 @@ int bus_dma_tag_create(bus_dma_tag_t parent, bus_size_t alignment,
 		       void *filtfuncarg, bus_size_t maxsize, int nsegments,
 		       bus_size_t maxsegsz, int flags, bus_dma_lock_t *lockfunc,
 		       void *lockfuncarg, bus_dma_tag_t *dmat);
+
+/* Functions for creating and cloning tags via a template */
+typedef struct {
+	bus_dma_tag_t		parent;
+	bus_size_t		alignment;
+	bus_addr_t		boundary;
+	bus_addr_t		lowaddr;
+	bus_addr_t		highaddr;
+	bus_size_t		maxsize;
+	int			nsegments;
+	bus_size_t		maxsegsize;
+	int			flags;
+	bus_dma_lock_t		*lockfunc;
+	void			*lockfuncarg;
+} bus_dma_tag_template_t;
+void bus_dma_template_init(bus_dma_tag_template_t *t, bus_dma_tag_t parent);
+int bus_dma_template_tag(bus_dma_tag_template_t *t, bus_dma_tag_t *dmat);
+void bus_dma_template_clone(bus_dma_tag_template_t *t, bus_dma_tag_t dmat);
 
 /*
  * Set the memory domain to be used for allocations.
@@ -243,6 +265,13 @@ int bus_dmamap_load_bio(bus_dma_tag_t dmat, bus_dmamap_t map, struct bio *bio,
 			int flags);
 
 /*
+ * Like bus_dmamap_load but for crypto ops.
+ */
+int bus_dmamap_load_crp(bus_dma_tag_t dmat, bus_dmamap_t map,
+			struct cryptop *crp, bus_dmamap_callback_t *callback,
+			void *callback_arg, int flags);
+
+/*
  * Loads any memory descriptor.
  */
 int bus_dmamap_load_mem(bus_dma_tag_t dmat, bus_dmamap_t map,
@@ -302,5 +331,6 @@ BUS_DMAMAP_OP void bus_dmamap_sync(bus_dma_tag_t dmat, bus_dmamap_t dmamap, bus_
 BUS_DMAMAP_OP void bus_dmamap_unload(bus_dma_tag_t dmat, bus_dmamap_t dmamap);
 
 #undef BUS_DMAMAP_OP
+#endif /* _KERNEL */
 
 #endif /* _BUS_DMA_H_ */

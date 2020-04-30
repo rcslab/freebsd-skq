@@ -37,6 +37,9 @@ __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
 #include <sys/capsicum.h>
+#ifdef DO_EVENTHANDLER
+#include <sys/eventhandler.h>
+#endif
 #include <sys/kernel.h>
 #include <sys/module.h>
 #include <sys/conf.h>
@@ -734,7 +737,7 @@ iscsi_start(void)
 			       SYSCTL_STATIC_CHILDREN(_net),
 			       OID_AUTO,
 			       "iscsi_initiator",
-			       CTLFLAG_RD,
+			       CTLFLAG_RD | CTLFLAG_MPSAFE,
 			       0,
 			       "iSCSI Subsystem");
 

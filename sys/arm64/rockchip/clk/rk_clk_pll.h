@@ -2,7 +2,6 @@
  * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
  *
  * Copyright 2018 Emmanuel Vadot <manu@FreeBSD.org>
- * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -51,7 +50,7 @@ struct rk_clk_pll_def {
 	uint32_t		gate_shift;
 
 	uint32_t		mode_reg;
-	uint32_t		mode_val;
+	uint32_t		mode_shift;
 
 	uint32_t		flags;
 
@@ -60,8 +59,6 @@ struct rk_clk_pll_def {
 };
 
 #define	RK_CLK_PLL_HAVE_GATE	0x1
-
-#define	RK_CLK_PLL_MASK	0xFFFF0000
 
 int rk3328_clk_pll_register(struct clkdom *clkdom, struct rk_clk_pll_def *clkdef);
 int rk3399_clk_pll_register(struct clkdom *clkdom, struct rk_clk_pll_def *clkdef);

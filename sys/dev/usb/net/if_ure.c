@@ -41,6 +41,10 @@ __FBSDID("$FreeBSD$");
 
 #include <net/if.h>
 #include <net/if_var.h>
+#include <net/if_media.h>
+
+#include <dev/mii/mii.h>
+#include <dev/mii/miivar.h>
 
 #include <dev/usb/usb.h>
 #include <dev/usb/usbdi.h>
@@ -54,10 +58,13 @@ __FBSDID("$FreeBSD$");
 #include <dev/usb/net/usb_ethernet.h>
 #include <dev/usb/net/if_urereg.h>
 
+#include "miibus_if.h"
+
 #ifdef USB_DEBUG
 static int ure_debug = 0;
 
-static SYSCTL_NODE(_hw_usb, OID_AUTO, ure, CTLFLAG_RW, 0, "USB ure");
+static SYSCTL_NODE(_hw_usb, OID_AUTO, ure, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "USB ure");
 SYSCTL_INT(_hw_usb_ure, OID_AUTO, debug, CTLFLAG_RWTUN, &ure_debug, 0,
     "Debug level");
 #endif
@@ -673,12 +680,20 @@ ure_attach_post(struct usb_ether *ue)
 	else
 		ure_rtl8153_init(sc);
 
-	if (sc->sc_chip & URE_CHIP_VER_4C00)
+	if ((sc->sc_chip & URE_CHIP_VER_4C00) ||
+	    (sc->sc_chip & URE_CHIP_VER_4C10))
 		ure_read_mem(sc, URE_PLA_IDR, URE_MCU_TYPE_PLA,
 		    ue->ue_eaddr, 8);
 	else
 		ure_read_mem(sc, URE_PLA_BACKUP, URE_MCU_TYPE_PLA,
 		    ue->ue_eaddr, 8);
+
+	if (ETHER_IS_ZERO(sc->sc_ue.ue_eaddr)) {
+		device_printf(sc->sc_ue.ue_dev, "MAC assigned randomly\n");
+		arc4rand(sc->sc_ue.ue_eaddr, ETHER_ADDR_LEN, 0);
+		sc->sc_ue.ue_eaddr[0] &= ~0x01; /* unicast */
+		sc->sc_ue.ue_eaddr[0] |= 0x02;  /* locally administered */
+	}
 }
 
 static int
@@ -724,8 +739,10 @@ ure_init(struct usb_ether *ue)
 	ure_reset(sc);
 
 	/* Set MAC address. */
+	ure_write_1(sc, URE_PLA_CRWECR, URE_MCU_TYPE_PLA, URE_CRWECR_CONFIG);
 	ure_write_mem(sc, URE_PLA_IDR, URE_MCU_TYPE_PLA | URE_BYTE_EN_SIX_BYTES,
 	    IF_LLADDR(ifp), 8);
+	ure_write_1(sc, URE_PLA_CRWECR, URE_MCU_TYPE_PLA, URE_CRWECR_NORAML);
 
 	/* Reset the packet filter. */
 	ure_write_2(sc, URE_PLA_FMC, URE_MCU_TYPE_PLA,
@@ -773,6 +790,19 @@ ure_tick(struct usb_ether *ue)
 	}
 }
 
+static u_int
+ure_hash_maddr(void *arg, struct sockaddr_dl *sdl, u_int cnt)
+{
+	uint32_t h, *hashes = arg;
+
+	h = ether_crc32_be(LLADDR(sdl), ETHER_ADDR_LEN) >> 26;
+	if (h < 32)
+		hashes[0] |= (1 << h);
+	else
+		hashes[1] |= (1 << (h - 32));
+	return (1);
+}
+
 /*
  * Program the 64-bit multicast hash filter.
  */
@@ -781,9 +811,8 @@ ure_rxfilter(struct usb_ether *ue)
 {
 	struct ure_softc *sc = uether_getsc(ue);
 	struct ifnet *ifp = uether_getifp(ue);
-	struct ifmultiaddr *ifma;
-	uint32_t h, rxmode;
-	uint32_t hashes[2] = { 0, 0 };
+	uint32_t rxmode;
+	uint32_t h, hashes[2] = { 0, 0 };
 
 	URE_LOCK_ASSERT(sc, MA_OWNED);
 
@@ -799,18 +828,7 @@ ure_rxfilter(struct usb_ether *ue)
 	}
 
 	rxmode |= URE_RCR_AM;
-	if_maddr_rlock(ifp);
-	CK_STAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
-		if (ifma->ifma_addr->sa_family != AF_LINK)
-			continue;
-		h = ether_crc32_be(LLADDR((struct sockaddr_dl *)
-		ifma->ifma_addr), ETHER_ADDR_LEN) >> 26;
-		if (h < 32)
-			hashes[0] |= (1 << h);
-		else
-			hashes[1] |= (1 << (h - 32));
-	}
-	if_maddr_runlock(ifp);
+	if_foreach_llmaddr(ifp, ure_hash_maddr, &hashes);
 
 	h = bswap32(hashes[0]);
 	hashes[0] = bswap32(hashes[1]);

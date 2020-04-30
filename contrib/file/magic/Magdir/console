@@ -1,14 +1,14 @@
 
 #------------------------------------------------------------------------------
-# $File: console,v 1.40 2018/06/23 16:40:40 christos Exp $
+# $File: console,v 1.49 2019/05/27 01:33:32 christos Exp $
 # Console game magic
 # Toby Deshane <hac@shoelace.digivill.net>
 
 # ines: file(1) magic for Marat's iNES Nintendo Entertainment System ROM dump format
 # Updated by David Korth <gerbilsoft@gerbilsoft.com>
 # References:
-# - http://wiki.nesdev.com/w/index.php/INES
-# - http://wiki.nesdev.com/w/index.php/NES_2.0
+# - https://wiki.nesdev.com/w/index.php/INES
+# - https://wiki.nesdev.com/w/index.php/NES_2.0
 
 # Common header for iNES, NES 2.0, and Wii U iNES.
 0	name		nes-rom-image-ines
@@ -57,7 +57,7 @@
 
 #------------------------------------------------------------------------------
 # unif: file(1) magic for UNIF-format Nintendo Entertainment System ROM images
-# Reference: http://wiki.nesdev.com/w/index.php/UNIF
+# Reference: https://wiki.nesdev.com/w/index.php/UNIF
 # From: David Korth <gerbilsoft@gerbilsoft.com>
 #
 # NOTE: The UNIF format uses chunks instead of a fixed header,
@@ -69,7 +69,7 @@
 
 #------------------------------------------------------------------------------
 # fds: file(1) magic for Famciom Disk System disk images
-# Reference: http://wiki.nesdev.com/w/index.php/Family_Computer_Disk_System#.FDS_format
+# Reference: https://wiki.nesdev.com/w/index.php/Family_Computer_Disk_System#.FDS_format
 # From: David Korth <gerbilsoft@gerbilsoft.com>
 # TODO: Check "Disk info block" and get info from that in addition to the optional header.
 
@@ -186,7 +186,7 @@
 # genesis: file(1) magic for various Sega Mega Drive / Genesis ROM image and disc formats
 # Updated by David Korth <gerbilsoft@gerbilsoft.com>
 # References:
-# - http://www.retrodev.com/segacd.html
+# - https://www.retrodev.com/segacd.html
 # - http://devster.monkeeh.com/sega/32xguide1.txt
 #
 
@@ -269,7 +269,7 @@
 # Detects all Game Gear and export Sega Master System ROM images,
 # and some Japanese Sega Master System ROM images.
 # From: David Korth <gerbilsoft@gerbilsoft.com>
-# Reference: http://www.smspower.org/Development/ROMHeader
+# Reference: https://www.smspower.org/Development/ROMHeader
 #
 
 # General SMS header rule.
@@ -359,7 +359,7 @@
 #------------------------------------------------------------------------------
 # dreamcast: file(1) magic for the Sega Dreamcast disc image format.
 # From: David Korth <gerbilsoft@gerbilsoft.com>
-# Reference: http://mc.pp.se/dc/ip0000.bin.html
+# Reference: https://mc.pp.se/dc/ip0000.bin.html
 #
 
 # Common Sega Dreamcast disc header format.
@@ -422,7 +422,7 @@
 
 #------------------------------------------------------------------------------
 # gba: file(1) magic for the Nintendo Game Boy Advance raw ROM format
-# Reference: http://problemkaputt.de/gbatek.htm#gbacartridgeheader
+# Reference: https://problemkaputt.de/gbatek.htm#gbacartridgeheader
 #
 # Original version from: "Nelson A. de Oliveira" <naoliv@gmail.com>
 # Updated version from: David Korth <gerbilsoft@gerbilsoft.com>
@@ -435,7 +435,7 @@
 
 #------------------------------------------------------------------------------
 # nds: file(1) magic for the Nintendo DS(i) raw ROM format
-# Reference: http://problemkaputt.de/gbatek.htm#dscartridgeheader
+# Reference: https://problemkaputt.de/gbatek.htm#dscartridgeheader
 #
 # Original version from: "Nelson A. de Oliveira" <naoliv@gmail.com>
 # Updated version from: David Korth <gerbilsoft@gerbilsoft.com>
@@ -469,7 +469,7 @@
 # From: David Korth <gerbilsoft@gerbilsoft.com>
 # References:
 # - https://neogpc.googlecode.com/svn-history/r10/trunk/src/core/neogpc.cpp
-# - http://www.devrs.com/ngp/files/ngpctech.txt
+# - https://www.devrs.com/ngp/files/ngpctech.txt
 #
 0x0A	string	BY\ SNK\ CORPORATION	Neo Geo Pocket
 !:mime	application/x-neo-geo-pocket-rom
@@ -507,7 +507,23 @@
 
 #------------------------------------------------------------------------------
 # Microsoft Xbox executables .xbe (Esa Hyytia <ehyytia@cc.hut.fi>)
-0       string          XBEH            XBE, Microsoft Xbox executable
+0	string	XBEH	Microsoft Xbox executable
+!:mime	audio/x-xbox-executable
+!:ext	xbe
+# expect base address of 0x10000
+>0x0104                 ulelong =0x10000
+>>(0x0118.l-0x0FFF4)    lestring16 x       \b: "%.40s"
+>>(0x0118.l-0x0FFF5)    byte     x         (%c
+>>(0x0118.l-0x0FFF6)    byte     x         \b%c-
+>>(0x0118.l-0x0FFF8)    uleshort x         \b%03u)
+>>(0x0118.l-0x0FF60)    ulelong&0x80000007  0x80000007 \b, all regions
+>>(0x0118.l-0x0FF60)    ulelong&0x80000007  !0x80000007
+>>>(0x0118.l-0x0FF60)   ulelong >0           (regions:
+>>>>(0x0118.l-0x0FF60)  ulelong &0x00000001  NA
+>>>>(0x0118.l-0x0FF60)  ulelong &0x00000002  Japan
+>>>>(0x0118.l-0x0FF60)  ulelong &0x00000004  Rest_of_World
+>>>>(0x0118.l-0x0FF60)  ulelong &0x80000000  Manufacturer
+>>>(0x0118.l-0x0FF60)   ulelong >0           \b)
 # probabilistic checks whether signed or not
 >0x0004 ulelong =0x0
 >>&2    ulelong =0x0
@@ -515,21 +531,107 @@
 >0x0004 ulelong >0
 >>&2    ulelong >0
 >>>&2   ulelong >0    \b, signed
-# expect base address of 0x10000
->0x0104               ulelong =0x10000
->>(0x0118-0x0FF60)    ulelong&0x80000007  0x80000007 \b, all regions
->>(0x0118-0x0FF60)    ulelong&0x80000007  !0x80000007
->>>(0x0118-0x0FF60)   ulelong >0           (regions:
->>>>(0x0118-0x0FF60)  ulelong &0x00000001  NA
->>>>(0x0118-0x0FF60)  ulelong &0x00000002  Japan
->>>>(0x0118-0x0FF60)  ulelong &0x00000004  Rest_of_World
->>>>(0x0118-0x0FF60)  ulelong &0x80000000  Manufacturer
->>>(0x0118-0x0FF60)   ulelong >0           \b)
 
 # --------------------------------
 # Microsoft Xbox data file formats
 0       string          XIP0            XIP, Microsoft Xbox data
 0       string          XTF0            XTF, Microsoft Xbox data
+
+#------------------------------------------------------------------------------
+# Microsoft Xbox 360 executables (.xex)
+# From: David Korth <gerbilsoft@gerbilsoft.com>
+# References:
+# - https://free60project.github.io/wiki/XEX.html
+# - https://github.com/xenia-project/xenia/blob/HEAD/src/xenia/kernel/util/xex2_info.h
+
+# Title ID (part of Execution ID section)
+0		name	xbox-360-xex-execution-id
+>(0.L+0xC)	byte	x	(%c
+>(0.L+0xD)	byte	x	\b%c
+>(0.L+0xE)	beshort	x	\b-%04u, media ID:
+>(0.L)		belong	x	%08X)
+
+# Region code (part of Security Info)
+0	name	xbox-360-xex-region-code
+>0	ubelong	0xFFFFFFFF	\b, all regions
+>0	ubelong	!0xFFFFFFFF
+>>0	ubelong	>0		(regions:
+>>0	ubelong&0x000000FF	0x000000FF	USA
+>>0	ubelong&0x00000100	0x00000100	Japan
+>>0	ubelong&0x00000200	0x00000200	China
+>>0	ubelong&0x0000FC00	0x0000FC00	Asia
+>>0	ubelong&0x00FF0000	0x00FF0000	PAL
+>>0	ubelong&0x00FF0000	0x00FE0000	PAL [except AU/NZ]
+>>0	ubelong&0x00FF0000	0x00010000	AU/NZ
+>>0	ubelong&0xFF000000	0xFF000000	Other
+>>0	ubelong	>0		\b)
+
+0	string	XEX2	Microsoft Xbox 360 executable
+!:mime	audio/x-xbox360-executable
+!:ext	xex
+>0x18	search/0x100	\x00\x04\x00\x06
+>>&0	use	xbox-360-xex-execution-id
+>(0x010.L+0x178)	use	xbox-360-xex-region-code
+
+0	string	XEX1	Microsoft Xbox 360 executable (XEX1)
+!:mime	audio/x-xbox360-executable
+!:ext	xex
+>0x18	search/0x100	\x00\x04\x00\x06
+>>&0	use	xbox-360-xex-execution-id
+>(0x010.L+0x154)	use	xbox-360-xex-region-code
+
+#------------------------------------------------------------------------------
+# Microsoft Xbox 360 packages
+# From: David Korth <gerbilsoft@gerbilsoft.com>
+# References:
+# - https://free60project.github.io/wiki/STFS.html
+# - https://github.com/xenia-project/xenia/blob/HEAD/src/xenia/kernel/util/xex2_info.h
+
+# TODO: More information for console-signed packages.
+
+0	name	xbox-360-package
+>0x360	byte	x	(%c
+>0x361	byte	x	\b%c
+>0x362	beshort	x	\b-%04u, media ID:
+>0x354	belong	x	%08X)
+>0x344	belong	x	\b, content type:
+>>0x344	belong	0x1		Saved Game
+>>0x344	belong	0x2		Marketplace Content
+>>0x344	belong	0x3		Publisher
+>>0x344	belong	0x1000		Xbox 360 Title
+>>0x344	belong	0x2000		IPTV Pause Buffer
+>>0x344	belong	0x4000		Installed Game
+>>0x344	belong	0x5000		Original Xbox Game
+>>0x344	belong	0x9000		Avatar Item
+>>0x344	belong	0x10000		Profile
+>>0x344	belong	0x20000		Gamer Picture
+>>0x344	belong	0x30000		Theme
+>>0x344	belong	0x40000		Cache File
+>>0x344	belong	0x50000		Storage Download
+>>0x344	belong	0x60000		Xbox Saved Game
+>>0x344	belong	0x70000		Xbox Download
+>>0x344	belong	0x80000		Game Demo
+>>0x344	belong	0x90000		Video
+>>0x344	belong	0xA0000		Game
+>>0x344	belong	0xB0000		Installer
+>>0x344	belong	0xC0000		Game Trailer
+>>0x344	belong	0xD0000		Arcade Title
+>>0x344	belong	0xE0000		XNA
+>>0x344	belong	0xF0000		License Store
+>>0x344	belong	0x100000	Movie
+>>0x344	belong	0x200000	TV
+>>0x344	belong	0x300000	Music Video
+>>0x344	belong	0x400000	Game Video
+>>0x344	belong	0x500000	Podcast Video
+>>0x344	belong	0x600000	Viral Video
+>>0x344	belong	0x2000000	Community Game
+
+0	string	CON\x20	Microsoft Xbox 360 package (console-signed)
+>0	use	xbox-360-package
+0	string	PIRS	Microsoft Xbox 360 package (non-Xbox Live)
+>0	use	xbox-360-package
+0	string	LIVE	Microsoft Xbox 360 package (Xbox Live)
+>0	use	xbox-360-package
 
 # Atari Lynx cartridge dump (EXE/BLL header)
 # From: "Stefan A. Haubenthal" <polluks@web.de>
@@ -563,7 +665,7 @@
 >4	byte		x	%u tracks
 
 # IPS Patch Files from: From: Thomas Klausner <tk@giga.or.at>
-# see http://zerosoft.zophar.net/ips.php
+# see https://zerosoft.zophar.net/ips.php
 0	string	PATCH			IPS patch file
 
 # Playstations Patch Files from: From: Thomas Klausner <tk@giga.or.at>
@@ -654,7 +756,7 @@
 
 # Type: Nintendo GameCube/Wii common disc header data.
 # From: David Korth <gerbilsoft@gerbilsoft.com>
-# Reference: http://wiibrew.org/wiki/Wii_Disc
+# Reference: https://wiibrew.org/wiki/Wii_Disc
 0	name	nintendo-gcn-disc-common
 >0x20	string	x	"%.64s"
 >0x00	string	x	(%.6s
@@ -668,7 +770,7 @@
 
 # Type: Nintendo GameCube disc image
 # From: David Korth <gerbilsoft@gerbilsoft.com>
-# Reference: http://wiibrew.org/wiki/Wii_Disc
+# Reference: https://wiibrew.org/wiki/Wii_Disc
 0x1C	belong	0xC2339F3D	Nintendo GameCube disc image:
 !:mime	application/x-gamecube-rom
 >0	use	nintendo-gcn-disc-common
@@ -685,13 +787,13 @@
 
 # Type: Nintendo Wii disc image
 # From: David Korth <gerbilsoft@gerbilsoft.com>
-# Reference: http://wiibrew.org/wiki/Wii_Disc
+# Reference: https://wiibrew.org/wiki/Wii_Disc
 0x18	belong	0x5D1C9EA3	Nintendo Wii disc image:
 >0	use	nintendo-gcn-disc-common
 
 # Type: Nintendo Wii disc image (WBFS format)
 # From: David Korth <gerbilsoft@gerbilsoft.com>
-# Reference: http://wiibrew.org/wiki/Wii_Disc
+# Reference: https://wiibrew.org/wiki/Wii_Disc
 0	string	WBFS
 >0x218	belong	0x5D1C9EA3	Nintendo Wii disc image (WBFS format):
 !:mime	application/x-wii-rom
@@ -754,13 +856,15 @@
 
 # Type: Nintendo GameCube/Wii disc image (with SDK header)
 # From: David Korth <gerbilsoft@gerbilsoft.com>
-# Reference: http://wiibrew.org/wiki/Wii_Disc
+# Reference: https://wiibrew.org/wiki/Wii_Disc
 0		belong	0xFFFF0000
 >0x18		belong	0x00000000
 >>0x1C		belong	0x00000000
 >>>0x8018	belong	0x5D1C9EA3	Nintendo Wii SDK disc image:
+!:mime	application/x-wii-rom
 >>>>0x8000	use	nintendo-gcn-disc-common
 >>>0x801C	belong	0xC2339F3D	Nintendo GameCube SDK disc image:
+!:mime	application/x-gamecube-rom
 >>>>0x8000	use	nintendo-gcn-disc-common
 
 #------------------------------------------------------------------------------

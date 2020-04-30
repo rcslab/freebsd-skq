@@ -61,12 +61,12 @@ MALLOC_DEFINE(M_GEOM, "GEOM", "Geom data structures");
 struct sx topology_lock;
 
 static struct proc *g_proc;
-static struct thread *g_up_td;
-static struct thread *g_down_td;
-static struct thread *g_event_td;
+static struct thread __read_mostly *g_up_td;
+static struct thread __read_mostly *g_down_td;
+static struct thread __read_mostly *g_event_td;
 
-int g_debugflags;
-int g_collectstats = 1;
+int __read_mostly g_debugflags;
+int __read_mostly g_collectstats = G_STATS_PROVIDERS;
 int g_shutdown;
 int g_notaste;
 
@@ -157,57 +157,70 @@ g_init(void)
 }
 
 static int
-sysctl_kern_geom_conftxt(SYSCTL_HANDLER_ARGS)
+sysctl_kern_geom_confany(struct sysctl_req *req, g_event_t *func, size_t *hint)
 {
-	int error;
+	size_t len = 0;
+	int error = 0;
 	struct sbuf *sb;
 
-	sb = sbuf_new_auto();
-	g_waitfor_event(g_conftxt, sb, M_WAITOK, NULL);
-	error = SYSCTL_OUT(req, sbuf_data(sb), sbuf_len(sb) + 1);
+	if (req->oldptr == NULL) {
+		sb = sbuf_new(NULL, NULL, PAGE_SIZE, SBUF_FIXEDLEN |
+		    SBUF_INCLUDENUL);
+		sbuf_set_drain(sb, sbuf_count_drain, &len);
+		g_waitfor_event(func, sb, M_WAITOK, NULL);
+		req->oldidx = *hint = len;
+	} else {
+		sb = sbuf_new(NULL, NULL, *hint, SBUF_AUTOEXTEND |
+		    SBUF_INCLUDENUL);
+		g_waitfor_event(func, sb, M_WAITOK, NULL);
+		*hint = sbuf_len(sb);
+		error = SYSCTL_OUT(req, sbuf_data(sb), sbuf_len(sb));
+	}
 	sbuf_delete(sb);
 	return error;
+}
+
+static int
+sysctl_kern_geom_conftxt(SYSCTL_HANDLER_ARGS)
+{
+	static size_t hint = PAGE_SIZE;
+
+	return (sysctl_kern_geom_confany(req, g_conftxt, &hint));
 }
  
 static int
 sysctl_kern_geom_confdot(SYSCTL_HANDLER_ARGS)
 {
-	int error;
-	struct sbuf *sb;
+	static size_t hint = PAGE_SIZE;
 
-	sb = sbuf_new_auto();
-	g_waitfor_event(g_confdot, sb, M_WAITOK, NULL);
-	error = SYSCTL_OUT(req, sbuf_data(sb), sbuf_len(sb) + 1);
-	sbuf_delete(sb);
-	return error;
+	return (sysctl_kern_geom_confany(req, g_confdot, &hint));
 }
- 
+
 static int
 sysctl_kern_geom_confxml(SYSCTL_HANDLER_ARGS)
 {
-	int error;
-	struct sbuf *sb;
+	static size_t hint = PAGE_SIZE;
 
-	sb = sbuf_new_auto();
-	g_waitfor_event(g_confxml, sb, M_WAITOK, NULL);
-	error = SYSCTL_OUT(req, sbuf_data(sb), sbuf_len(sb) + 1);
-	sbuf_delete(sb);
-	return error;
+	return (sysctl_kern_geom_confany(req, g_confxml, &hint));
 }
 
-SYSCTL_NODE(_kern, OID_AUTO, geom, CTLFLAG_RW, 0, "GEOMetry management");
+SYSCTL_NODE(_kern, OID_AUTO, geom, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "GEOMetry management");
 
-SYSCTL_PROC(_kern_geom, OID_AUTO, confxml, CTLTYPE_STRING|CTLFLAG_RD,
-	0, 0, sysctl_kern_geom_confxml, "",
-	"Dump the GEOM config in XML");
+SYSCTL_PROC(_kern_geom, OID_AUTO, confxml,
+    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_NEEDGIANT, 0, 0,
+    sysctl_kern_geom_confxml, "",
+    "Dump the GEOM config in XML");
 
-SYSCTL_PROC(_kern_geom, OID_AUTO, confdot, CTLTYPE_STRING|CTLFLAG_RD,
-	0, 0, sysctl_kern_geom_confdot, "",
-	"Dump the GEOM config in dot");
+SYSCTL_PROC(_kern_geom, OID_AUTO, confdot,
+    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_NEEDGIANT, 0, 0,
+    sysctl_kern_geom_confdot, "",
+    "Dump the GEOM config in dot");
 
-SYSCTL_PROC(_kern_geom, OID_AUTO, conftxt, CTLTYPE_STRING|CTLFLAG_RD,
-	0, 0, sysctl_kern_geom_conftxt, "",
-	"Dump the GEOM config in txt");
+SYSCTL_PROC(_kern_geom, OID_AUTO, conftxt,
+    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_NEEDGIANT, 0, 0,
+    sysctl_kern_geom_conftxt, "",
+    "Dump the GEOM config in txt");
 
 SYSCTL_INT(_kern_geom, OID_AUTO, debugflags, CTLFLAG_RWTUN,
 	&g_debugflags, 0, "Set various trace levels for GEOM debugging");

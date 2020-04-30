@@ -53,6 +53,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/param.h>
 #include <sys/kernel.h>
 #include <sys/epoch.h>
+#include <sys/eventhandler.h>
 #include <sys/exec.h>
 #include <sys/file.h>
 #include <sys/filedesc.h>
@@ -107,6 +108,13 @@ struct thread0_storage thread0_st __aligned(32);
 struct	vmspace vmspace0;
 struct	proc *initproc;
 
+int
+linux_alloc_current_noop(struct thread *td __unused, int flags __unused)
+{
+	return (0);
+}
+int (*lkpi_alloc_current)(struct thread *, int) = linux_alloc_current_noop;
+
 #ifndef BOOTHOWTO
 #define	BOOTHOWTO	0
 #endif
@@ -151,11 +159,6 @@ SYSINIT(placeholder, SI_SUB_DUMMY, SI_ORDER_ANY, NULL, NULL);
 SET_DECLARE(sysinit_set, struct sysinit);
 struct sysinit **sysinit, **sysinit_end;
 struct sysinit **newsysinit, **newsysinit_end;
-
-EVENTHANDLER_LIST_DECLARE(process_init);
-EVENTHANDLER_LIST_DECLARE(thread_init);
-EVENTHANDLER_LIST_DECLARE(process_ctor);
-EVENTHANDLER_LIST_DECLARE(thread_ctor);
 
 /*
  * Merge a new sysinit set into the current set, reallocating it if
@@ -412,7 +415,6 @@ struct sysentvec null_sysvec = {
 	.sv_coredump	= NULL,
 	.sv_imgact_try	= NULL,
 	.sv_minsigstksz	= 0,
-	.sv_pagesize	= PAGE_SIZE,
 	.sv_minuser	= VM_MIN_ADDRESS,
 	.sv_maxuser	= VM_MAXUSER_ADDRESS,
 	.sv_usrstack	= USRSTACK,
@@ -454,7 +456,7 @@ proc0_init(void *dummy __unused)
 	GIANT_REQUIRED;
 	p = &proc0;
 	td = &thread0;
-	
+
 	/*
 	 * Initialize magic number and osrel.
 	 */
@@ -511,7 +513,6 @@ proc0_init(void *dummy __unused)
 	td->td_pflags = TDP_KTHREAD;
 	td->td_cpuset = cpuset_thread0();
 	td->td_domain.dr_policy = td->td_cpuset->cs_domain;
-	epoch_thread_init(td);
 	prison0_init();
 	p->p_peers = 0;
 	p->p_leader = p;
@@ -622,7 +623,6 @@ SYSINIT(p0init, SI_SUB_INTRINSIC, SI_ORDER_FIRST, proc0_init, NULL);
 static void
 proc0_post(void *dummy __unused)
 {
-	struct timespec ts;
 	struct proc *p;
 	struct rusage ru;
 	struct thread *td;
@@ -654,27 +654,8 @@ proc0_post(void *dummy __unused)
 	sx_sunlock(&allproc_lock);
 	PCPU_SET(switchtime, cpu_ticks());
 	PCPU_SET(switchticks, ticks);
-
-	/*
-	 * Give the ``random'' number generator a thump.
-	 */
-	nanotime(&ts);
-	srandom(ts.tv_sec ^ ts.tv_nsec);
 }
 SYSINIT(p0post, SI_SUB_INTRINSIC_POST, SI_ORDER_FIRST, proc0_post, NULL);
-
-static void
-random_init(void *dummy __unused)
-{
-
-	/*
-	 * After CPU has been started we have some randomness on most
-	 * platforms via get_cyclecount().  For platforms that don't
-	 * we will reseed random(9) in proc0_post() as well.
-	 */
-	srandom(get_cyclecount());
-}
-SYSINIT(random, SI_SUB_RANDOM, SI_ORDER_FIRST, random_init, NULL);
 
 /*
  ***************************************************************************
@@ -794,11 +775,9 @@ start_init(void *dummy)
 }
 
 /*
- * Like kproc_create(), but runs in its own address space.
- * We do this early to reserve pid 1.
- *
- * Note special case - do not make it runnable yet.  Other work
- * in progress will change this more.
+ * Like kproc_create(), but runs in its own address space.  We do this
+ * early to reserve pid 1.  Note special case - do not make it
+ * runnable yet, init execution is started when userspace can be served.
  */
 static void
 create_init(const void *udata __unused)
@@ -853,6 +832,5 @@ kick_init(const void *udata __unused)
 	thread_lock(td);
 	TD_SET_CAN_RUN(td);
 	sched_add(td, SRQ_BORING);
-	thread_unlock(td);
 }
 SYSINIT(kickinit, SI_SUB_KTHREAD_INIT, SI_ORDER_MIDDLE, kick_init, NULL);

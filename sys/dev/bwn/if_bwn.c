@@ -98,7 +98,7 @@ __FBSDID("$FreeBSD$");
 
 #include "gpio_if.h"
 
-static SYSCTL_NODE(_hw, OID_AUTO, bwn, CTLFLAG_RD, 0,
+static SYSCTL_NODE(_hw, OID_AUTO, bwn, CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
     "Broadcom driver parameters");
 
 /*
@@ -621,7 +621,7 @@ bwn_attach(device_t dev)
 		mac->mac_flags |= BWN_MAC_FLAG_BADFRAME_PREEMP;
 
 	TASK_INIT(&mac->mac_hwreset, 0, bwn_hwreset, mac);
-	TASK_INIT(&mac->mac_intrtask, 0, bwn_intrtask, mac);
+	NET_TASK_INIT(&mac->mac_intrtask, 0, bwn_intrtask, mac);
 	TASK_INIT(&mac->mac_txpower, 0, bwn_txpwr, mac);
 
 	error = bwn_attach_core(mac);
@@ -632,9 +632,10 @@ bwn_attach(device_t dev)
 		goto fail;
 
 	bhnd_format_chip_id(chip_name, sizeof(chip_name), sc->sc_cid.chip_id);
-	device_printf(sc->sc_dev, "WLAN (%s rev %u) "
+	device_printf(sc->sc_dev, "WLAN (%s rev %u sromrev %u) "
 	    "PHY (analog %d type %d rev %d) RADIO (manuf %#x ver %#x rev %d)\n",
-	    chip_name, bhnd_get_hwrev(sc->sc_dev), mac->mac_phy.analog,
+	    chip_name, bhnd_get_hwrev(sc->sc_dev),
+	    sc->sc_board_info.board_srom_rev, mac->mac_phy.analog,
 	    mac->mac_phy.type, mac->mac_phy.rev, mac->mac_phy.rf_manuf,
 	    mac->mac_phy.rf_ver, mac->mac_phy.rf_rev);
 	if (mac->mac_flags & BWN_MAC_FLAG_DMA)
@@ -2001,14 +2002,6 @@ bwn_set_channel(struct ieee80211com *ic)
 	bwn_mac_enable(mac);
 
 fail:
-	/*
-	 * Setup radio tap channel freq and flags
-	 */
-	sc->sc_tx_th.wt_chan_freq = sc->sc_rx_th.wr_chan_freq =
-		htole16(ic->ic_curchan->ic_freq);
-	sc->sc_tx_th.wt_chan_flags = sc->sc_rx_th.wr_chan_flags =
-		htole16(ic->ic_curchan->ic_flags & 0xffff);
-
 	BWN_UNLOCK(sc);
 }
 
@@ -5079,6 +5072,7 @@ bwn_intr(void *arg)
 static void
 bwn_intrtask(void *arg, int npending)
 {
+	struct epoch_tracker et;
 	struct bwn_mac *mac = arg;
 	struct bwn_softc *sc = mac->mac_sc;
 	uint32_t merged = 0;
@@ -5139,6 +5133,7 @@ bwn_intrtask(void *arg, int npending)
 	if (mac->mac_reason_intr & BWN_INTR_NOISESAMPLE_OK)
 		bwn_intr_noise(mac);
 
+	NET_EPOCH_ENTER(et);
 	if (mac->mac_flags & BWN_MAC_FLAG_DMA) {
 		if (mac->mac_reason[0] & BWN_DMAINTR_RX_DONE) {
 			bwn_dma_rx(mac->mac_method.dma.rx);
@@ -5146,6 +5141,7 @@ bwn_intrtask(void *arg, int npending)
 		}
 	} else
 		rx = bwn_pio_rx(&mac->mac_method.pio.rx);
+	NET_EPOCH_EXIT(et);
 
 	KASSERT(!(mac->mac_reason[1] & BWN_DMAINTR_RX_DONE), ("%s", __func__));
 	KASSERT(!(mac->mac_reason[2] & BWN_DMAINTR_RX_DONE), ("%s", __func__));

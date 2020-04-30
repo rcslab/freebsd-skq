@@ -35,7 +35,8 @@ static const char rcsid[] =
 
 typedef	enum ecode {
 	e_none, e_minute, e_hour, e_dom, e_month, e_dow,
-	e_cmd, e_timespec, e_username, e_group, e_mem
+	e_cmd, e_timespec, e_username, e_group, e_option,
+	e_mem
 #ifdef LOGIN_CAP
 	, e_class
 #endif
@@ -58,6 +59,7 @@ static char *ecodes[] =
 		"bad time specifier",
 		"bad username",
 		"bad group name",
+		"bad option",
 		"out of memory",
 #ifdef LOGIN_CAP
 		"bad class name",
@@ -367,7 +369,8 @@ load_entry(file, error_func, pw, envp)
 	e->gid = pw->pw_gid;
 
 	/* copy and fix up environment.  some variables are just defaults and
-	 * others are overrides.
+	 * others are overrides; we process only the overrides here, defaults
+	 * are handled in do_command after login.conf is processed.
 	 */
 	e->envp = env_copy(envp);
 	if (e->envp == NULL) {
@@ -386,6 +389,10 @@ load_entry(file, error_func, pw, envp)
 			goto eof;
 		}
 	}
+	/* If LOGIN_CAP, this is deferred to do_command where the login class
+	 * is processed. If !LOGIN_CAP, do it here.
+	 */
+#ifndef LOGIN_CAP
 	if (!env_get("HOME", e->envp)) {
 		prev_env = e->envp;
 		sprintf(envstr, "HOME=%s", pw->pw_dir);
@@ -397,17 +404,7 @@ load_entry(file, error_func, pw, envp)
 			goto eof;
 		}
 	}
-	if (!env_get("PATH", e->envp)) {
-		prev_env = e->envp;
-		sprintf(envstr, "PATH=%s", _PATH_DEFPATH);
-		e->envp = env_set(e->envp, envstr);
-		if (e->envp == NULL) {
-			warn("env_set(%s)", envstr);
-			env_free(prev_env);
-			ecode = e_mem;
-			goto eof;
-		}
-	}
+#endif
 	prev_env = e->envp;
 	sprintf(envstr, "%s=%s", "LOGNAME", pw->pw_name);
 	e->envp = env_set(e->envp, envstr);
@@ -428,6 +425,53 @@ load_entry(file, error_func, pw, envp)
 		goto eof;
 	}
 #endif
+
+	Debug(DPARS, ("load_entry()...checking for command options\n"))
+
+	ch = get_char(file);
+
+	while (ch == '-') {
+		Debug(DPARS|DEXT, ("load_entry()...expecting option\n"))
+		switch (ch = get_char(file)) {
+		case 'n':
+			Debug(DPARS|DEXT, ("load_entry()...got MAIL_WHEN_ERR ('n') option\n"))
+			/* only allow the user to set the option once */
+			if ((e->flags & MAIL_WHEN_ERR) == MAIL_WHEN_ERR) {
+				Debug(DPARS|DEXT, ("load_entry()...duplicate MAIL_WHEN_ERR ('n') option\n"))
+				ecode = e_option;
+				goto eof;
+			}
+			e->flags |= MAIL_WHEN_ERR;
+			break;
+		case 'q':
+			Debug(DPARS|DEXT, ("load_entry()...got DONT_LOG ('q') option\n"))
+			/* only allow the user to set the option once */
+			if ((e->flags & DONT_LOG) == DONT_LOG) {
+				Debug(DPARS|DEXT, ("load_entry()...duplicate DONT_LOG ('q') option\n"))
+				ecode = e_option;
+				goto eof;
+			}
+			e->flags |= DONT_LOG;
+			break;
+		default:
+			Debug(DPARS|DEXT, ("load_entry()...invalid option '%c'\n", ch))
+			ecode = e_option;
+			goto eof;
+		}
+		ch = get_char(file);
+		if (ch!='\t' && ch!=' ') {
+			ecode = e_option;
+			goto eof;
+		}
+
+		Skip_Blanks(ch, file)
+		if (ch == EOF || ch == '\n') {
+			ecode = e_cmd;
+			goto eof;
+		}
+	}
+
+	unget_char(ch, file);
 
 	Debug(DPARS, ("load_entry()...about to parse command\n"))
 

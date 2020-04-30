@@ -8,7 +8,7 @@
  *
  * 1. Copyright Notice
  *
- * Some or all of this work - Copyright (c) 1999 - 2019, Intel Corp.
+ * Some or all of this work - Copyright (c) 1999 - 2020, Intel Corp.
  * All rights reserved.
  *
  * 2. License
@@ -199,8 +199,8 @@ AcpiDmDumpName (
 
     /* Remove all trailing underscores from the name */
 
-    Length = ACPI_NAME_SIZE;
-    for (i = (ACPI_NAME_SIZE - 1); i != 0; i--)
+    Length = ACPI_NAMESEG_SIZE;
+    for (i = (ACPI_NAMESEG_SIZE - 1); i != 0; i--)
     {
         if (NewName[i] == '_')
         {
@@ -378,7 +378,7 @@ AcpiDmNamestring (
             AcpiOsPrintf (".");
         }
 
-        Name += ACPI_NAME_SIZE;
+        Name += ACPI_NAMESEG_SIZE;
     }
 }
 

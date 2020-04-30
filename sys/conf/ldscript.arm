@@ -6,7 +6,7 @@ SEARCH_DIR(/usr/lib);
 SECTIONS
 {
   /* Read-only sections, merged into text segment: */
-  . = KERNVIRTADDR + SIZEOF_HEADERS;
+  . = text_start; /* This is set using --defsym= on the command line. */
   .text      :
   {
     *(.text)
@@ -27,6 +27,11 @@ SECTIONS
   .gnu.version   : { *(.gnu.version)	}
   .gnu.version_d   : { *(.gnu.version_d)	}
   .gnu.version_r   : { *(.gnu.version_r)	}
+  .note.gnu.build-id : {
+    PROVIDE (__build_id_start = .);
+    *(.note.gnu.build-id)
+    PROVIDE (__build_id_end = .);
+  }
   .rel.text      :
     { *(.rel.text) *(.rel.gnu.linkonce.t*) }
   .rela.text     :

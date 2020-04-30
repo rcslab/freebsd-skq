@@ -16,9 +16,9 @@ SRCS.kqtest=		\
 	proc.c		\
 	signal.c	\
 	read_m.c 	\
-	user.c \
-	close_m.c
+	user.c 
 	
 WARNS?=	2
 LDADD+= -lthr
+
 .include <bsd.test.mk>

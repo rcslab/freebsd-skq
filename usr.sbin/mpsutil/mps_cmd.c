@@ -39,12 +39,6 @@ __RCSID("$FreeBSD$");
 #include <sys/param.h>
 #include <sys/errno.h>
 #include <sys/ioctl.h>
-#if 0
-#include <sys/mps_ioctl.h>
-#else
-#include "mps_ioctl.h"
-#include "mpr_ioctl.h"
-#endif
 #include <sys/sysctl.h>
 #include <sys/uio.h>
 
@@ -56,6 +50,8 @@ __RCSID("$FreeBSD$");
 #include <unistd.h>
 
 #include "mpsutil.h"
+#include <dev/mps/mps_ioctl.h>
+#include <dev/mpr/mpr_ioctl.h>
 
 #ifndef USE_MPT_IOCTLS
 #define USE_MPT_IOCTLS
@@ -279,6 +275,29 @@ mps_map_btdh(int fd, uint16_t *devhandle, uint16_t *bus, uint16_t *target)
 	*target = map.TargetID;
 	*devhandle = map.DevHandle;
 
+	return (0);
+}
+
+int
+mps_set_slot_status(int fd, U16 handle, U16 slot, U32 status)
+{
+	MPI2_SEP_REQUEST req;
+	MPI2_SEP_REPLY reply;
+
+	bzero(&req, sizeof(req));
+	req.Function = MPI2_FUNCTION_SCSI_ENCLOSURE_PROCESSOR;
+	req.Action = MPI2_SEP_REQ_ACTION_WRITE_STATUS;
+	req.Flags = MPI2_SEP_REQ_FLAGS_ENCLOSURE_SLOT_ADDRESS;
+	req.EnclosureHandle = handle;
+	req.Slot = slot;
+	req.SlotStatus = status;
+
+	if (mps_pass_command(fd, &req, sizeof(req), &reply, sizeof(reply),
+	    NULL, 0, NULL, 0, 30) != 0)
+		return (errno);
+
+	if (!IOC_STATUS_SUCCESS(reply.IOCStatus))
+		return (EIO);
 	return (0);
 }
 
@@ -651,27 +670,32 @@ mps_pass_command(int fd, void *req, uint32_t req_len, void *reply,
 {
 	struct mprs_pass_thru pass;
 
+	bzero(&pass, sizeof(pass));
 	pass.PtrRequest = (uint64_t)(uintptr_t)req;
 	pass.PtrReply = (uint64_t)(uintptr_t)reply;
-	pass.PtrData = (uint64_t)(uintptr_t)data_in;
-	pass.PtrDataOut = (uint64_t)(uintptr_t)data_out;
 	pass.RequestSize = req_len;
 	pass.ReplySize = reply_len;
-	pass.DataSize = datain_len;
-	pass.DataOutSize = dataout_len;
 	if (datain_len && dataout_len) {
+		pass.PtrData = (uint64_t)(uintptr_t)data_in;
+		pass.PtrDataOut = (uint64_t)(uintptr_t)data_out;
+		pass.DataSize = datain_len;
+		pass.DataOutSize = dataout_len;
 		if (is_mps) {
 			pass.DataDirection = MPS_PASS_THRU_DIRECTION_BOTH;
 		} else {
 			pass.DataDirection = MPR_PASS_THRU_DIRECTION_BOTH;
 		}
 	} else if (datain_len) {
+		pass.PtrData = (uint64_t)(uintptr_t)data_in;
+		pass.DataSize = datain_len;
 		if (is_mps) {
 			pass.DataDirection = MPS_PASS_THRU_DIRECTION_READ;
 		} else {
 			pass.DataDirection = MPR_PASS_THRU_DIRECTION_READ;
 		}
 	} else if (dataout_len) {
+		pass.PtrData = (uint64_t)(uintptr_t)data_out;
+		pass.DataSize = dataout_len;
 		if (is_mps) {
 			pass.DataDirection = MPS_PASS_THRU_DIRECTION_WRITE;
 		} else {
@@ -696,23 +720,36 @@ mps_get_iocfacts(int fd)
 {
 	MPI2_IOC_FACTS_REPLY *facts;
 	MPI2_IOC_FACTS_REQUEST req;
+	char msgver[8], sysctlname[128];
+	size_t len, factslen;
 	int error;
 
-	facts = malloc(sizeof(MPI2_IOC_FACTS_REPLY));
+	snprintf(sysctlname, sizeof(sysctlname), "dev.%s.%d.msg_version",
+	    is_mps ? "mps" : "mpr", mps_unit);
+
+	factslen = sizeof(MPI2_IOC_FACTS_REPLY);
+	len = sizeof(msgver);
+	error = sysctlbyname(sysctlname, msgver, &len, NULL, 0);
+	if (error == 0) {
+		if (strncmp(msgver, "2.6", sizeof(msgver)) == 0)
+			factslen += 4;
+	}
+
+	facts = malloc(factslen);
 	if (facts == NULL) {
 		errno = ENOMEM;
 		return (NULL);
 	}
 
-	bzero(&req, sizeof(MPI2_IOC_FACTS_REQUEST));
+	bzero(&req, factslen);
 	req.Function = MPI2_FUNCTION_IOC_FACTS;
 
 #if 1
 	error = mps_pass_command(fd, &req, sizeof(MPI2_IOC_FACTS_REQUEST),
-	    facts, sizeof(MPI2_IOC_FACTS_REPLY), NULL, 0, NULL, 0, 10);
+	    facts, factslen, NULL, 0, NULL, 0, 10);
 #else
 	error = mps_user_command(fd, &req, sizeof(MPI2_IOC_FACTS_REQUEST),
-	    facts, sizeof(MPI2_IOC_FACTS_REPLY), NULL, 0, 0);
+	    facts, factslen, NULL, 0, 0);
 #endif
 	if (error) {
 		free(facts);

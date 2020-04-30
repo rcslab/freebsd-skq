@@ -1,7 +1,12 @@
 # $FreeBSD$
-# For now only for rk3328-rock64 dts file.
 
 DTS=	\
-	rockchip/rk3328-rock64.dts
+	rockchip/rk3399-khadas-edge-captain.dts \
+	rockchip/rk3399-khadas-edge.dts \
+	rockchip/rk3399-khadas-edge-v.dts \
+	rockchip/rk3328-rock64.dts \
+	rockchip/rk3399-rockpro64.dts
+
+DTSO=	rk3328-dwc3.dtso
 
 .include <bsd.dtb.mk>

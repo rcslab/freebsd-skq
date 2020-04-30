@@ -1,8 +1,7 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
  *
- * Copyright (c) 1997, Stefan Esser <se@freebsd.org>
- * All rights reserved.
+ * Copyright 1997, Stefan Esser <se@freebsd.org>
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -119,7 +118,7 @@ static d_ioctl_t	pci_ioctl;
 
 struct cdevsw pcicdev = {
 	.d_version =	D_VERSION,
-	.d_flags =	D_NEEDGIANT,
+	.d_flags =	0,
 	.d_open =	pci_open,
 	.d_close =	pci_close,
 	.d_ioctl =	pci_ioctl,
@@ -855,6 +854,7 @@ pci_bar_mmap(device_t pcidev, struct pci_bar_mmap *pbm)
 	struct thread *td;
 	struct sglist *sg;
 	struct pci_map *pm;
+	vm_paddr_t membase;
 	vm_paddr_t pbase;
 	vm_size_t plen;
 	vm_offset_t addr;
@@ -877,8 +877,9 @@ pci_bar_mmap(device_t pcidev, struct pci_bar_mmap *pbm)
 		return (EBUSY); /* XXXKIB enable if _ACTIVATE */
 	if (!PCI_BAR_MEM(pm->pm_value))
 		return (EIO);
-	pbase = trunc_page(pm->pm_value);
-	plen = round_page(pm->pm_value + ((pci_addr_t)1 << pm->pm_size)) -
+	membase = pm->pm_value & PCIM_BAR_MEM_BASE;
+	pbase = trunc_page(membase);
+	plen = round_page(membase + ((pci_addr_t)1 << pm->pm_size)) -
 	    pbase;
 	prot = VM_PROT_READ | (((pbm->pbm_flags & PCIIO_BAR_MMAP_RW) != 0) ?
 	    VM_PROT_WRITE : 0);
@@ -910,7 +911,7 @@ pci_bar_mmap(device_t pcidev, struct pci_bar_mmap *pbm)
 	}
 	pbm->pbm_map_base = (void *)addr;
 	pbm->pbm_map_length = plen;
-	pbm->pbm_bar_off = pm->pm_value - pbase;
+	pbm->pbm_bar_off = membase - pbase;
 	pbm->pbm_bar_length = (pci_addr_t)1 << pm->pm_size;
 
 out:
@@ -962,6 +963,9 @@ pci_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int flag, struct thread *t
 		}
 	}
 
+
+	/* Giant because newbus is Giant locked revisit with newbus locking */
+	mtx_lock(&Giant);
 
 	switch (cmd) {
 	case PCIOCGETCONF:
@@ -1286,8 +1290,10 @@ getconfexit:
 	case PCIOCBARMMAP:
 		pbm = (struct pci_bar_mmap *)data;
 		if ((flag & FWRITE) == 0 &&
-		    (pbm->pbm_flags & PCIIO_BAR_MMAP_RW) != 0)
-			return (EPERM);
+		    (pbm->pbm_flags & PCIIO_BAR_MMAP_RW) != 0) {
+			error = EPERM;
+			break;
+		}
 		pcidev = pci_find_dbsf(pbm->pbm_sel.pc_domain,
 		    pbm->pbm_sel.pc_bus, pbm->pbm_sel.pc_dev,
 		    pbm->pbm_sel.pc_func);
@@ -1298,6 +1304,8 @@ getconfexit:
 		error = ENOTTY;
 		break;
 	}
+
+	mtx_unlock(&Giant);
 
 	return (error);
 }

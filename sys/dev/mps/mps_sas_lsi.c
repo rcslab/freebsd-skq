@@ -772,10 +772,7 @@ mpssas_add_device(struct mps_softc *sc, u16 handle, u8 linkrate){
 	    devstring, mps_describe_table(mps_linkrate_names, targ->linkrate),
 	    targ->handle, targ->encl_handle, targ->encl_slot);
 
-#if __FreeBSD_version < 1000039
-	if ((sassc->flags & MPSSAS_IN_STARTUP) == 0)
-#endif
-		mpssas_rescan_target(sc, targ);
+	mpssas_rescan_target(sc, targ);
 	mps_dprint(sc, MPS_MAPPING, "Target id 0x%x added\n", targ->tid);
 
 	/*
@@ -790,7 +787,7 @@ mpssas_add_device(struct mps_softc *sc, u16 handle, u8 linkrate){
 		cm = &sc->commands[i];
 		if (cm->cm_flags & MPS_CM_FLAGS_SATA_ID_TIMEOUT) {
 			targ->timeouts++;
-			cm->cm_state = MPS_CM_STATE_TIMEDOUT;
+			cm->cm_flags |= MPS_CM_FLAGS_TIMEDOUT;
 
 			if ((targ->tm = mpssas_alloc_tm(sc)) != NULL) {
 				mps_dprint(sc, MPS_INFO, "%s: sending Target "
@@ -979,7 +976,7 @@ mpssas_get_sata_identify(struct mps_softc *sc, u16 handle,
  		 * reset
  		 */ 
  		mps_dprint(sc, MPS_INFO|MPS_FAULT|MPS_MAPPING,
-		    "Request for SATA PASSTHROUGH page completed with error %d",
+		    "Request for SATA PASSTHROUGH page completed with error %d\n",
 		    error);
 		error = ENXIO;
 		goto out;
@@ -1017,9 +1014,11 @@ mpssas_ata_id_timeout(struct mps_softc *sc, struct mps_command *cm)
 	/*
 	 * The Abort Task cannot be sent from here because the driver has not
 	 * completed setting up targets.  Instead, the command is flagged so
-	 * that special handling will be used to send the abort.
+	 * that special handling will be used to send the abort. Now that
+	 * this command has timed out, it's no longer in the queue.
 	 */
 	cm->cm_flags |= MPS_CM_FLAGS_SATA_ID_TIMEOUT;
+	cm->cm_state = MPS_CM_STATE_BUSY;
 }
 
 static int
@@ -1064,10 +1063,7 @@ mpssas_volume_add(struct mps_softc *sc, u16 handle)
 		free(lun, M_MPT2);
 	}
 	SLIST_INIT(&targ->luns);
-#if __FreeBSD_version < 1000039
-	if ((sassc->flags & MPSSAS_IN_STARTUP) == 0)
-#endif
-		mpssas_rescan_target(sc, targ);
+	mpssas_rescan_target(sc, targ);
 	mps_dprint(sc, MPS_MAPPING, "RAID target id %d added (WWID = 0x%jx)\n",
 	    targ->tid, wwid);
 out:

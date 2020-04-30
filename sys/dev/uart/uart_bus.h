@@ -57,7 +57,8 @@
 #define	UART_IOCTL_BAUD		4
 
 /* UART quirk flags */
-#define	UART_F_BUSY_DETECT	0x1
+#define	UART_F_BUSY_DETECT		0x1
+#define	UART_F_IGNORE_SPCR_REGSHFT	0x2
 
 /*
  * UART class & instance (=softc)
@@ -110,6 +111,7 @@ struct uart_softc {
 	int		sc_rxput;
 	int		sc_rxget;
 	int		sc_rxfifosz;	/* Size of RX FIFO. */
+	int		sc_rxoverruns;
 
 	/* Transmitter data. */
 	uint8_t		*sc_txbuf;

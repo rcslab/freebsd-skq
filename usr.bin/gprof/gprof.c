@@ -49,6 +49,7 @@ __FBSDID("$FreeBSD$");
 #include <stdint.h>
 #include <string.h>
 
+#define	EXTERN
 #include "gprof.h"
 
 static int valcmp(const void *, const void *);
@@ -160,8 +161,11 @@ main(int argc, char **argv)
 	 *	get information from the executable file.
 	 */
     if ((Kflag && kernel_getnfile(a_outname, &defaultEs) == -1) ||
-      (!Kflag && elf_getnfile(a_outname, &defaultEs) == -1 &&
-      aout_getnfile(a_outname, &defaultEs) == -1))
+      (!Kflag && elf_getnfile(a_outname, &defaultEs) == -1
+#ifdef WITH_AOUT
+      && aout_getnfile(a_outname, &defaultEs) == -1
+#endif
+      ))
 	errx(1, "%s: bad format", a_outname);
 	/*
 	 *	sort symbol table.

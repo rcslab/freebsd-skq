@@ -78,7 +78,7 @@ typedef int b_sync_t(struct bufobj *, int waitfor);
 typedef void b_bdflush_t(struct bufobj *, struct buf *);
 
 struct buf_ops {
-	char		*bop_name;
+	const char	*bop_name;
 	b_write_t	*bop_write;
 	b_strategy_t	*bop_strategy;
 	b_sync_t	*bop_sync;
@@ -117,6 +117,7 @@ struct bufobj {
 #define	BO_ONWORKLST	(1 << 0)	/* On syncer work-list */
 #define	BO_WWAIT	(1 << 1)	/* Wait for output to complete */
 #define	BO_DEAD		(1 << 2)	/* Dead; only with INVARIANTS */
+#define	BO_NOBUFS	(1 << 3)	/* No bufs allowed */
 
 #define	BO_LOCKPTR(bo)		(&(bo)->bo_lock)
 #define	BO_LOCK(bo)		rw_wlock(BO_LOCKPTR((bo)))
@@ -127,7 +128,7 @@ struct bufobj {
 #define	ASSERT_BO_LOCKED(bo)	rw_assert(BO_LOCKPTR((bo)), RA_LOCKED)
 #define	ASSERT_BO_UNLOCKED(bo)	rw_assert(BO_LOCKPTR((bo)), RA_UNLOCKED)
 
-void bufobj_init(struct bufobj *bo, void *private);
+void bufobj_init(struct bufobj *bo, void *priv);
 void bufobj_wdrop(struct bufobj *bo);
 void bufobj_wref(struct bufobj *bo);
 void bufobj_wrefl(struct bufobj *bo);

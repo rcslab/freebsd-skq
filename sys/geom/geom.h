@@ -218,7 +218,8 @@ struct g_provider {
 	off_t			stripesize;
 	off_t			stripeoffset;
 	struct devstat		*stat;
-	u_int			nstart, nend;
+	u_int			spare1;
+	u_int			spare2;
 	u_int			flags;
 #define G_PF_WITHER		0x2
 #define G_PF_ORPHAN		0x4
@@ -229,17 +230,6 @@ struct g_provider {
 	/* Two fields for the implementing class to use */
 	void			*private;
 	u_int			index;
-};
-
-/*
- * Descriptor of a classifier. We can register a function and
- * an argument, which is called by g_io_request() on bio's
- * that are not previously classified.
- */
-struct g_classifier_hook {
-	TAILQ_ENTRY(g_classifier_hook) link;
-	int			(*func)(void *arg, struct bio *bp);
-	void			*arg;
 };
 
 /* BIO_GETATTR("GEOM::setstate") argument values. */
@@ -255,11 +245,18 @@ void g_dev_physpath_changed(void);
 struct g_provider *g_dev_getprovider(struct cdev *dev);
 
 /* geom_dump.c */
-void g_trace(int level, const char *, ...);
-#	define G_T_TOPOLOGY	1
-#	define G_T_BIO		2
-#	define G_T_ACCESS	4
-
+void (g_trace)(int level, const char *, ...) __printflike(2, 3);
+#define	G_T_TOPOLOGY		0x01
+#define	G_T_BIO			0x02
+#define	G_T_ACCESS		0x04
+extern int g_debugflags;
+#define	G_F_FOOTSHOOTING	0x10
+#define	G_F_DISKIOCTL		0x40
+#define	G_F_CTLDUMP		0x80
+#define	g_trace(level, fmt, ...) do {				\
+	if (__predict_false(g_debugflags & (level)))		\
+		(g_trace)(level, fmt, ## __VA_ARGS__);		\
+} while (0)
 
 /* geom_event.c */
 typedef void g_event_t(void *, int flag);
@@ -336,8 +333,7 @@ void g_io_deliver(struct bio *bp, int error);
 int g_io_getattr(const char *attr, struct g_consumer *cp, int *len, void *ptr);
 int g_io_zonecmd(struct disk_zone_args *zone_args, struct g_consumer *cp);
 int g_io_flush(struct g_consumer *cp);
-int g_register_classifier(struct g_classifier_hook *hook);
-void g_unregister_classifier(struct g_classifier_hook *hook);
+int g_io_speedup(size_t shortage, u_int flags, size_t *resid, struct g_consumer *cp);
 void g_io_request(struct bio *bp, struct g_consumer *cp);
 struct bio *g_new_bio(void);
 struct bio *g_alloc_bio(void);
@@ -345,7 +341,8 @@ void g_reset_bio(struct bio *);
 void * g_read_data(struct g_consumer *cp, off_t offset, off_t length, int *error);
 int g_write_data(struct g_consumer *cp, off_t offset, void *ptr, off_t length);
 int g_delete_data(struct g_consumer *cp, off_t offset, off_t length);
-void g_print_bio(struct bio *bp);
+void g_format_bio(struct sbuf *, const struct bio *bp);
+void g_print_bio(const char *prefix, const struct bio *bp, const char *fmtsuffix, ...) __printflike(3, 4);
 int g_use_g_read_data(void *, off_t, void **, int);
 int g_use_g_write_data(void *, off_t, void *, int);
 
@@ -398,6 +395,8 @@ g_free(void *ptr)
 		sx_xunlock(&topology_lock);			\
 	} while (0)
 
+#define g_topology_locked()	sx_xlocked(&topology_lock)
+
 #define g_topology_assert()					\
 	do {							\
 		sx_assert(&topology_lock, SX_XLOCKED);		\
@@ -415,7 +414,7 @@ g_free(void *ptr)
 	static moduledata_t name##_mod = {			\
 		#name, g_modevent, &class			\
 	};							\
-	DECLARE_MODULE(name, name##_mod, SI_SUB_DRIVERS, SI_ORDER_FIRST);
+	DECLARE_MODULE(name, name##_mod, SI_SUB_DRIVERS, SI_ORDER_SECOND);
 
 int g_is_geom_thread(struct thread *td);
 
@@ -427,6 +426,7 @@ void gctl_set_param_err(struct gctl_req *req, const char *param, void const *ptr
 void *gctl_get_param(struct gctl_req *req, const char *param, int *len);
 char const *gctl_get_asciiparam(struct gctl_req *req, const char *param);
 void *gctl_get_paraml(struct gctl_req *req, const char *param, int len);
+void *gctl_get_paraml_opt(struct gctl_req *req, const char *param, int len);
 int gctl_error(struct gctl_req *req, const char *fmt, ...) __printflike(2, 3);
 struct g_class *gctl_get_class(struct gctl_req *req, char const *arg);
 struct g_geom *gctl_get_geom(struct gctl_req *req, struct g_class *mpr, char const *arg);
