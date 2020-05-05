@@ -1653,15 +1653,17 @@ kqueue_kevent(struct kqueue *kq, struct kevq *kevq, struct thread *td, int nchan
 			kevq->kevq_tot_time += cur_ts;
 
 			/* update average latency */
-			avg = cur_ts / kevq->kevq_last_nkev;
-			CTR3(KTR_KQ, "kevent: td %d nkev %d kevent (avg) %ld ns", td->td_tid, kevq->kevq_last_nkev, avg);
-			if (kevq->kevq_avg_lat != 0) {
-				kevq->kevq_avg_lat = calc_overtime_avg(kevq->kevq_avg_lat, avg, 95);
-			} else {
-				kevq->kevq_avg_lat = avg;
-			}
+			if (kevq->kevq_last_nkev > 0) {
+				avg = cur_ts / kevq->kevq_last_nkev;
+				CTR3(KTR_KQ, "kevent: td %d nkev %d kevent (avg) %ld ns", td->td_tid, kevq->kevq_last_nkev, avg);
+				if (kevq->kevq_avg_lat != 0) {
+					kevq->kevq_avg_lat = calc_overtime_avg(kevq->kevq_avg_lat, avg, 95);
+				} else {
+					kevq->kevq_avg_lat = avg;
+				}
 
-			CTR3(KTR_KQ, "kevent: td %d nkev %d kevent (new avg) %ld ns", td->td_tid, kevq->kevq_last_nkev, kevq->kevq_avg_lat);
+				CTR3(KTR_KQ, "kevent: td %d nkev %d kevent (new avg) %ld ns", td->td_tid, kevq->kevq_last_nkev, kevq->kevq_avg_lat);
+			}
 			
 			/* reset kevq->kevq_last_kev and nkev */
 			kevq->kevq_last_kev = KEVQ_LAST_KERN;
@@ -2854,7 +2856,7 @@ kevq_worksteal(struct kevq *kevq)
 {
 	struct kevq *other_kevq;
 	struct kqueue *kq;
-	struct knote *ws_kn;
+	struct knote *ws_kn, *next_kn;
 	//struct knlist *knl;
 	struct knote *ws_lst[8];
 	int ws_count;
@@ -2888,7 +2890,7 @@ kevq_worksteal(struct kevq *kevq)
 	}
 	KVLST_RUNLOCK(kq);
 
-	//CTR2(KTR_KQ, "kevq_worksteal: kevq %p selected kevq %p", kevq, other_kevq);
+	CTR2(KTR_KQ, "kevq_worksteal: kevq %p selected kevq %p", kevq, other_kevq);
 
 	if (other_kevq != NULL) {
 		KEVQ_OWNED(other_kevq);
@@ -2896,8 +2898,10 @@ kevq_worksteal(struct kevq *kevq)
 		ws_kn = kevq_peek_knote(other_kevq);
 
 		while((ws_count < tgt_count) && (ws_kn != NULL)) {
-
 			/* fast fail */
+			next_kn = TAILQ_NEXT(ws_kn, kn_tqe);
+			CTR2(KTR_KQ, "ws_kn = %p, next_kn = %p\n", ws_kn, next_kn);
+
 			if (!knote_stealable(ws_kn)) {
 				goto end_loop;
 			}
@@ -2937,7 +2941,7 @@ kevq_worksteal(struct kevq *kevq)
 			// 	KN_LEAVE_FLUX_WAKEUP(ws_kn);
 			// }
 end_loop:
-			ws_kn = TAILQ_NEXT(ws_kn, kn_tqe);
+			ws_kn = next_kn;
 		}
 
 		KEVQ_UNLOCK(other_kevq);
