@@ -2044,6 +2044,7 @@ findkn:
 		KQ_UNLOCK(kq);
 
 		knote_drop(kn, td);
+		CTR3(KTR_KQ, "kqueue_register: kq %p deleted kn %p, fd %d", kq, kn, kev->ident);
 		goto done;
 	}
 
@@ -3068,11 +3069,6 @@ kqueue_scan(struct kevq *kevq, int maxevents, struct kevent_copyops *k_ops,
 	error = 0;
 	haskqglobal = 0;
 
-	KEVQ_LOCK(kevq);
-	/* release processing knotes first */
-	kevq_rel_proc_kn(kevq);
-	KEVQ_UNLOCK(kevq);
-
 	// it's important that this is done before activate
 	if (maxevents == 0)
 		goto done_nl;
@@ -3081,6 +3077,11 @@ kqueue_scan(struct kevq *kevq, int maxevents, struct kevent_copyops *k_ops,
 		/* activate kq if not already activated */
 		kevq_activate(kevq, td);
 	}
+
+	KEVQ_LOCK(kevq);
+	/* release processing knotes first */
+	kevq_rel_proc_kn(kevq);
+	KEVQ_UNLOCK(kevq);
 
 	/* adjust max events according to the target frequency */
 	if ((kq->kq_flags & KQ_FLAG_MULTI) && kq->kq_tfreq > 0 && kevq->kevq_avg_lat > 0) {
@@ -4199,7 +4200,7 @@ knote_activate(struct knote *kn)
 
 	KQ_NOTOWNED(kq);
 
-	CTR2(KTR_KQ, "knote_activate: kn %p, flags %d", kn, kn->kn_status);
+	CTR3(KTR_KQ, "knote_activate: kn %p, fd %d, flags %d", kn, kn->kn_id, kn->kn_status);
 	KN_FLUX_NOTOWNED(kn);
 	KASSERT(kn_in_flux(kn), ("knote %p not in flux", kn));
 	
