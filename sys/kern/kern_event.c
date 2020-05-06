@@ -3050,7 +3050,7 @@ kqueue_scan(struct kevq *kevq, int maxevents, struct kevent_copyops *k_ops,
 {
 	struct kqueue *kq;
 	struct kevent *kevp;
-	struct knote *kn, *marker, *rtmarker, *nextkn;
+	struct knote *kn, *marker, *rtmarker;
 	struct knlist *knl;
 	sbintime_t asbt, rsbt, fsbt;
 	int count, error, haskqglobal, influx, nkev, touch, fevent;
@@ -3077,7 +3077,6 @@ kqueue_scan(struct kevq *kevq, int maxevents, struct kevent_copyops *k_ops,
 		/* activate kq if not already activated */
 		kevq_activate(kevq, td);
 	}
-
 	KEVQ_LOCK(kevq);
 	/* release processing knotes first */
 	kevq_rel_proc_kn(kevq);
@@ -3280,7 +3279,6 @@ retry:
 
 	influx = 0;
 	kn = NULL;
-	nextkn = NULL;
 	while (count < maxevents) {
 		KEVQ_OWNED(kevq);
 		
@@ -3289,20 +3287,16 @@ retry:
 			if (curr < rtlimit) {
 				kntq = &kevq->kn_rt_head;
 				kncnt = &kevq->kn_rt_count;
+				kn = TAILQ_FIRST(kntq);
 			} else {
-				/* we've reached the limit, dequeue the realtime marker knote */
-				nextkn = rtmarker;
+				// otherwise just dequeue the rtmarker
+				kn = rtmarker;
 			}
 		} else {
 			kntq = &kevq->kn_head;
 			kncnt = &kevq->kn_count;
+			kn = TAILQ_FIRST(kntq);
 		}
-
-		if (nextkn == NULL) {
-			nextkn = TAILQ_FIRST(kntq);
-		}
-
-		kn = nextkn;
 		
 		KASSERT(kn != NULL, ("kqueue_scan dequeued NULL"));
 
@@ -3326,14 +3320,6 @@ retry:
 			continue;
 		}
 
-		nextkn = TAILQ_NEXT(kn, kn_tqe);
-
-		if ((kn->kn_status & KN_PROCESSING) == KN_PROCESSING) {
-			// ignore knotes being processed
-			KN_FLUX_UNLOCK(kn);
-			continue;
-		}
-
 		// now this kn is going to be always dequeued from the kevq
 		TAILQ_REMOVE(kntq, kn, kn_tqe);
 
@@ -3348,7 +3334,6 @@ retry:
 
 			if (kn == rtmarker) {
 				rdrained = 1;
-				nextkn = NULL;
 				continue;
 			}
 
@@ -3359,6 +3344,14 @@ retry:
 			goto done;
 		}
 
+		if ((kn->kn_status & KN_PROCESSING) == KN_PROCESSING) {
+			// reinsert at the end of queue
+			TAILQ_INSERT_TAIL(kntq, kn, kn_tqe);
+			KN_FLUX_UNLOCK(kn);
+			continue;
+		}
+		
+		// now process the knote
 		kn->kn_status &= ~(KN_QUEUED | KN_WS);
 		(*kncnt)--;
 
@@ -4078,8 +4071,8 @@ kevq_wakeup(struct kevq* kevq)
 	KEVQ_OWNED(kevq);
 	if ((kevq->kevq_state & KEVQ_SLEEP) == KEVQ_SLEEP) {
 		kevq->kevq_state &= ~KEVQ_SLEEP;
+		wakeup(kevq);
 	}
-	wakeup(kevq);
 }
 
 static void
@@ -4591,19 +4584,10 @@ knote_drop_detached(struct knote *kn, struct thread *td)
 	    ("knote %p still attached", kn));
 	KQ_NOTOWNED(kq);
 
-	KQ_LOCK(kq);
-
 	KASSERT(kn->kn_influx == 1,
 	    ("knote_drop called on %p with influx %d", kn, kn->kn_influx));
 
-	if (kn->kn_fop->f_isfd)
-		list = &kq->kq_knlist[kn->kn_id];
-	else
-		list = &kq->kq_knhash[KN_HASH(kn->kn_id, kq->kq_knhashmask)];
-
-	if (!SLIST_EMPTY(list))
-		SLIST_REMOVE(list, kn, knote, kn_link);
-
+	// drop from kevqs
 	if (kn->kn_status & KN_QUEUED) {
 		kevq = kn->kn_kevq;
 		KEVQ_LOCK(kevq);
@@ -4617,9 +4601,21 @@ knote_drop_detached(struct knote *kn, struct thread *td)
 		knote_proc_dequeue(kn);
 		KEVQ_UNLOCK(kevq);
 	}
+	
+	// drop from kq
+	KQ_LOCK(kq);
 
-	knote_leave_flux_ul(kn);
+	if (kn->kn_fop->f_isfd)
+		list = &kq->kq_knlist[kn->kn_id];
+	else
+		list = &kq->kq_knhash[KN_HASH(kn->kn_id, kq->kq_knhashmask)];
+
+	if (!SLIST_EMPTY(list))
+		SLIST_REMOVE(list, kn, knote, kn_link);
+
 	KQ_UNLOCK(kq);
+	
+	knote_leave_flux_ul(kn);
 
 	if (kn->kn_fop->f_isfd) {
 		fdrop(kn->kn_fp, td);
