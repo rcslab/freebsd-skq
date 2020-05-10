@@ -31,6 +31,7 @@
 #ifndef _SYS_EVENTVAR_H_
 #define _SYS_EVENTVAR_H_
 
+#include <sys/_stdint.h>
 #include <sys/queue.h>
 #ifndef _KERNEL
 #error "no user-serviceable parts inside"
@@ -96,6 +97,7 @@ struct kevq {
 	uint64_t kevq_tot_realtime;
 	uint64_t kevq_tot_syscall;
 	uint64_t kevq_tot_ws;
+	uint64_t kevq_tot_ws_scan;
 	uint64_t kevq_avg_rlimit;
 };
 

@@ -105,6 +105,10 @@ SYSCTL_U64(_kern, OID_AUTO, kq_ws_int_sbt, CTLFLAG_RD, &ws_int_sbt, 0, "KQueue w
 /* sysctl for ws_int */
 static uint32_t ws_int = 100;
 
+/* sysctl for ws_kn_factor */
+static uint32_t ws_kn_factor = 2;
+SYSCTL_U32(_kern, OID_AUTO, kq_ws_kn_factor, CTLFLAG_RW, &ws_kn_factor, 0, "KQueue work stealing knote factor.");
+
 static inline void
 update_ws_int_sbt()
 {
@@ -2545,6 +2549,7 @@ kevq_dump(struct sbuf *buf, struct kevq *kevq, int level)
 						"total_fallbacks=\"%ld\" "
 						"total_mismatches=\"%ld\" "
 						"total_worksteal=\"%ld\" "
+						"total_worksteal_scan=\"%ld\" "
 						"total_realtime=\"%ld\" "
 						"total_sched=\"%ld\" "
 						"last_kev=\"%ld\" "
@@ -2559,6 +2564,7 @@ kevq_dump(struct sbuf *buf, struct kevq *kevq, int level)
 						kevq->kevq_tot_fallback,
 						kevq->kevq_tot_kqd_mismatch,
 						kevq->kevq_tot_ws,
+						kevq->kevq_tot_ws_scan,
 						kevq->kevq_tot_realtime,
 						kevq->kevq_tot_sched,
 						kevq->kevq_last_kev,
@@ -2861,6 +2867,7 @@ kevq_worksteal(struct kevq *kevq)
 	//struct knlist *knl;
 	struct knote *ws_lst[8];
 	int ws_count;
+	int scan_count, max_count;
 	int tgt_count;
 
 	KEVQ_OWNED(kevq);
@@ -2869,7 +2876,9 @@ kevq_worksteal(struct kevq *kevq)
 
 	kq = kevq->kq;
 	ws_count = 0;
+	scan_count = 0;
 	tgt_count = KQSCHED_GET_FARGS(kq);
+	max_count = tgt_count * ws_kn_factor;
 
 	/* XXX: hack */
 	KASSERT(tgt_count <= 8, ("too many kevq ws knotes"));
@@ -2897,9 +2906,9 @@ kevq_worksteal(struct kevq *kevq)
 		KEVQ_OWNED(other_kevq);
 		/* steal from the first because it arrived late */
 		ws_kn = kevq_peek_knote(other_kevq);
-
-		while((ws_count < tgt_count) && (ws_kn != NULL)) {
+		while((ws_count < tgt_count) && (ws_kn != NULL) && (scan_count < max_count)) {
 			/* fast fail */
+			/* holding next_kn here is fine because we are holding the kevq lock during the process */
 			next_kn = TAILQ_NEXT(ws_kn, kn_tqe);
 			CTR2(KTR_KQ, "ws_kn = %p, next_kn = %p\n", ws_kn, next_kn);
 
@@ -2943,6 +2952,7 @@ kevq_worksteal(struct kevq *kevq)
 			// }
 end_loop:
 			ws_kn = next_kn;
+			scan_count++;
 		}
 
 		KEVQ_UNLOCK(other_kevq);
@@ -2951,6 +2961,7 @@ end_loop:
 	KEVQ_LOCK(kevq);
 	kevq->kevq_state &= ~KEVQ_WS;
 	kevq->kevq_tot_ws += ws_count;
+	kevq->kevq_tot_ws_scan += scan_count;
 	for (int i = 0; i < ws_count; i++) {
 		knote_enqueue_head(ws_lst[i], kevq);
 		knote_leave_flux_ul(ws_lst[i]);
