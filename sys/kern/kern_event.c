@@ -493,7 +493,7 @@ kevq_exp_lat(struct kevq *kevq)
 		// CTR2(KTR_KQ, "kevq_exp_lat: %p too behind. setting new last_kevq: %ld", kevq, last_kev);
 	}
 
-	return kevq->kevq_avg_lat * (kevq_total_knote(kevq) + kevq->kn_proc_count) + last_kev;
+	return kevq->kevq_avg_lat * (kevq_total_knote(kevq) + kevq->kevq_last_nkev) + last_kev;
 }
 
 static inline long
