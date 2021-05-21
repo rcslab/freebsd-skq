@@ -105,7 +105,6 @@ struct kevq {
 struct kqdom {
 	/* static */
 	int id;
-	struct rwlock kqd_lock;
 	struct kqdom *parent;
 	cpuset_t cpu_mask;
 	struct veclist children; /* child kqdoms */
@@ -160,6 +159,7 @@ struct kqueue {
 	struct		veclist kevq_vlist;
 
 	/* CPU queue */
+	struct 		rwlock kqd_lock;
 	struct		kqdom 	*kq_kqd; /* root domain */
 };
 
