@@ -36,7 +36,6 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
-#ifndef APPLEKEXT
 /*
  * These functions support the macros and help fiddle mbuf chains for
  * the nfs op functions. They do things like create the rpc header and
@@ -62,7 +61,6 @@ struct nfslayouthead nfsrv_recalllisthead;
 static nfstype newnfsv2_type[9] = { NFNON, NFREG, NFDIR, NFBLK, NFCHR, NFLNK,
     NFNON, NFCHR, NFNON };
 extern nfstype nfsv34_type[9];
-#endif	/* !APPLEKEXT */
 
 static u_int32_t nfsrv_isannfserr(u_int32_t);
 
@@ -1270,69 +1268,107 @@ static short *nfsrv_v4errmap[] = {
 };
 
 /*
- * A fiddled version of m_adj() that ensures null fill to a long
- * boundary and only trims off the back end
+ * Trim tlen bytes off the end of the mbuf list and then ensure
+ * the end of the last mbuf is nul filled to a long boundary,
+ * as indicated by the value of "nul".
+ * Return the last mbuf in the updated list and free and mbufs
+ * that follow it in the original list.
+ * This is somewhat different than the old nfsrv_adj() with
+ * support for ext_pgs mbufs.  It frees the remaining mbufs
+ * instead of setting them 0 length, since lists of ext_pgs
+ * mbufs are all expected to be non-empty.
  */
-APPLESTATIC void
+struct mbuf *
 nfsrv_adj(struct mbuf *mp, int len, int nul)
 {
-	struct mbuf *m;
-	int count, i;
+	struct mbuf *m, *m2;
+	vm_page_t pg;
+	int i, lastlen, pgno, plen, tlen, trim;
+	uint16_t off;
 	char *cp;
 
 	/*
-	 * Trim from tail.  Scan the mbuf chain,
-	 * calculating its length and finding the last mbuf.
-	 * If the adjustment only affects this mbuf, then just
-	 * adjust and return.  Otherwise, rescan and truncate
-	 * after the remaining size.
+	 * Find the last mbuf after adjustment and
+	 * how much it needs to be adjusted by.
 	 */
-	count = 0;
+	tlen = 0;
 	m = mp;
 	for (;;) {
-		count += m->m_len;
+		tlen += m->m_len;
 		if (m->m_next == NULL)
 			break;
 		m = m->m_next;
 	}
-	if (m->m_len > len) {
-		m->m_len -= len;
-		if (nul > 0) {
-			cp = mtod(m, caddr_t) + m->m_len - nul;
-			for (i = 0; i < nul; i++)
-				*cp++ = '\0';
+	/* m is now the last mbuf and tlen the total length. */
+
+	if (len >= m->m_len) {
+		/* Need to trim away the last mbuf(s). */
+		i = tlen - len;
+		m = mp;
+		for (;;) {
+			if (m->m_len >= i)
+				break;
+			i -= m->m_len;
+			m = m->m_next;
 		}
-		return;
-	}
-	count -= len;
-	if (count < 0)
-		count = 0;
+		lastlen = i;
+	} else
+		lastlen = m->m_len - len;
+
 	/*
-	 * Correct length for chain is "count".
-	 * Find the mbuf with last data, adjust its length,
-	 * and toss data from remaining mbufs on chain.
+	 * m is now the last mbuf after trimming and its length needs to
+	 * be lastlen.
+	 * Adjust the last mbuf and set cp to point to where nuls must be
+	 * written.
 	 */
-	for (m = mp; m; m = m->m_next) {
-		if (m->m_len >= count) {
-			m->m_len = count;
-			if (nul > 0) {
-				cp = mtod(m, caddr_t) + m->m_len - nul;
-				for (i = 0; i < nul; i++)
-					*cp++ = '\0';
+	if ((m->m_flags & M_EXTPG) != 0) {
+		pgno = m->m_epg_npgs - 1;
+		off = (pgno == 0) ? m->m_epg_1st_off : 0;
+		plen = m_epg_pagelen(m, pgno, off);
+		if (m->m_len > lastlen) {
+			/* Trim this mbuf. */
+			trim = m->m_len - lastlen;
+			while (trim >= plen) {
+				KASSERT(pgno > 0,
+				    ("nfsrv_adj: freeing page 0"));
+				/* Free page. */
+				pg = PHYS_TO_VM_PAGE(m->m_epg_pa[pgno]);
+				vm_page_unwire_noq(pg);
+				vm_page_free(pg);
+				trim -= plen;
+				m->m_epg_npgs--;
+				pgno--;
+				off = (pgno == 0) ? m->m_epg_1st_off : 0;
+				plen = m_epg_pagelen(m, pgno, off);
 			}
-			break;
+			plen -= trim;
+			m->m_epg_last_len = plen;
+			m->m_len = lastlen;
 		}
-		count -= m->m_len;
+		cp = (char *)(void *)PHYS_TO_DMAP(m->m_epg_pa[pgno]);
+		cp += off + plen - nul;
+	} else {
+		m->m_len = lastlen;
+		cp = mtod(m, char *) + m->m_len - nul;
 	}
-	for (m = m->m_next; m; m = m->m_next)
-		m->m_len = 0;
+
+	/* Write the nul bytes. */
+	for (i = 0; i < nul; i++)
+		*cp++ = '\0';
+
+	/* Free up any mbufs past "m". */
+	m2 = m->m_next;
+	m->m_next = NULL;
+	if (m2 != NULL)
+		m_freem(m2);
+	return (m);
 }
 
 /*
  * Make these functions instead of macros, so that the kernel text size
  * doesn't get too big...
  */
-APPLESTATIC void
+void
 nfsrv_wcc(struct nfsrv_descript *nd, int before_ret,
     struct nfsvattr *before_nvap, int after_ret, struct nfsvattr *after_nvap)
 {
@@ -1353,7 +1389,7 @@ nfsrv_wcc(struct nfsrv_descript *nd, int before_ret,
 	nfsrv_postopattr(nd, after_ret, after_nvap);
 }
 
-APPLESTATIC void
+void
 nfsrv_postopattr(struct nfsrv_descript *nd, int after_ret,
     struct nfsvattr *after_nvap)
 {
@@ -1372,7 +1408,7 @@ nfsrv_postopattr(struct nfsrv_descript *nd, int after_ret,
  * Fill in file attributes for V2 and 3. For V4, call a separate
  * routine that sifts through all the attribute bits.
  */
-APPLESTATIC void
+void
 nfsrv_fillattr(struct nfsrv_descript *nd, struct nfsvattr *nvap)
 {
 	struct nfs_fattr *fp;
@@ -1431,7 +1467,7 @@ nfsrv_fillattr(struct nfsrv_descript *nd, struct nfsvattr *nvap)
  * the public file handle.
  * For NFSv4, if the length is incorrect, set nd_repstat == NFSERR_BADHANDLE
  */
-APPLESTATIC int
+int
 nfsrv_mtofh(struct nfsrv_descript *nd, struct nfsrvfh *fhp)
 {
 	u_int32_t *tl;
@@ -1500,7 +1536,7 @@ nfsmout:
  * RPC procedure is not involved.
  * Returns the error number in XDR.
  */
-APPLESTATIC int
+int
 nfsd_errmap(struct nfsrv_descript *nd)
 {
 	short *defaulterrp, *errp;
@@ -1556,7 +1592,7 @@ nfsrv_isannfserr(u_int32_t errval)
  * file object. (Called when uid and/or gid is specified in the
  * settable attributes for V4.
  */
-APPLESTATIC int
+int
 nfsrv_checkuidgid(struct nfsrv_descript *nd, struct nfsvattr *nvap)
 {
 	int error = 0;
@@ -1589,7 +1625,7 @@ out:
  * and this routine fixes up the settable attributes for V4 if allowed
  * by nfsrv_checkuidgid().
  */
-APPLESTATIC void
+void
 nfsrv_fixattr(struct nfsrv_descript *nd, vnode_t vp,
     struct nfsvattr *nvap, NFSACL_T *aclp, NFSPROC_T *p, nfsattrbit_t *attrbitp,
     struct nfsexstuff *exp)
@@ -1697,7 +1733,7 @@ nfsrv_hexdigit(char c, int *err)
  * Check to see if NFSERR_MOVED can be returned for this op. Return 1 iff
  * it can be.
  */
-APPLESTATIC int
+int
 nfsrv_errmoved(int op)
 {
 	short *errp;
@@ -1715,7 +1751,7 @@ nfsrv_errmoved(int op)
  * Fill in attributes for a Referral.
  * (Return the number of bytes of XDR created.)
  */
-APPLESTATIC int
+int
 nfsrv_putreferralattr(struct nfsrv_descript *nd, nfsattrbit_t *retbitp,
     struct nfsreferral *refp, int getattr, int *reterrp)
 {
@@ -1833,7 +1869,7 @@ nfsrv_putreferralattr(struct nfsrv_descript *nd, nfsattrbit_t *retbitp,
 /*
  * Parse a file name out of a request.
  */
-APPLESTATIC int
+int
 nfsrv_parsename(struct nfsrv_descript *nd, char *bufp, u_long *hashp,
     NFSPATHLEN_T *outlenp)
 {
@@ -2078,15 +2114,28 @@ nfsd_checkrootexp(struct nfsrv_descript *nd)
 {
 
 	if ((nd->nd_flag & (ND_GSS | ND_EXAUTHSYS)) == ND_EXAUTHSYS)
-		return (0);
+		goto checktls;
 	if ((nd->nd_flag & (ND_GSSINTEGRITY | ND_EXGSSINTEGRITY)) ==
 	    (ND_GSSINTEGRITY | ND_EXGSSINTEGRITY))
-		return (0);
+		goto checktls;
 	if ((nd->nd_flag & (ND_GSSPRIVACY | ND_EXGSSPRIVACY)) ==
 	    (ND_GSSPRIVACY | ND_EXGSSPRIVACY))
-		return (0);
+		goto checktls;
 	if ((nd->nd_flag & (ND_GSS | ND_GSSINTEGRITY | ND_GSSPRIVACY |
 	     ND_EXGSS)) == (ND_GSS | ND_EXGSS))
+		goto checktls;
+	return (1);
+checktls:
+	if ((nd->nd_flag & ND_EXTLS) == 0)
+		return (0);
+	if ((nd->nd_flag & (ND_TLSCERTUSER | ND_EXTLSCERTUSER)) ==
+	    (ND_TLSCERTUSER | ND_EXTLSCERTUSER))
+		return (0);
+	if ((nd->nd_flag & (ND_TLSCERT | ND_EXTLSCERT | ND_EXTLSCERTUSER)) ==
+	    (ND_TLSCERT | ND_EXTLSCERT))
+		return (0);
+	if ((nd->nd_flag & (ND_TLS | ND_EXTLSCERTUSER | ND_EXTLSCERT)) ==
+	    ND_TLS)
 		return (0);
 	return (1);
 }
@@ -2131,4 +2180,3 @@ nfsmout:
 	}
 	*taglenp = taglen;
 }
-

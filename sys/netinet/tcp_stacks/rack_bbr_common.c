@@ -1,7 +1,5 @@
 /*-
- * Copyright (c) 2016-9
- *	Netflix Inc.
- *      All rights reserved.
+ * Copyright (c) 2016-2020 Netflix, Inc.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -162,7 +160,6 @@ again:
 	return (len);
 }
 #endif
-
 
 /*
  * The function ctf_process_inbound_raw() is used by
@@ -423,6 +420,7 @@ skip_vnet:
 			nxt_pkt = 1;
 		else
 			nxt_pkt = 0;
+		KMOD_TCPSTAT_INC(tcps_rcvtotal);
 		retval = (*tp->t_fb->tfb_do_segment_nounlock)(m, th, so, tp, drop_hdrlen, tlen,
 							      iptos, nxt_pkt, &tv);
 		if (retval) {
@@ -460,6 +458,7 @@ ctf_do_queued_segments(struct socket *so, struct tcpcb *tp, int have_pkt)
 			/* We lost the tcpcb (maybe a RST came in)? */
 			return(1);
 		}
+		tcp_handle_wakeup(tp, so);
 	}
 	return (0);
 }
@@ -467,7 +466,14 @@ ctf_do_queued_segments(struct socket *so, struct tcpcb *tp, int have_pkt)
 uint32_t
 ctf_outstanding(struct tcpcb *tp)
 {
-	return(tp->snd_max - tp->snd_una);
+	uint32_t bytes_out;
+
+	bytes_out = tp->snd_max - tp->snd_una;
+	if (tp->t_state < TCPS_ESTABLISHED)
+		bytes_out++;
+	if (tp->t_flags & TF_SENTFIN)
+		bytes_out++;
+	return (bytes_out);
 }
 
 uint32_t
@@ -668,7 +674,6 @@ ctf_process_rst(struct mbuf *m, struct tcphdr *th, struct socket *so, struct tcp
 	if ((SEQ_GEQ(th->th_seq, (tp->last_ack_sent - 1)) &&
 	    SEQ_LT(th->th_seq, tp->last_ack_sent + tp->rcv_wnd)) ||
 	    (tp->rcv_wnd == 0 && tp->last_ack_sent == th->th_seq)) {
-
 		KASSERT(tp->t_state != TCPS_SYN_SENT,
 		    ("%s: TH_RST for TCPS_SYN_SENT th %p tp %p",
 		    __func__, th, tp));
@@ -694,6 +699,7 @@ ctf_process_rst(struct mbuf *m, struct tcphdr *th, struct socket *so, struct tcp
 				tcp_state_change(tp, TCPS_CLOSED);
 				/* FALLTHROUGH */
 			default:
+				tcp_log_end_status(tp, TCP_EI_STATUS_CLIENT_RST);
 				tp = tcp_close(tp);
 			}
 			dropped = 1;
@@ -910,4 +916,25 @@ ctf_decay_count(uint32_t count, uint32_t decay)
 	 */
 	decayed_count = count - (uint32_t)perc_count;
 	return(decayed_count);
+}
+
+int32_t
+ctf_progress_timeout_check(struct tcpcb *tp, bool log)
+{
+	if (tp->t_maxunacktime && tp->t_acktime && TSTMP_GT(ticks, tp->t_acktime)) {
+		if ((ticks - tp->t_acktime) >= tp->t_maxunacktime) {
+			/*
+			 * There is an assumption that the caller
+			 * will drop the connection so we will
+			 * increment the counters here.
+			 */
+			if (log)
+				tcp_log_end_status(tp, TCP_EI_STATUS_PROGRESS);
+#ifdef NETFLIX_STATS
+			KMOD_TCPSTAT_INC(tcps_progdrops);
+#endif
+			return (1);
+		}
+	}
+	return (0);
 }

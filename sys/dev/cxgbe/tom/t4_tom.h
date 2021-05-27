@@ -74,6 +74,8 @@ enum {
 	TPF_FORCE_CREDITS  = (1 << 10), /* always send credits */
 	TPF_KTLS           = (1 << 11), /* send TLS records from KTLS */
 	TPF_INITIALIZED    = (1 << 12), /* init_toepcb has been called */
+	TPF_TLS_RECEIVE	   = (1 << 13), /* should receive TLS records */
+	TPF_TLS_ESTABLISHED = (1 << 14), /* TLS handshake timer initialized */
 };
 
 enum {
@@ -441,11 +443,13 @@ const struct offload_settings *lookup_offload_policy(struct adapter *, int,
 
 /* t4_tls.c */
 bool can_tls_offload(struct adapter *);
+void do_rx_data_tls(const struct cpl_rx_data *, struct toepcb *, struct mbuf *);
 int t4_ctloutput_tls(struct socket *, struct sockopt *);
 void t4_push_tls_records(struct adapter *, struct toepcb *, int);
 void t4_push_ktls(struct adapter *, struct toepcb *, int);
 void t4_tls_mod_load(void);
 void t4_tls_mod_unload(void);
+void tls_detach(struct toepcb *);
 void tls_establish(struct toepcb *);
 void tls_init_toep(struct toepcb *);
 int tls_rx_key(struct toepcb *);

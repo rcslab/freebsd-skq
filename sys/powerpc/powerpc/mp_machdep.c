@@ -246,6 +246,7 @@ cpu_mp_unleash(void *dummy)
 				printf("Waking up CPU %d (dev=%x)\n",
 				    pc->pc_cpuid, (int)pc->pc_hwref);
 
+			pc->pc_flags = PCPU_GET(flags); /* Copy cached CPU flags */
 			ret = platform_smp_start_cpu(pc);
 			if (ret == 0) {
 				timeout = 2000;	/* wait 2sec for the AP */
@@ -270,7 +271,7 @@ cpu_mp_unleash(void *dummy)
 	/* Provide our current DEC and TB values for APs */
 	ap_timebase = mftb() + 10;
 	__asm __volatile("msync; isync");
-	
+
 	/* Let APs continue */
 	atomic_store_rel_int(&ap_letgo, 1);
 

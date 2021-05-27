@@ -63,7 +63,7 @@ ipfw_start()
 		echo 'Firewall rules loaded.'
 	elif [ "`ipfw list 65535`" = "65535 deny ip from any to any" ]; then
 		echo 'Warning: kernel has firewall functionality, but' \
-		    ' firewall rules are not enabled.'
+		    'firewall rules are not enabled.'
 		echo '           All ip services are disabled.'
 	fi
 
@@ -129,7 +129,9 @@ ipfw_status()
 	status=$(sysctl -i -n net.inet.ip.fw.enable)
 	: ${status:=0}
 	if afexists inet6; then
-		status=$((${status} + $(sysctl -i -n net.inet6.ip6.fw.enable)))
+		status6=$(sysctl -i -n net.inet6.ip6.fw.enable)
+		: ${status6:=0}
+		status=$((${status} + ${status6}))
 	fi
 	if [ ${status} -eq 0 ]; then
 		echo "ipfw is not enabled"

@@ -638,27 +638,16 @@ static void
 safe_setup_mackey(struct safe_session *ses, int algo, const uint8_t *key,
     int klen)
 {
-	MD5_CTX md5ctx;
 	SHA1_CTX sha1ctx;
 	int i;
 
-	if (algo == CRYPTO_MD5_HMAC) {
-		hmac_init_ipad(&auth_hash_hmac_md5, key, klen, &md5ctx);
-		bcopy(md5ctx.state, ses->ses_hminner, sizeof(md5ctx.state));
+	hmac_init_ipad(&auth_hash_hmac_sha1, key, klen, &sha1ctx);
+	bcopy(sha1ctx.h.b32, ses->ses_hminner, sizeof(sha1ctx.h.b32));
 
-		hmac_init_opad(&auth_hash_hmac_md5, key, klen, &md5ctx);
-		bcopy(md5ctx.state, ses->ses_hmouter, sizeof(md5ctx.state));
+	hmac_init_opad(&auth_hash_hmac_sha1, key, klen, &sha1ctx);
+	bcopy(sha1ctx.h.b32, ses->ses_hmouter, sizeof(sha1ctx.h.b32));
 
-		explicit_bzero(&md5ctx, sizeof(md5ctx));
-	} else {
-		hmac_init_ipad(&auth_hash_hmac_sha1, key, klen, &sha1ctx);
-		bcopy(sha1ctx.h.b32, ses->ses_hminner, sizeof(sha1ctx.h.b32));
-
-		hmac_init_opad(&auth_hash_hmac_sha1, key, klen, &sha1ctx);
-		bcopy(sha1ctx.h.b32, ses->ses_hmouter, sizeof(sha1ctx.h.b32));
-
-		explicit_bzero(&sha1ctx, sizeof(sha1ctx));
-	}
+	explicit_bzero(&sha1ctx, sizeof(sha1ctx));
 
 	/* PE is little-endian, insure proper byte order */
 	for (i = 0; i < N(ses->ses_hminner); i++) {
@@ -674,10 +663,6 @@ safe_auth_supported(struct safe_softc *sc,
 {
 
 	switch (csp->csp_auth_alg) {
-	case CRYPTO_MD5_HMAC:
-		if ((sc->sc_devinfo & SAFE_DEVINFO_MD5) == 0)
-			return (false);
-		break;
 	case CRYPTO_SHA1_HMAC:
 		if ((sc->sc_devinfo & SAFE_DEVINFO_SHA1) == 0)
 			return (false);
@@ -694,20 +679,6 @@ safe_cipher_supported(struct safe_softc *sc,
 {
 
 	switch (csp->csp_cipher_alg) {
-	case CRYPTO_DES_CBC:
-	case CRYPTO_3DES_CBC:
-		if ((sc->sc_devinfo & SAFE_DEVINFO_DES) == 0)
-			return (false);
-		if (csp->csp_ivlen != 8)
-			return (false);
-		if (csp->csp_cipher_alg == CRYPTO_DES_CBC) {
-			if (csp->csp_cipher_klen != 8)
-				return (false);
-		} else {
-			if (csp->csp_cipher_klen != 24)
-				return (false);
-		}
-		break;
 	case CRYPTO_AES_CBC:
 		if ((sc->sc_devinfo & SAFE_DEVINFO_AES) == 0)
 			return (false);
@@ -769,10 +740,7 @@ safe_newsession(device_t dev, crypto_session_t cses,
 	if (csp->csp_auth_alg != 0) {
 		ses->ses_mlen = csp->csp_auth_mlen;
 		if (ses->ses_mlen == 0) {
-			if (csp->csp_auth_alg == CRYPTO_MD5_HMAC)
-				ses->ses_mlen = MD5_HASH_LEN;
-			else
-				ses->ses_mlen = SHA1_HASH_LEN;
+			ses->ses_mlen = SHA1_HASH_LEN;
 		}
 
 		if (csp->csp_auth_key != NULL) {
@@ -782,22 +750,6 @@ safe_newsession(device_t dev, crypto_session_t cses,
 	}
 
 	return (0);
-}
-
-static bus_size_t
-safe_crp_length(struct cryptop *crp)
-{
-
-	switch (crp->crp_buf_type) {
-	case CRYPTO_BUF_MBUF:
-		return (crp->crp_mbuf->m_pkthdr.len);
-	case CRYPTO_BUF_UIO:
-		return (crp->crp_uio->uio_resid);
-	case CRYPTO_BUF_CONTIG:
-		return (crp->crp_ilen);
-	default:
-		panic("bad crp buffer type");
-	}
 }
 
 static void
@@ -866,14 +818,6 @@ safe_process(device_t dev, struct cryptop *crp, int hint)
 			safe_setup_enckey(ses, crp->crp_cipher_key);
 
 		switch (csp->csp_cipher_alg) {
-		case CRYPTO_DES_CBC:
-			cmd0 |= SAFE_SA_CMD0_DES;
-			cmd1 |= SAFE_SA_CMD1_CBC;
-			break;
-		case CRYPTO_3DES_CBC:
-			cmd0 |= SAFE_SA_CMD0_3DES;
-			cmd1 |= SAFE_SA_CMD1_CBC;
-			break;
 		case CRYPTO_AES_CBC:
 			cmd0 |= SAFE_SA_CMD0_AES;
 			cmd1 |= SAFE_SA_CMD1_CBC;
@@ -929,10 +873,6 @@ safe_process(device_t dev, struct cryptop *crp, int hint)
 		}
 
 		switch (csp->csp_auth_alg) {
-		case CRYPTO_MD5_HMAC:
-			cmd0 |= SAFE_SA_CMD0_MD5;
-			cmd1 |= SAFE_SA_CMD1_HMAC;	/* NB: enable HMAC */
-			break;
 		case CRYPTO_SHA1_HMAC:
 			cmd0 |= SAFE_SA_CMD0_SHA1;
 			cmd1 |= SAFE_SA_CMD1_HMAC;	/* NB: enable HMAC */
@@ -1040,7 +980,7 @@ safe_process(device_t dev, struct cryptop *crp, int hint)
 		err = ENOMEM;
 		goto errout;
 	}
-	re->re_src_mapsize = safe_crp_length(crp);
+	re->re_src_mapsize = crypto_buffer_len(&crp->crp_buf);
 	nicealign = safe_dmamap_aligned(&re->re_src);
 	uniform = safe_dmamap_uniform(&re->re_src);
 
@@ -1107,7 +1047,7 @@ safe_process(device_t dev, struct cryptop *crp, int hint)
 				err = ENOMEM;
 				goto errout;
 			}
-		} else if (crp->crp_buf_type == CRYPTO_BUF_MBUF) {
+		} else if (crp->crp_buf.cb_type == CRYPTO_BUF_MBUF) {
 			int totlen, len;
 			struct mbuf *m, *top, **mp;
 
@@ -1124,10 +1064,10 @@ safe_process(device_t dev, struct cryptop *crp, int hint)
 			if (!uniform)
 				safestats.st_notuniform++;
 			totlen = re->re_src_mapsize;
-			if (crp->crp_mbuf->m_flags & M_PKTHDR) {
+			if (crp->crp_buf.cb_mbuf->m_flags & M_PKTHDR) {
 				len = MHLEN;
 				MGETHDR(m, M_NOWAIT, MT_DATA);
-				if (m && !m_dup_pkthdr(m, crp->crp_mbuf,
+				if (m && !m_dup_pkthdr(m, crp->crp_buf.cb_mbuf,
 				    M_NOWAIT)) {
 					m_free(m);
 					m = NULL;
@@ -1212,8 +1152,8 @@ safe_process(device_t dev, struct cryptop *crp, int hint)
 				if (!(csp->csp_mode == CSP_MODE_ETA &&
 				    (re->re_src.mapsize-oplen) == ses->ses_mlen &&
 				    crp->crp_digest_start == oplen))
-					safe_mcopy(crp->crp_mbuf, re->re_dst_m,
-					    oplen);
+					safe_mcopy(crp->crp_buf.cb_mbuf,
+					    re->re_dst_m, oplen);
 				else
 					safestats.st_noicvcopy++;
 			}
@@ -1319,6 +1259,7 @@ errout:
 	if (err != ERESTART) {
 		crp->crp_etype = err;
 		crypto_done(crp);
+		err = 0;
 	} else {
 		sc->sc_needwakeup |= CRYPTO_SYMQ;
 	}
@@ -1349,7 +1290,10 @@ safe_callback(struct safe_softc *sc, struct safe_ringentry *re)
 		crp->crp_etype = EIO;		/* something more meaningful? */
 	}
 
-	/* XXX: Should crp_mbuf be updated to re->re_dst_m if it is non-NULL? */
+	/*
+	 * XXX: Should crp_buf.cb_mbuf be updated to re->re_dst_m if
+	 * it is non-NULL?
+	 */
 
 	if (re->re_dst_map != NULL && re->re_dst_map != re->re_src_map) {
 		bus_dmamap_sync(sc->sc_dstdmat, re->re_dst_map,
@@ -1793,9 +1737,9 @@ safe_free_entry(struct safe_softc *sc, struct safe_ringentry *re)
 		m_freem(re->re_dst_m);
 
 	crp = (struct cryptop *)re->re_crp;
-	
+
 	re->re_desc.d_csr = 0;
-	
+
 	crp->crp_etype = EFAULT;
 	crypto_done(crp);
 	return(0);

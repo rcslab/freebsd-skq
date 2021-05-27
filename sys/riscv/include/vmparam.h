@@ -190,8 +190,6 @@
 #define	SHAREDPAGE		(VM_MAXUSER_ADDRESS - PAGE_SIZE)
 #define	USRSTACK		SHAREDPAGE
 
-#define	KERNENTRY		(0)
-
 #define	VM_EARLY_DTB_ADDRESS	(VM_MAX_KERNEL_ADDRESS - (2 * L2_SIZE))
 
 /*
@@ -237,5 +235,15 @@ extern vm_offset_t init_pt_va;
 #define	ZERO_REGION_SIZE	(64 * 1024)	/* 64KB */
 
 #define	DEVMAP_MAX_VADDR	VM_MAX_KERNEL_ADDRESS
+
+/*
+ * No non-transparent large page support in the pmap.
+ */
+#define	PMAP_HAS_LARGEPAGES	0
+
+/*
+ * Need a page dump array for minidump.
+ */
+#define MINIDUMP_PAGE_TRACKING	1
 
 #endif /* !_MACHINE_VMPARAM_H_ */

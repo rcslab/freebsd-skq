@@ -649,7 +649,6 @@ dsp_open(struct cdev *i_dev, int flags, int mode, struct thread *td)
 		}
 	}
 
-
 	PCM_LOCK(d);
 
 	/*
@@ -858,6 +857,8 @@ dsp_io_ops(struct cdev *i_dev, struct uio *buf)
 	getchns(i_dev, &rdch, &wrch, prio);
 
 	if (*ch == NULL || !((*ch)->flags & CHN_F_BUSY)) {
+		if (rdch != NULL || wrch != NULL)
+			relchns(i_dev, rdch, wrch, prio);
 		PCM_GIANT_EXIT(d);
 		return (EBADF);
 	}
@@ -1703,6 +1704,10 @@ dsp_ioctl(struct cdev *i_dev, u_long cmd, caddr_t arg, int mode,
 		*arg_i = PCM_CAP_REALTIME | PCM_CAP_MMAP | PCM_CAP_TRIGGER;
 		if (rdch && wrch && !(dsp_get_flags(i_dev) & SD_F_SIMPLEX))
 			*arg_i |= PCM_CAP_DUPLEX;
+		if (rdch && (rdch->flags & CHN_F_VIRTUAL) != 0)
+			*arg_i |= PCM_CAP_VIRTUAL;
+		if (wrch && (wrch->flags & CHN_F_VIRTUAL) != 0)
+			*arg_i |= PCM_CAP_VIRTUAL;
 		PCM_UNLOCK(d);
 		break;
 
@@ -2653,6 +2658,7 @@ dsp_oss_audioinfo(struct cdev *i_dev, oss_audioinfo *ai)
 			 *       these in pcmchan::caps?
 			 */
 			ai->caps = PCM_CAP_REALTIME | PCM_CAP_MMAP | PCM_CAP_TRIGGER |
+			    ((ch->flags & CHN_F_VIRTUAL) ? PCM_CAP_VIRTUAL : 0) |
 			    ((ch->direction == PCMDIR_PLAY) ? PCM_CAP_OUTPUT : PCM_CAP_INPUT);
 
 			/*
@@ -2888,7 +2894,6 @@ dsp_oss_syncgroup(struct pcm_channel *wrch, struct pcm_channel *rdch, oss_syncgr
 		wrch->flags |= CHN_F_NOTRIGGER;
 		wrch->sm = smwr;
 	}
-
 
 out:
 	if (ret != 0) {

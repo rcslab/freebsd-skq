@@ -13,8 +13,9 @@ LIBSA_CPUARCH?=${MACHINE_CPUARCH}
 LIB?=		sa
 
 # standalone components and stuff we have modified locally
-SRCS+=	gzguts.h zutil.h __main.c abort.c assert.c bcd.c environment.c getopt.c gets.c \
-	globals.c pager.c panic.c printf.c strdup.c strerror.c \
+SRCS+=	gzguts.h zutil.h __main.c abort.c assert.c bcd.c environment.c \
+	getopt.c gets.c globals.c \
+	hexdump.c pager.c panic.c printf.c strdup.c strerror.c \
 	random.c sbrk.c twiddle.c zalloc.c zalloc_malloc.c
 
 # private (pruned) versions of libc string functions
@@ -46,11 +47,7 @@ SRCS+=	subr_boot.c
 # Do not generate movt/movw, because the relocation fixup for them does not
 # translate to the -Bsymbolic -pie format required by self_reloc() in loader(8).
 # Also, the fpu is not available in a standalone environment.
-.if ${COMPILER_VERSION} < 30800
-CFLAGS.clang+=	-mllvm -arm-use-movt=0
-.else
 CFLAGS.clang+=	-mno-movt
-.endif
 CFLAGS.clang+=	-mfpu=none
 
 .PATH: ${SRCTOP}/contrib/llvm-project/compiler-rt/lib/builtins/arm/
@@ -125,7 +122,7 @@ beforedepend:
 	ln -sf ${SRCTOP}/include/arpa/inet.h arpa/inet.h; \
 	ln -sf ${SRCTOP}/include/arpa/tftp.h arpa/tftp.h; \
 	for i in _time.h _strings.h _string.h; do \
-		[ -f xlocale/$$i ] || cp /dev/null xlocale/$$i; \
+		[ -f xlocale/$$i ] || :> xlocale/$$i; \
 	done; \
 	for i in ${STAND_H_INC}; do \
 		ln -sf ${SASRC}/stand.h $$i; \
@@ -162,6 +159,9 @@ SRCS+=	ufs.c nfs.c cd9660.c tftp.c gzipfs.c bzipfs.c
 SRCS+=	dosfs.c ext2fs.c
 SRCS+=	splitfs.c
 SRCS+=	pkgfs.c
+
+# Time support
+SRCS+=	time.c
 
 # kernel ufs support
 .PATH: ${SRCTOP}/sys/ufs/ffs

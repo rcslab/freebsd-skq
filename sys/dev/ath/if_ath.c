@@ -160,7 +160,6 @@ static int	ath_init(struct ath_softc *);
 static void	ath_stop(struct ath_softc *);
 static int	ath_reset_vap(struct ieee80211vap *, u_long);
 static int	ath_transmit(struct ieee80211com *, struct mbuf *);
-static int	ath_media_change(struct ifnet *);
 static void	ath_watchdog(void *);
 static void	ath_parent(struct ieee80211com *);
 static void	ath_fatal_proc(void *, int);
@@ -1221,7 +1220,6 @@ ath_attach(u_int16_t devid, struct ath_softc *sc)
 					 IEEE80211_HTC_TXLDPC;
 		}
 
-
 		device_printf(sc->sc_dev,
 		    "[HT] %d RX streams; %d TX streams\n", rxs, txs);
 	}
@@ -1767,8 +1765,8 @@ ath_vap_create(struct ieee80211com *ic, const char name[IFNAMSIZ], int unit,
 	ATH_UNLOCK(sc);
 
 	/* complete setup */
-	ieee80211_vap_attach(vap, ath_media_change, ieee80211_media_status,
-	    mac);
+	ieee80211_vap_attach(vap, ieee80211_media_change,
+	    ieee80211_media_status, mac);
 	return vap;
 bad2:
 	reclaim_address(sc, mac);
@@ -1801,6 +1799,7 @@ ath_vap_delete(struct ieee80211vap *vap)
 		ath_hal_intrset(ah, 0);		/* disable interrupts */
 		/* XXX Do all frames from all vaps/nodes need draining here? */
 		ath_stoprecv(sc, 1);		/* stop recv side */
+		ath_rx_flush(sc);
 		ath_draintxq(sc, ATH_RESET_DEFAULT);		/* stop hw xmit side */
 	}
 
@@ -2379,7 +2378,7 @@ ath_fatal_proc(void *arg, int pending)
 		    "0x%08x 0x%08x 0x%08x, 0x%08x 0x%08x 0x%08x\n", state[0],
 		    state[1] , state[2], state[3], state[4], state[5]);
 	}
-	ath_reset(sc, ATH_RESET_NOLOSS);
+	ath_reset(sc, ATH_RESET_NOLOSS, HAL_RESET_FORCE_COLD);
 }
 
 static void
@@ -2490,11 +2489,11 @@ ath_bmiss_proc(void *arg, int pending)
 	 * to clear.
 	 */
 	if (ath_hal_gethangstate(sc->sc_ah, 0xff, &hangs) && hangs != 0) {
-		ath_reset(sc, ATH_RESET_NOLOSS);
+		ath_reset(sc, ATH_RESET_NOLOSS, HAL_RESET_BBPANIC);
 		device_printf(sc->sc_dev,
 		    "bb hang detected (0x%x), resetting\n", hangs);
 	} else {
-		ath_reset(sc, ATH_RESET_NOLOSS);
+		ath_reset(sc, ATH_RESET_NOLOSS, HAL_RESET_FORCE_COLD);
 		ieee80211_beacon_miss(&sc->sc_ic);
 	}
 
@@ -2893,7 +2892,8 @@ ath_reset_grablock(struct ath_softc *sc, int dowait)
  * to reset or reload hardware state.
  */
 int
-ath_reset(struct ath_softc *sc, ATH_RESET_TYPE reset_type)
+ath_reset(struct ath_softc *sc, ATH_RESET_TYPE reset_type,
+    HAL_RESET_TYPE ah_reset_type)
 {
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct ath_hal *ah = sc->sc_ah;
@@ -2961,7 +2961,7 @@ ath_reset(struct ath_softc *sc, ATH_RESET_TYPE reset_type)
 	ath_hal_setchainmasks(sc->sc_ah, sc->sc_cur_txchainmask,
 	    sc->sc_cur_rxchainmask);
 	if (!ath_hal_reset(ah, sc->sc_opmode, ic->ic_curchan, AH_TRUE,
-	    HAL_RESET_NORMAL, &status))
+	    ah_reset_type, &status))
 		device_printf(sc->sc_dev,
 		    "%s: unable to reset hardware; hal status %u\n",
 		    __func__, status);
@@ -3097,7 +3097,7 @@ ath_reset_vap(struct ieee80211vap *vap, u_long cmd)
 		return 0;
 	}
 	/* XXX? Full or NOLOSS? */
-	return ath_reset(sc, ATH_RESET_FULL);
+	return ath_reset(sc, ATH_RESET_FULL, HAL_RESET_NORMAL);
 }
 
 struct ath_buf *
@@ -3538,16 +3538,8 @@ finish:
 	ATH_UNLOCK(sc);
 
 	ATH_KTR(sc, ATH_KTR_TX, 0, "ath_transmit: finished");
-	
-	return (retval);
-}
 
-static int
-ath_media_change(struct ifnet *ifp)
-{
-	int error = ieee80211_media_change(ifp);
-	/* NB: only the fixed rate can change and that doesn't need a reset */
-	return (error == ENETRESET ? 0 : error);
+	return (retval);
 }
 
 /*
@@ -3777,7 +3769,7 @@ ath_reset_proc(void *arg, int pending)
 #if 0
 	device_printf(sc->sc_dev, "%s: resetting\n", __func__);
 #endif
-	ath_reset(sc, ATH_RESET_NOLOSS);
+	ath_reset(sc, ATH_RESET_NOLOSS, HAL_RESET_FORCE_COLD);
 }
 
 /*
@@ -3804,7 +3796,7 @@ ath_bstuck_proc(void *arg, int pending)
 	 * This assumes that there's no simultaneous channel mode change
 	 * occurring.
 	 */
-	ath_reset(sc, ATH_RESET_NOLOSS);
+	ath_reset(sc, ATH_RESET_NOLOSS, HAL_RESET_FORCE_COLD);
 }
 
 static int
@@ -4301,7 +4293,7 @@ ath_tx_default_comp(struct ath_softc *sc, struct ath_buf *bf, int fail)
 void
 ath_tx_update_ratectrl(struct ath_softc *sc, struct ieee80211_node *ni,
     struct ath_rc_series *rc, struct ath_tx_status *ts, int frmlen,
-    int nframes, int nbad)
+    int rc_framelen, int nframes, int nbad)
 {
 	struct ath_node *an;
 
@@ -4312,9 +4304,16 @@ ath_tx_update_ratectrl(struct ath_softc *sc, struct ieee80211_node *ni,
 	an = ATH_NODE(ni);
 	ATH_NODE_UNLOCK_ASSERT(an);
 
+	/*
+	 * XXX TODO: teach the rate control about TXERR_FILT and
+	 * see about handling it (eg see how many attempts were
+	 * made before it got filtered and account for that.)
+	 */
+
 	if ((ts->ts_status & HAL_TXERR_FILT) == 0) {
 		ATH_NODE_LOCK(an);
-		ath_rate_tx_complete(sc, an, rc, ts, frmlen, nframes, nbad);
+		ath_rate_tx_complete(sc, an, rc, ts, frmlen, rc_framelen,
+		    nframes, nbad);
 		ATH_NODE_UNLOCK(an);
 	}
 }
@@ -4355,18 +4354,21 @@ ath_tx_process_buf_completion(struct ath_softc *sc, struct ath_txq *txq,
 			/*
 			 * XXX assume this isn't an aggregate
 			 * frame.
+			 *
+			 * XXX TODO: also do this for filtered frames?
+			 * Once rate control knows about them?
 			 */
 			ath_tx_update_ratectrl(sc, ni,
 			     bf->bf_state.bfs_rc, ts,
-			    bf->bf_state.bfs_pktlen, 1,
+			    bf->bf_state.bfs_pktlen,
+			    bf->bf_state.bfs_pktlen,
+			    1,
 			    (ts->ts_status == 0 ? 0 : 1));
 		}
 		ath_tx_default_comp(sc, bf, 0);
 	} else
 		bf->bf_comp(sc, bf, 0);
 }
-
-
 
 /*
  * Process completed xmit descriptors from the specified queue.
@@ -5447,6 +5449,10 @@ ath_calibrate(void *arg)
 		 * infinite NIC restart.  Ideally we'd not restart if we
 		 * failed the first NF cal - that /can/ fail sometimes in
 		 * a noisy environment.
+		 *
+		 * Instead, we should likely temporarily shorten the longCal
+		 * period to happen pretty quickly and if a subsequent one
+		 * fails, do a full reset.
 		 */
 		if (shortCal)
 			sc->sc_lastshortcal = ticks;
@@ -6085,7 +6091,6 @@ ath_newstate(struct ieee80211vap *vap, enum ieee80211_state nstate, int arg)
 
 		taskqueue_unblock(sc->sc_tq);
 	} else if (nstate == IEEE80211_S_INIT) {
-
 		/* Quiet time handling - ensure we resync */
 		memset(&avp->quiet_ie, 0, sizeof(avp->quiet_ie));
 

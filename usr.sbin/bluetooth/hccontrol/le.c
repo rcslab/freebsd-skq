@@ -39,6 +39,7 @@
 #include <errno.h>
 #include <netgraph/ng_message.h>
 #include <errno.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -60,6 +61,17 @@ static int le_enable(int s, int argc, char *argv[]);
 static int le_set_advertising_enable(int s, int argc, char *argv[]);
 static int le_set_advertising_param(int s, int argc, char *argv[]);
 static int le_read_advertising_channel_tx_power(int s, int argc, char *argv[]);
+static int le_scan(int s, int argc, char *argv[]);
+static void handle_le_event(ng_hci_event_pkt_t* e, bool verbose);
+static int le_read_white_list_size(int s, int argc, char *argv[]);
+static int le_clear_white_list(int s, int argc, char *argv[]);
+static int le_add_device_to_white_list(int s, int argc, char *argv[]);
+static int le_remove_device_from_white_list(int s, int argc, char *argv[]);
+static int le_connect(int s, int argc, char *argv[]);
+static void handle_le_connection_event(ng_hci_event_pkt_t* e, bool verbose);
+static int le_read_channel_map(int s, int argc, char *argv[]);
+static void handle_le_remote_features_event(ng_hci_event_pkt_t* e);
+static int le_rand(int s, int argc, char *argv[]);
 
 static int
 le_set_scan_param(int s, int argc, char *argv[])
@@ -613,6 +625,620 @@ le_read_buffer_size(int s, int argc, char *argv[])
 	return (OK);
 }
 
+static int
+le_scan(int s, int argc, char *argv[])
+{
+	int n, bufsize, scancount, numscans;
+	bool verbose;
+	uint8_t active = 0;
+	char ch;
+
+	char			 b[512];
+	ng_hci_event_pkt_t	*e = (ng_hci_event_pkt_t *) b;
+
+	ng_hci_le_set_scan_parameters_cp scan_param_cp;
+	ng_hci_le_set_scan_parameters_rp scan_param_rp;
+
+	ng_hci_le_set_scan_enable_cp scan_enable_cp;
+	ng_hci_le_set_scan_enable_rp scan_enable_rp;
+
+	optreset = 1;
+	optind = 0;
+	verbose = false;
+	numscans = 1;
+
+	while ((ch = getopt(argc, argv , "an:v")) != -1) {
+		switch(ch) {
+		case 'a':
+			active = 1;
+			break;
+		case 'n':
+			numscans = (uint8_t)strtol(optarg, NULL, 10);
+			break;
+		case 'v':
+			verbose = true;
+			break;
+		}
+	}
+
+	scan_param_cp.le_scan_type = active;
+	scan_param_cp.le_scan_interval = (uint16_t)(100/0.625);
+	scan_param_cp.le_scan_window = (uint16_t)(50/0.625);
+	/* Address type public */
+	scan_param_cp.own_address_type = 0;
+	/* 'All' filter policy */
+	scan_param_cp.scanning_filter_policy = 0;
+	n = sizeof(scan_param_rp);
+
+	if (hci_request(s, NG_HCI_OPCODE(NG_HCI_OGF_LE,
+		NG_HCI_OCF_LE_SET_SCAN_PARAMETERS), 
+		(void *)&scan_param_cp, sizeof(scan_param_cp),
+		(void *)&scan_param_rp, &n) == ERROR)
+		return (ERROR);
+
+	if (scan_param_rp.status != 0x00) {
+		fprintf(stdout, "LE_Set_Scan_Parameters failed. Status: %s [%#02x]\n", 
+			hci_status2str(scan_param_rp.status),
+			scan_param_rp.status);
+		return (FAILED);
+	}
+
+	/* Enable scanning */
+	n = sizeof(scan_enable_rp);
+	scan_enable_cp.le_scan_enable = 1;
+	scan_enable_cp.filter_duplicates = 1;
+	if (hci_request(s, NG_HCI_OPCODE(NG_HCI_OGF_LE,
+		NG_HCI_OCF_LE_SET_SCAN_ENABLE), 
+		(void *)&scan_enable_cp, sizeof(scan_enable_cp),
+		(void *)&scan_enable_rp, &n) == ERROR)
+		return (ERROR);
+			
+	if (scan_enable_rp.status != 0x00) {
+		fprintf(stdout, "LE_Scan_Enable enable failed. Status: %s [%#02x]\n", 
+			hci_status2str(scan_enable_rp.status),
+			scan_enable_rp.status);
+		return (FAILED);
+	}
+
+	scancount = 0;
+	while (scancount < numscans) {
+		/* wait for scan events */
+		bufsize = sizeof(b);
+		if (hci_recv(s, b, &bufsize) == ERROR) {
+			return (ERROR);
+		}
+
+		if (bufsize < sizeof(*e)) {
+			errno = EIO;
+			return (ERROR);
+		}
+		scancount++;
+		if (e->event == NG_HCI_EVENT_LE) {
+		 	fprintf(stdout, "Scan %d\n", scancount);	
+			handle_le_event(e, verbose);
+		}
+	}
+
+	fprintf(stdout, "Scan complete\n");
+
+	/* Disable scanning */
+	n = sizeof(scan_enable_rp);
+	scan_enable_cp.le_scan_enable = 0;
+	if (hci_request(s, NG_HCI_OPCODE(NG_HCI_OGF_LE,
+		NG_HCI_OCF_LE_SET_SCAN_ENABLE), 
+		(void *)&scan_enable_cp, sizeof(scan_enable_cp),
+		(void *)&scan_enable_rp, &n) == ERROR)
+		return (ERROR);
+			
+	if (scan_enable_rp.status != 0x00) {
+		fprintf(stdout, "LE_Scan_Enable disable failed. Status: %s [%#02x]\n", 
+			hci_status2str(scan_enable_rp.status),
+			scan_enable_rp.status);
+		return (FAILED);
+	}
+
+	return (OK);
+}
+
+static void handle_le_event(ng_hci_event_pkt_t* e, bool verbose) 
+{
+	int rc;
+	ng_hci_le_ep	*leer = 
+			(ng_hci_le_ep *)(e + 1);
+	ng_hci_le_advertising_report_ep *advrep = 
+		(ng_hci_le_advertising_report_ep *)(leer + 1); 
+	ng_hci_le_advreport	*reports =
+		(ng_hci_le_advreport *)(advrep + 1);
+
+	if (leer->subevent_code == NG_HCI_LEEV_ADVREP) {
+		fprintf(stdout, "Scan result, num_reports: %d\n",
+			advrep->num_reports);
+		for(rc = 0; rc < advrep->num_reports; rc++) {
+			uint8_t length = (uint8_t)reports[rc].length_data;	
+			fprintf(stdout, "\tBD_ADDR %s \n",
+				hci_bdaddr2str(&reports[rc].bdaddr));
+			fprintf(stdout, "\tAddress type: %s\n",
+				hci_addrtype2str(reports[rc].addr_type));
+			if (length > 0 && verbose) {
+				dump_adv_data(length, reports[rc].data);
+				print_adv_data(length, reports[rc].data);
+				fprintf(stdout,
+					"\tRSSI: %d dBm\n",
+					(int8_t)reports[rc].data[length]);
+				fprintf(stdout, "\n");
+			}
+		}
+	}
+}
+
+static int
+le_read_white_list_size(int s, int argc, char *argv[])
+{
+	ng_hci_le_read_white_list_size_rp rp;
+	int n;
+
+	n = sizeof(rp);
+
+	if (hci_simple_request(s, NG_HCI_OPCODE(NG_HCI_OGF_LE,
+		NG_HCI_OCF_LE_READ_WHITE_LIST_SIZE), 
+		(void *)&rp, &n) == ERROR)
+		return (ERROR);
+			
+	if (rp.status != 0x00) {
+		fprintf(stdout, "Status: %s [%#02x]\n", 
+			hci_status2str(rp.status), rp.status);
+		return (FAILED);
+	}
+
+        fprintf(stdout, "White list size: %d\n",
+		(uint8_t)rp.white_list_size);
+
+	return (OK);
+}
+
+static int
+le_clear_white_list(int s, int argc, char *argv[])
+{
+	ng_hci_le_clear_white_list_rp rp;
+	int n;
+
+	n = sizeof(rp);
+
+	if (hci_simple_request(s, NG_HCI_OPCODE(NG_HCI_OGF_LE,
+		NG_HCI_OCF_LE_CLEAR_WHITE_LIST), 
+		(void *)&rp, &n) == ERROR)
+		return (ERROR);
+			
+	if (rp.status != 0x00) {
+		fprintf(stdout, "Status: %s [%#02x]\n", 
+			hci_status2str(rp.status), rp.status);
+		return (FAILED);
+	}
+
+        fprintf(stdout, "White list cleared\n");
+
+	return (OK);
+}
+
+static int
+le_add_device_to_white_list(int s, int argc, char *argv[])
+{
+	ng_hci_le_add_device_to_white_list_cp cp;
+	ng_hci_le_add_device_to_white_list_rp rp;
+	int n;
+	char ch;
+	optreset = 1;
+	optind = 0;
+	bool addr_set = false;
+
+	n = sizeof(rp);
+
+	cp.address_type = 0x00;
+
+	while ((ch = getopt(argc, argv , "t:a:")) != -1) {
+		switch(ch) {
+		case 't':
+			if (strcmp(optarg, "public") == 0)
+				cp.address_type = 0x00;
+			else if (strcmp(optarg, "random") == 0)
+				cp.address_type = 0x01;
+			else 
+				return (USAGE);
+			break;
+		case 'a':
+			addr_set = true;
+			if (!bt_aton(optarg, &cp.address)) {
+				struct hostent	*he = NULL;
+
+				if ((he = bt_gethostbyname(optarg)) == NULL)
+					return (USAGE);
+
+				memcpy(&cp.address, he->h_addr,
+					sizeof(cp.address));
+			}
+			break;
+		}
+	}
+
+	if (addr_set == false) 
+		return (USAGE);
+
+	if (hci_request(s, NG_HCI_OPCODE(NG_HCI_OGF_LE,
+		NG_HCI_OCF_LE_ADD_DEVICE_TO_WHITE_LIST), 
+		(void *)&cp, sizeof(cp), (void *)&rp, &n) == ERROR)
+		return (ERROR);
+			
+	if (rp.status != 0x00) {
+		fprintf(stdout, "Status: %s [%#02x]\n", 
+			hci_status2str(rp.status), rp.status);
+		return (FAILED);
+	}
+
+        fprintf(stdout, "Address added to white list\n");
+
+	return (OK);
+}
+
+static int
+le_remove_device_from_white_list(int s, int argc, char *argv[])
+{
+	ng_hci_le_remove_device_from_white_list_cp cp;
+	ng_hci_le_remove_device_from_white_list_rp rp;
+	int n;
+	char ch;
+	optreset = 1;
+	optind = 0;
+	bool addr_set = false;
+
+	n = sizeof(rp);
+
+	cp.address_type = 0x00;
+
+	while ((ch = getopt(argc, argv , "t:a:")) != -1) {
+		switch(ch) {
+		case 't':
+			if (strcmp(optarg, "public") == 0)
+				cp.address_type = 0x00;
+			else if (strcmp(optarg, "random") == 0)
+				cp.address_type = 0x01;
+			else 
+				return (USAGE);
+			break;
+		case 'a':
+			addr_set = true;
+			if (!bt_aton(optarg, &cp.address)) {
+				struct hostent	*he = NULL;
+
+				if ((he = bt_gethostbyname(optarg)) == NULL)
+					return (USAGE);
+
+				memcpy(&cp.address, he->h_addr,
+					sizeof(cp.address));
+			}
+			break;
+		}
+	}
+
+	if (addr_set == false) 
+		return (USAGE);
+
+	if (hci_request(s, NG_HCI_OPCODE(NG_HCI_OGF_LE,
+		NG_HCI_OCF_LE_ADD_DEVICE_TO_WHITE_LIST), 
+		(void *)&cp, sizeof(cp), (void *)&rp, &n) == ERROR)
+		return (ERROR);
+			
+	if (rp.status != 0x00) {
+		fprintf(stdout, "Status: %s [%#02x]\n", 
+			hci_status2str(rp.status), rp.status);
+		return (FAILED);
+	}
+
+        fprintf(stdout, "Address removed from white list\n");
+
+	return (OK);
+}
+
+static int
+le_connect(int s, int argc, char *argv[])
+{ 
+	ng_hci_le_create_connection_cp cp;
+	ng_hci_status_rp rp;
+	char 			b[512];
+	ng_hci_event_pkt_t	*e = (ng_hci_event_pkt_t *) b;
+
+	int n, scancount, bufsize;
+	char ch;
+	bool addr_set = false;
+	bool verbose = false;
+
+	optreset = 1;
+	optind = 0;
+
+	/* minimal scan interval (2.5ms) */ 
+	cp.scan_interval = htole16(4);
+	cp.scan_window = htole16(4);
+
+	/* Don't use the whitelist */
+	cp.filter_policy = 0x00;
+
+	/* Default to public peer address */
+	cp.peer_addr_type = 0x00;
+
+	/* Own address type public */
+	cp.own_address_type = 0x00;
+
+	/* 18.75ms min connection interval */
+	cp.conn_interval_min = htole16(0x000F);
+	/* 18.75ms max connection interval */
+	cp.conn_interval_max = htole16(0x000F);
+
+	/* 0 events connection latency */
+	cp.conn_latency = htole16(0x0000);
+
+	/* 32s supervision timeout */
+	cp.supervision_timeout = htole16(0x0C80);
+
+	/* Min CE Length 0.625 ms */
+	cp.min_ce_length = htole16(1);
+	/* Max CE Length 0.625 ms */
+	cp.max_ce_length = htole16(1);
+
+	while ((ch = getopt(argc, argv , "a:t:v")) != -1) {
+		switch(ch) {
+		case 't':
+			if (strcmp(optarg, "public") == 0)
+				cp.peer_addr_type = 0x00;
+			else if (strcmp(optarg, "random") == 0)
+				cp.peer_addr_type = 0x01;
+			else 
+				return (USAGE);
+			break;
+		case 'a':
+			addr_set = true;
+			if (!bt_aton(optarg, &cp.peer_addr)) {
+				struct hostent	*he = NULL;
+
+				if ((he = bt_gethostbyname(optarg)) == NULL)
+					return (USAGE);
+
+				memcpy(&cp.peer_addr, he->h_addr,
+					sizeof(cp.peer_addr));
+			}
+			break;
+		case 'v':
+			verbose = true;
+			break;
+		}
+	}
+
+	if (addr_set == false) 
+		return (USAGE);
+
+	n = sizeof(rp);
+	if (hci_request(s, NG_HCI_OPCODE(NG_HCI_OGF_LE,
+		NG_HCI_OCF_LE_CREATE_CONNECTION), 
+		(void *)&cp, sizeof(cp), (void *)&rp, &n) == ERROR)
+		return (ERROR);
+
+	if (rp.status != 0x00) {
+		fprintf(stdout,
+			"Create connection failed. Status: %s [%#02x]\n", 
+			hci_status2str(rp.status), rp.status);
+		return (FAILED);
+	}
+
+	scancount = 0;
+	while (scancount < 3) {
+		/* wait for connection events */
+		bufsize = sizeof(b);
+		if (hci_recv(s, b, &bufsize) == ERROR) {
+			return (ERROR);
+		}
+
+		if (bufsize < sizeof(*e)) {
+			errno = EIO;
+			return (ERROR);
+		}
+		scancount++;
+		if (e->event == NG_HCI_EVENT_LE) {
+			handle_le_connection_event(e, verbose);
+			break;
+		}
+	}
+
+	return (OK);
+}
+
+static void handle_le_connection_event(ng_hci_event_pkt_t* e, bool verbose) 
+{
+	ng_hci_le_ep	*ev_pkt;
+	ng_hci_le_connection_complete_ep *conn_event;
+
+	ev_pkt = (ng_hci_le_ep *)(e + 1);
+
+	if (ev_pkt->subevent_code == NG_HCI_LEEV_CON_COMPL) {
+		conn_event =(ng_hci_le_connection_complete_ep *)(ev_pkt + 1);
+		fprintf(stdout, "Handle: %d\n", le16toh(conn_event->handle));
+		if (verbose) {
+			fprintf(stdout,
+				"Status: %s\n",
+				hci_status2str(conn_event->status));
+			fprintf(stdout,
+				"Role: %s\n",
+				hci_role2str(conn_event->role));
+			fprintf(stdout,
+				"Address Type: %s\n",
+				hci_addrtype2str(conn_event->address_type));
+			fprintf(stdout,
+				"Address: %s\n",
+				hci_bdaddr2str(&conn_event->address));
+			fprintf(stdout,
+				"Interval: %.2fms\n", 
+				6.25 * le16toh(conn_event->interval));
+			fprintf(stdout,
+				"Latency: %d events\n", conn_event->latency);
+			fprintf(stdout,
+				"Supervision timeout: %dms\n",
+				 10 * le16toh(conn_event->supervision_timeout));
+			fprintf(stdout,
+				"Master clock accuracy: %s\n",
+				hci_mc_accuracy2str(
+					conn_event->master_clock_accuracy));
+		}
+	}
+	return;
+}
+
+static int
+le_read_channel_map(int s, int argc, char *argv[])
+{
+	ng_hci_le_read_channel_map_cp	cp;
+	ng_hci_le_read_channel_map_rp	rp;
+	int				n;
+	char 				buffer[2048];
+
+	/* parse command parameters */
+	switch (argc) {
+	case 1:
+		/* connection handle */
+		if (sscanf(argv[0], "%d", &n) != 1 || n <= 0 || n > 0x0eff)
+			return (USAGE);
+
+		cp.connection_handle = (uint16_t) (n & 0x0fff);
+		cp.connection_handle = htole16(cp.connection_handle);
+		break;
+
+	default:
+		return (USAGE);
+	}
+
+	n = sizeof(rp);
+	if (hci_request(s, NG_HCI_OPCODE(NG_HCI_OGF_LE,
+		NG_HCI_OCF_LE_READ_CHANNEL_MAP), 
+		(void *)&cp, sizeof(cp), (void *)&rp, &n) == ERROR)
+		return (ERROR);
+
+	if (rp.status != 0x00) {
+		fprintf(stdout,
+			"Read channel map failed. Status: %s [%#02x]\n", 
+			hci_status2str(rp.status), rp.status);
+		return (FAILED);
+	}
+
+	fprintf(stdout, "Connection handle: %d\n",
+		le16toh(rp.connection_handle));
+	fprintf(stdout, "Used channels:\n");
+	fprintf(stdout, "\n%s\n", hci_le_chanmap2str(rp.le_channel_map, 
+		buffer, sizeof(buffer)));
+
+	return (OK);
+} /* le_read_channel_map */
+
+static int
+le_read_remote_features(int s, int argc, char *argv[])
+{
+	ng_hci_le_read_remote_used_features_cp	cp;
+	ng_hci_status_rp 			rp;
+	int					n, bufsize;
+	char 					b[512];
+
+	ng_hci_event_pkt_t	*e = (ng_hci_event_pkt_t *) b;
+
+	/* parse command parameters */
+	switch (argc) {
+	case 1:
+		/* connection handle */
+		if (sscanf(argv[0], "%d", &n) != 1 || n <= 0 || n > 0x0eff)
+			return (USAGE);
+
+		cp.connection_handle = (uint16_t) (n & 0x0fff);
+		cp.connection_handle = htole16(cp.connection_handle);
+		break;
+
+	default:
+		return (USAGE);
+	}
+
+	n = sizeof(rp);
+	if (hci_request(s, NG_HCI_OPCODE(NG_HCI_OGF_LE,
+		NG_HCI_OCF_LE_READ_REMOTE_USED_FEATURES), 
+		(void *)&cp, sizeof(cp), (void *)&rp, &n) == ERROR)
+		return (ERROR);
+
+	if (rp.status != 0x00) {
+		fprintf(stdout,
+			"Read remote features failed. Status: %s [%#02x]\n", 
+			hci_status2str(rp.status), rp.status);
+		return (FAILED);
+	}
+
+	/* wait for connection events */
+	bufsize = sizeof(b);
+	if (hci_recv(s, b, &bufsize) == ERROR) {
+		return (ERROR);
+	}
+
+	if (bufsize < sizeof(*e)) {
+		errno = EIO;
+		return (ERROR);
+	}
+	if (e->event == NG_HCI_EVENT_LE) {
+		handle_le_remote_features_event(e);
+	}
+
+	return (OK);
+} /* le_read_remote_features */
+
+static void handle_le_remote_features_event(ng_hci_event_pkt_t* e) 
+{
+	ng_hci_le_ep	*ev_pkt;
+	ng_hci_le_read_remote_features_ep *feat_event;
+	char	buffer[2048];
+
+	ev_pkt = (ng_hci_le_ep *)(e + 1);
+
+	if (ev_pkt->subevent_code == NG_HCI_LEEV_READ_REMOTE_FEATURES_COMPL) {
+		feat_event =(ng_hci_le_read_remote_features_ep *)(ev_pkt + 1);
+		fprintf(stdout, "Handle: %d\n",
+			le16toh(feat_event->connection_handle));
+		fprintf(stdout,
+			"Status: %s\n",
+			hci_status2str(feat_event->status));
+		fprintf(stdout, "Features:\n%s\n",
+			hci_le_features2str(feat_event->features,
+				buffer, sizeof(buffer)));
+	}
+
+	return;
+} /* handle_le_remote_features_event */
+
+static int le_rand(int s, int argc, char *argv[])
+{
+	ng_hci_le_rand_rp rp;
+	int n;
+
+	n = sizeof(rp);
+
+	if (hci_simple_request(s, NG_HCI_OPCODE(NG_HCI_OGF_LE,
+		NG_HCI_OCF_LE_RAND), 
+		(void *)&rp, &n) == ERROR)
+		return (ERROR);
+			
+	if (rp.status != 0x00) {
+		fprintf(stdout, "Status: %s [%#02x]\n", 
+			hci_status2str(rp.status), rp.status);
+		return (FAILED);
+	}
+
+	fprintf(stdout,
+		"Random number : %08llx\n",
+		(unsigned long long)le64toh(rp.random_number));
+
+	return (OK);
+}
+
+
+
 struct hci_command le_commands[] = {
 {
 	"le_enable",
@@ -684,5 +1310,62 @@ struct hci_command le_commands[] = {
 	  "le_read_buffer_size [-v 1|2]\n"
 	  "Read the maximum size of ACL and ISO data packets",
 	  &le_read_buffer_size
+  },
+  {
+	  "le_scan",
+	  "le_scan [-a] [-v] [-n number_of_scans]\n"
+	  "Do an LE scan",
+	  &le_scan
+  },
+  {
+	  "le_read_white_list_size",
+	  "le_read_white_list_size\n"
+	  "Read total number of white list entries that can be stored",
+	  &le_read_white_list_size
+  },
+  {
+	  "le_clear_white_list",
+	  "le_clear_white_list\n"
+	  "Clear the white list in the controller",
+	  &le_clear_white_list
+  },
+  {
+	  "le_add_device_to_white_list",
+	  "le_add_device_to_white_list\n"
+	  "[-t public|random] -a address\n"
+	  "Add device to the white list",
+	  &le_add_device_to_white_list
+  },
+  {
+	  "le_remove_device_from_white_list",
+	  "le_remove_device_from_white_list\n"
+	  "[-t public|random] -a address\n"
+	  "Remove device from the white list",
+	  &le_remove_device_from_white_list
+  },
+  {
+	  "le_connect",
+	  "le_connect -a address [-t public|random] [-v]\n"
+	  "Connect to an LE device",
+	  &le_connect
+  },
+  {
+	  "le_read_channel_map",
+	  "le_read_channel_map <connection_handle>\n"
+	  "Read the channel map for a connection",
+	  &le_read_channel_map
+  },
+  {
+	  "le_read_remote_features",
+	  "le_read_remote_features <connection_handle>\n"
+	  "Read supported features for the device\n"
+	  "identified by the connection handle",
+	  &le_read_remote_features
+  },
+  {
+	  "le_rand",
+	  "le_rand\n"
+	  "Generate 64 bits of random data",
+	  &le_rand
   },
 };

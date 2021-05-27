@@ -228,7 +228,6 @@ _ATOMIC_ADD(long)
     }								\
     /* _ATOMIC_CLEAR */
 
-
 _ATOMIC_CLEAR(int)
 _ATOMIC_CLEAR(long)
 
@@ -621,7 +620,7 @@ atomic_cmpset_masked(uint32_t *p, uint32_t cmpval, uint32_t newval,
 	uint32_t	tmp;
 
 	__asm __volatile (
-		"1:\tlwarx %2, 0, %2\n\t"	/* load old value */
+		"1:\tlwarx %2, 0, %3\n\t"	/* load old value */
 		"and %0, %2, %7\n\t"
 		"cmplw %4, %0\n\t"		/* compare */
 		"bne- 2f\n\t"			/* exit if not equal */
@@ -725,7 +724,6 @@ atomic_cmpset_long(volatile u_long* p, u_long cmpval, u_long newval)
 
 ATOMIC_CMPSET_ACQ_REL(int);
 ATOMIC_CMPSET_ACQ_REL(long);
-
 
 #ifdef ISA_206_ATOMICS
 #define	atomic_cmpset_8		atomic_cmpset_char

@@ -164,7 +164,6 @@ struct if_data {
 #define	IFF_RENAMING	0x400000	/* (n) interface is being renamed */
 #define	IFF_NOGROUP	0x800000	/* (n) interface is not part of any groups */
 
-
 /*
  * Old names for driver flags so that user space tools can continue to use
  * the old (portable) names.
@@ -210,7 +209,7 @@ struct if_data {
  *   contains the enabled optional feature & capabilites that can be used
  *   individually per packet and are specified in the mbuf pkthdr.csum_flags
  *   field.  IFCAP_* and CSUM_* do not match one to one and CSUM_* may be
- *   more detailed or differenciated than IFCAP_*.
+ *   more detailed or differentiated than IFCAP_*.
  *   Hwassist features are defined CSUM_* in sys/mbuf.h
  *
  * Capabilities that cannot be arbitrarily changed with ifconfig/ioctl
@@ -249,6 +248,9 @@ struct if_data {
 #define	IFCAP_NOMAP		0x4000000 /* can TX unmapped mbufs */
 #define	IFCAP_TXTLS4		0x8000000 /* can do TLS encryption and segmentation for TCP */
 #define	IFCAP_TXTLS6		0x10000000 /* can do TLS encryption and segmentation for TCP6 */
+#define	IFCAP_VXLAN_HWCSUM	0x20000000 /* can do IFCAN_HWCSUM on VXLANs */
+#define	IFCAP_VXLAN_HWTSO	0x40000000 /* can do IFCAP_TSO on VXLANs */
+#define	IFCAP_TXTLS_RTLMT	0x80000000 /* can do TLS with rate limiting */
 
 #define IFCAP_HWCSUM_IPV6	(IFCAP_RXCSUM_IPV6 | IFCAP_TXCSUM_IPV6)
 
@@ -391,7 +393,7 @@ struct ifreq_buffer {
  * definitions which begin with ifr_name.  The
  * remainder may be interface specific.
  */
-struct	ifreq {
+struct ifreq {
 	char	ifr_name[IFNAMSIZ];		/* if name, e.g. "en0" */
 	union {
 		struct	sockaddr ifru_addr;
@@ -465,11 +467,11 @@ struct ifmediareq {
 	int	*ifm_ulist;		/* media words */
 };
 
-struct  ifdrv {
-	char            ifd_name[IFNAMSIZ];     /* if name, e.g. "en0" */
-	unsigned long   ifd_cmd;
-	size_t          ifd_len;
-	void            *ifd_data;
+struct ifdrv {
+	char		ifd_name[IFNAMSIZ];	/* if name, e.g. "en0" */
+	unsigned long	ifd_cmd;
+	size_t		ifd_len;
+	void		*ifd_data;
 };
 
 /* 
@@ -491,7 +493,7 @@ struct ifstat {
  * for machine (useful for programs which
  * must know all networks accessible).
  */
-struct	ifconf {
+struct ifconf {
 	int	ifc_len;		/* size of associated buffer */
 	union {
 		caddr_t	ifcu_buf;

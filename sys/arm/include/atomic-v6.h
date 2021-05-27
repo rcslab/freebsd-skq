@@ -47,12 +47,10 @@
 #define isb()  __asm __volatile("isb" : : : "memory")
 #define dsb()  __asm __volatile("dsb" : : : "memory")
 #define dmb()  __asm __volatile("dmb" : : : "memory")
-#elif __ARM_ARCH >= 6
+#else
 #define isb()  __asm __volatile("mcr p15, 0, %0, c7, c5, 4" : : "r" (0) : "memory")
 #define dsb()  __asm __volatile("mcr p15, 0, %0, c7, c10, 4" : : "r" (0) : "memory")
 #define dmb()  __asm __volatile("mcr p15, 0, %0, c7, c10, 5" : : "r" (0) : "memory")
-#else
-#error Only use this file with ARMv6 and later
 #endif
 
 #define mb()   dmb()
@@ -90,7 +88,6 @@ atomic_##NAME##_rel_##WIDTH(__volatile uint##WIDTH##_t *p, uint##WIDTH##_t v)\
 	dmb();								\
 	atomic_##NAME##_##WIDTH(p, v);					\
 }
-
 
 static __inline void
 atomic_add_32(volatile uint32_t *p, uint32_t val)

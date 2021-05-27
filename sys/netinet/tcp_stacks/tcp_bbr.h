@@ -1,7 +1,5 @@
 /*-
- * Copyright (c) 2016-9
- *	Netflix Inc.  All rights reserved.
- *      Author Randall R. Stewart
+ * Copyright (c) 2016-2020 Netflix, Inc.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -228,7 +226,6 @@ struct bbr_rtt_sample {
 #define BBR_RT_SET_GRADIENT    0x200
 #define BBR_RT_TS_VALID        0x400
 
-
 struct bbr_log {
 	union {
 		struct bbr_sendmap *rsm;	/* For alloc/free */
@@ -296,7 +293,6 @@ struct bbr_log_sysctl_out {
 #define BBR_SEES_STRETCH_ACK 1
 #define BBR_SEES_COMPRESSED_ACKS 2
 
-
 /*
  * As we get each SACK we wade through the
  * rc_map and mark off what is acked.
@@ -346,7 +342,6 @@ struct bbr_log_sysctl_out {
 #define USECS_IN_MSEC 1000
 #define BBR_TIME_TO_SECONDS(a) (a / USECS_IN_SECOND)
 #define BBR_TIME_TO_MILLI(a) (a / MS_IN_USEC)
-
 
 /* BBR keeps time in usec's so we divide by 1000 and round up */
 #define BBR_TS_TO_MS(t)  ((t+999)/MS_IN_USEC)
@@ -506,7 +501,6 @@ struct bbr_opts_stats {
 	uint64_t tcp_policer_det;
 };
 
-
 #ifdef _KERNEL
 #define BBR_STAT_SIZE (sizeof(struct bbr_stats)/sizeof(uint64_t))
 extern counter_u64_t bbr_stat_arry[BBR_STAT_SIZE];
@@ -525,7 +519,6 @@ extern counter_u64_t bbr_opts_arry[BBR_OPTS_SIZE];
 #define BBR_RECOVERY_MEDRTT 2
 #define BBR_RECOVERY_HIGHRTT 3
 #define BBR_RECOVERY_EXTREMERTT 4
-
 
 struct bbr_control {
 	/*******************************/
@@ -563,7 +556,6 @@ struct bbr_control {
 
 	uint32_t cur_rtt;	/* Last RTT from ack */
 
-
 	uint32_t rc_went_idle_time;	/* Used for persits to see if its
 					 * probe-rtt qualified */
 	uint32_t rc_pace_max_segs:17,	/* How much in any single TSO we send Lock(a) */
@@ -581,7 +573,6 @@ struct bbr_control {
 	uint32_t rc_lost_at_pktepoch;	/* what the lost value was at the last
 					 * pkt-epoch */
 	uint32_t r_measurement_count;	/* count of measurement applied lock(a) */
-
 
 	uint32_t rc_last_tlp_seq;	/* Last tlp sequence Lock(a) */
 	uint16_t rc_reorder_shift;	/* Socket option value Lock(a) */
@@ -666,7 +657,6 @@ struct bbr_control {
 	uint64_t rc_bbr_lastbtlbw;	/* For startup, what was last btlbw I
 					 * saw to check the 20% gain Lock(a) */
 
-
 	uint32_t rc_bbr_cwnd_gain;	/* Current cwnd gain Lock(a) */
 	uint32_t rc_pkt_epoch_loss_rate;	/* pkt-epoch loss rate */
 
@@ -742,13 +732,12 @@ struct bbr_control {
 
 };
 
-
 struct socket;
 struct tcp_bbr {
 	/* First cache line 0x00 */
 	int32_t(*r_substate) (struct mbuf *, struct tcphdr *,
 	    struct socket *, struct tcpcb *, struct tcpopt *,
-	    int32_t, int32_t, uint32_t, int32_t, int32_t);	/* Lock(a) */
+	    int32_t, int32_t, uint32_t, int32_t, int32_t, uint8_t);	/* Lock(a) */
 	struct tcpcb *rc_tp;	/* The tcpcb Lock(a) */
 	struct inpcb *rc_inp;	/* The inpcb Lock(a) */
 	struct timeval rc_tv;

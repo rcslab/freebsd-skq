@@ -53,7 +53,7 @@
 .\" $FreeBSD$
 .\" $NetBSD: bus_dma.9,v 1.25 2002/10/14 13:43:16 wiz Exp $
 .\"
-.Dd April 14, 2020
+.Dd May 25, 2020
 .Dt BUS_DMA 9
 .Os
 .Sh NAME
@@ -63,12 +63,15 @@
 .Nm bus_dma_template_init ,
 .Nm bus_dma_template_tag ,
 .Nm bus_dma_template_clone ,
+.Nm bus_dma_template_fill ,
+.Nm BUS_DMA_TEMPLATE_FILL ,
 .Nm bus_dmamap_create ,
 .Nm bus_dmamap_destroy ,
 .Nm bus_dmamap_load ,
 .Nm bus_dmamap_load_bio ,
 .Nm bus_dmamap_load_ccb ,
 .Nm bus_dmamap_load_crp ,
+.Nm bus_dmamap_load_crp_buffer ,
 .Nm bus_dmamap_load_mbuf ,
 .Nm bus_dmamap_load_mbuf_sg ,
 .Nm bus_dmamap_load_uio ,
@@ -89,18 +92,28 @@
 .Fn bus_dma_tag_destroy "bus_dma_tag_t dmat"
 .Ft void
 .Fo bus_dma_template_init
-.Fa "bus_dma_template_t template"
+.Fa "bus_dma_template_t *template"
 .Fa "bus_dma_tag_t parent"
 .Fc
 .Ft int
 .Fo bus_dma_template_tag
-.Fa "bus_dma_template_t template"
+.Fa "bus_dma_template_t *template"
 .Fa "bus_dma_tag_t *dmat"
 .Fc
 .Ft void
 .Fo bus_dma_template_clone
-.Fa "bus_dma_template_t template"
+.Fa "bus_dma_template_t *template"
 .Fa "bus_dma_tag_t dmat"
+.Fc
+.Ft void
+.Fo bus_dma_template_fill
+.Fa "bus_dma_template_t *template"
+.Fa "bus_dma_param_t params[]"
+.Fa "u_int count"
+.Fc
+.Fo BUS_DMA_TEMPLATE_FILL
+.Fa "bus_dma_template_t *template"
+.Fa "bus_dma_param_t param ..."
 .Fc
 .Ft int
 .Fn bus_dmamap_create "bus_dma_tag_t dmat" "int flags" "bus_dmamap_t *mapp"
@@ -122,6 +135,10 @@
 .Fn bus_dmamap_load_crp "bus_dma_tag_t dmat" "bus_dmamap_t map" \
 "struct crypto *crp" "bus_dmamap_callback_t *callback" "void *callback_arg" \
 "int flags"
+.Ft int
+.Fn bus_dmamap_load_crp_buffer "bus_dma_tag_t dmat" "bus_dmamap_t map" \
+"struct crypto_buffer *cb" "bus_dmamap_callback_t *callback" \
+"void *callback_arg" "int flags"
 .Ft int
 .Fn bus_dmamap_load_mbuf "bus_dma_tag_t dmat" "bus_dmamap_t map" \
 "struct mbuf *mbuf" "bus_dmamap_callback2_t *callback" "void *callback_arg" \
@@ -306,13 +323,13 @@ tag inheriting the restrictions of its parent.
 This allows all devices along the path of DMA transactions
 to contribute to the constraints of those transactions.
 .It Vt bus_dma_template_t
-A template structure for creating a
+A template is a structure for creating a
 .Fa bus_dma_tag_t
 from a set of defaults.
 Once initialized with
 .Fn bus_dma_template_init ,
 a driver can over-ride individual fields to suit its needs.
-The following fields have the indicated values:
+The following fields start with the indicated default values:
 .Bd -literal
 	alignment	1
 	boundary	0
@@ -357,6 +374,8 @@ to
 inclusive.
 The filter function should return zero if any mapping in this range
 can be accommodated by the device and non-zero otherwise.
+.Pp
+.Em Note: The use of filters is deprecated.  Proper operation is not guaranteed.
 .It Vt bus_dma_segment_t
 A machine-dependent type that describes individual
 DMA segments.
@@ -394,8 +413,9 @@ via
 .Fn bus_dmamap_load ,
 .Fn bus_dmamap_load_bio ,
 .Fn bus_dmamap_load_ccb ,
+.Fn bus_dmamap_load_crp ,
 or
-.Fn bus_dmamap_load_crp .
+.Fn bus_dmamap_load_crp_buffer .
 Callbacks are of the format:
 .Bl -tag -width indent
 .It Ft void
@@ -608,6 +628,8 @@ and
 cannot adequately describe the constraints of the device.
 The filter function will be called for every machine page
 that overlaps the exclusion window.
+.Pp
+.Em Note: The use of filters is deprecated.  Proper operation is not guaranteed.
 .It Fa filtfuncarg
 Argument passed to all calls to the filter function for this tag.
 May be
@@ -685,22 +707,56 @@ on success.
 .It Fn bus_dma_template_init "*template" "parent"
 Initializes a
 .Fa bus_dma_template_t
-structure and associates it with an optional 
-.Fa parent .
-The
+structure.
+If the
 .Fa parent
-argument may be NULL.
+argument is non-NULL, this parent tag is associated with the template and
+will be compiled into the dma tag that is later created.
+The values of the parent are not copied into the template.
+During tag creation in
+.Fn bus_dma_tag_template ,
+any parameters from the parent tag that are more restrictive than what is
+in the provided template will overwrite what goes into the new tag.
 .It Fn bus_dma_template_tag "*template" "*dmat"
 Unpacks a template into a tag, and returns the tag via the
 .Fa dmat .
 All return values are identical to
 .Fn bus_dma_tag_create .
+The template is not modified by this function, and can be reused and/or
+freed upon return.
 .It Fn bus_dma_template_clone "*template" "dmat"
-Clones the fields from a tag to a template.
-This is useful for cloning tags when paired with
-.Fn bus_dma_template_tag .
-A template that is filled in as a clone does not need to be initialized
-first.
+Copies the fields from an existing tag to a template.
+The template does not need to be initialized first.
+All of its fields will be overwritten by the values contained in the tag.
+When paired with
+.Fn bus_dma_template_tag ,
+this function is useful for creating copies of tags.
+.It Fn bus_dma_template_fill "*template" "params[]" "count"
+Fills in the selected fields of the template with the keyed values from the
+.Fa params
+array.
+This is not meant to be called directly, use
+.Fn BUS_DMA_TEMPLATE_FILL
+instead.
+.It Fn BUS_DMA_TEMPLATE_FILL "*template" "param ..."
+Fills in the selected fields of the template with a variable number of
+key-value parameters.
+The macros listed below take an argument of the specified type and encapsulate
+it into a key-value structure that is directly usable as a parameter argument.
+Muliple parameters may be provided at once.
+.Bd -literal
+	BD_PARENT()	void *
+	BD_ALIGNMENT()	uintmax_t
+	BD_BOUNDARY()	uintmax_t
+	BD_LOWADDR()	vm_paddr_t
+	BD_HIGHADDR()	vm_paddr_t
+	BD_MAXSIZE()	uintmax_t
+	BD_NSEGMENTS()	uintmax_t
+	BD_MAXSEGSIZE()	uintmax_t
+	BD_FLAGS()	uintmax_t
+	BD_LOCKFUNC()	void *
+	BD_LOCKFUNCARG() void *
+.Ed
 .It Fn bus_dmamap_create "dmat" "flags" "*mapp"
 Allocates and initializes a DMA map.
 Arguments are as follows:
@@ -885,8 +941,18 @@ XPT_SCSI_IO
 .It Fn bus_dmamap_load_crp "dmat" "map" "crp" "callback" "callback_arg" "flags"
 This is a variation of
 .Fn bus_dmamap_load
-which maps buffers pointed to by
+which maps the input buffer pointed to by
 .Fa crp
+for DMA transfers.
+The
+.Dv BUS_DMA_NOWAIT
+flag is implied, thus no callback deferral will happen.
+.It Fn bus_dmamap_load_crp_buffer "dmat" "map" "cb" "callback" "callback_arg" \
+"flags"
+This is a variation of
+.Fn bus_dmamap_load
+which maps the crypto data buffer pointed to by
+.Fa cb
 for DMA transfers.
 The
 .Dv BUS_DMA_NOWAIT

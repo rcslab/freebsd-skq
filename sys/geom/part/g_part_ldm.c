@@ -1020,10 +1020,10 @@ ldm_vmdb_parse(struct ldm_db *db, struct g_consumer *cp)
 	pp = cp->provider;
 	size = howmany(db->dh.last_seq * db->dh.size, pp->sectorsize);
 	size -= 1; /* one sector takes vmdb header */
-	for (n = 0; n < size; n += MAXPHYS / pp->sectorsize) {
+	for (n = 0; n < size; n += maxphys / pp->sectorsize) {
 		offset = db->ph.db_offset + db->th.conf_offset + n + 1;
-		sectors = (size - n) > (MAXPHYS / pp->sectorsize) ?
-		    MAXPHYS / pp->sectorsize: size - n;
+		sectors = (size - n) > (maxphys / pp->sectorsize) ?
+		    maxphys / pp->sectorsize : size - n;
 		/* read VBLKs */
 		buf = g_read_data(cp, offset * pp->sectorsize,
 		    sectors * pp->sectorsize, &error);
@@ -1285,7 +1285,6 @@ g_part_ldm_probe(struct g_part_table *basetable, struct g_consumer *cp)
 	struct g_provider *pp;
 	u_char *buf, type[64];
 	int error, idx;
-
 
 	pp = cp->provider;
 	if (pp->sectorsize != 512)

@@ -164,7 +164,6 @@ out:
 	return (IPPROTO_DONE);
 }
 
-
 int
 sctp6_input(struct mbuf **i_pak, int *offp, int proto SCTP_UNUSED)
 {
@@ -179,9 +178,6 @@ sctp6_notify(struct sctp_inpcb *inp,
     uint8_t icmp6_code,
     uint32_t next_mtu)
 {
-#if defined(__APPLE__) || defined(SCTP_SO_LOCK_TESTING)
-	struct socket *so;
-#endif
 	int timer_stopped;
 
 	switch (icmp6_type) {
@@ -205,19 +201,8 @@ sctp6_notify(struct sctp_inpcb *inp,
 		/* Treat it like an ABORT. */
 		if (icmp6_code == ICMP6_PARAMPROB_NEXTHEADER) {
 			sctp_abort_notification(stcb, 1, 0, NULL, SCTP_SO_NOT_LOCKED);
-#if defined(__APPLE__) || defined(SCTP_SO_LOCK_TESTING)
-			so = SCTP_INP_SO(inp);
-			atomic_add_int(&stcb->asoc.refcnt, 1);
-			SCTP_TCB_UNLOCK(stcb);
-			SCTP_SOCKET_LOCK(so, 1);
-			SCTP_TCB_LOCK(stcb);
-			atomic_subtract_int(&stcb->asoc.refcnt, 1);
-#endif
 			(void)sctp_free_assoc(inp, stcb, SCTP_NORMAL_PROC,
 			    SCTP_FROM_SCTP_USRREQ + SCTP_LOC_2);
-#if defined(__APPLE__) || defined(SCTP_SO_LOCK_TESTING)
-			SCTP_SOCKET_UNLOCK(so, 1);
-#endif
 		} else {
 			SCTP_TCB_UNLOCK(stcb);
 		}
@@ -477,7 +462,6 @@ SYSCTL_PROC(_net_inet6_sctp6, OID_AUTO, getcred,
     0, 0, sctp6_getcred, "S,ucred",
     "Get the ucred of a SCTP6 connection");
 
-
 /* This is the same as the sctp_abort() could be made common */
 static void
 sctp6_abort(struct socket *so)
@@ -668,7 +652,6 @@ out:
 	return (error);
 }
 
-
 static void
 sctp6_close(struct socket *so)
 {
@@ -684,11 +667,9 @@ sctp6_disconnect(struct socket *so)
 	return (sctp_disconnect(so));
 }
 
-
 int
 sctp_sendm(struct socket *so, int flags, struct mbuf *m, struct sockaddr *addr,
     struct mbuf *control, struct thread *p);
-
 
 static int
 sctp6_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *addr,
@@ -1139,7 +1120,6 @@ sctp6_in6getaddr(struct socket *so, struct sockaddr **nam)
 #endif
 	return (error);
 }
-
 
 static int
 sctp6_getpeeraddr(struct socket *so, struct sockaddr **nam)

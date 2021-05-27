@@ -224,7 +224,6 @@ static int lan78xx_chip_init(struct muge_softc *sc);
 static int muge_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data);
 
 static const struct usb_config muge_config[MUGE_N_TRANSFER] = {
-
 	[MUGE_BULK_DT_WR] = {
 		.type = UE_BULK,
 		.endpoint = UE_ADDR_ANY,
@@ -1169,9 +1168,9 @@ muge_bulk_read_callback(struct usb_xfer *xfer, usb_error_t error)
 	struct ifnet *ifp = uether_getifp(ue);
 	struct mbuf *m;
 	struct usb_page_cache *pc;
-	uint16_t pktlen;
 	uint32_t rx_cmd_a, rx_cmd_b;
 	uint16_t rx_cmd_c;
+	int pktlen;
 	int off;
 	int actlen;
 
@@ -1249,7 +1248,14 @@ muge_bulk_read_callback(struct usb_xfer *xfer, usb_error_t error)
 					    1);
 					goto tr_setup;
 				}
-
+				if (pktlen > m->m_len) {
+					muge_dbg_printf(sc,
+					    "buffer too small %d vs %d bytes",
+					    pktlen, m->m_len);
+					if_inc_counter(ifp, IFCOUNTER_IQDROPS, 1);
+					m_freem(m);
+					goto tr_setup;
+				}
 				usbd_copy_out(pc, off, mtod(m, uint8_t *),
 				    pktlen);
 

@@ -32,6 +32,8 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
+#include "opt_bhyve_snapshot.h"
+
 #include <sys/param.h>
 #include <sys/lock.h>
 #include <sys/kernel.h>
@@ -47,6 +49,7 @@ __FBSDID("$FreeBSD$");
 #include <machine/smp.h>
 
 #include <machine/vmm.h>
+#include <machine/vmm_snapshot.h>
 
 #include "vmm_lapic.h"
 #include "vmm_ktr.h"
@@ -149,7 +152,7 @@ void
 vlapic_id_write_handler(struct vlapic *vlapic)
 {
 	struct LAPIC *lapic;
-	
+
 	/*
 	 * We don't allow the ID register to be modified so reset it back to
 	 * its default value.
@@ -199,7 +202,7 @@ vlapic_get_ccr(struct vlapic *vlapic)
 	struct bintime bt_now, bt_rem;
 	struct LAPIC *lapic;
 	uint32_t ccr;
-	
+
 	ccr = 0;
 	lapic = vlapic->apic_page;
 
@@ -230,7 +233,7 @@ vlapic_dcr_write_handler(struct vlapic *vlapic)
 {
 	struct LAPIC *lapic;
 	int divisor;
-	
+
 	lapic = vlapic->apic_page;
 	VLAPIC_TIMER_LOCK(vlapic);
 
@@ -255,7 +258,7 @@ void
 vlapic_esr_write_handler(struct vlapic *vlapic)
 {
 	struct LAPIC *lapic;
-	
+
 	lapic = vlapic->apic_page;
 	lapic->esr = vlapic->esr_pending;
 	vlapic->esr_pending = 0;
@@ -380,7 +383,7 @@ vlapic_lvt_write_handler(struct vlapic *vlapic, uint32_t offset)
 	uint32_t *lvtptr, mask, val;
 	struct LAPIC *lapic;
 	int idx;
-	
+
 	lapic = vlapic->apic_page;
 	lvtptr = vlapic_get_lvtptr(vlapic, offset);	
 	val = *lvtptr;
@@ -610,7 +613,7 @@ static __inline int
 vlapic_periodic_timer(struct vlapic *vlapic)
 {
 	uint32_t lvt;
-	
+
 	lvt = vlapic_get_lvt(vlapic, APIC_OFFSET_TIMER_LVT);
 
 	return (vlapic_get_lvt_field(lvt, APIC_LVTT_TM_PERIODIC));
@@ -1212,7 +1215,7 @@ vlapic_read(struct vlapic *vlapic, int mmio_access, uint64_t offset,
 		*data = 0;
 		goto done;
 	}
-	
+
 	offset &= ~3;
 	switch(offset)
 	{
@@ -1415,7 +1418,7 @@ static void
 vlapic_reset(struct vlapic *vlapic)
 {
 	struct LAPIC *lapic;
-	
+
 	lapic = vlapic->apic_page;
 	bzero(lapic, sizeof(struct LAPIC));
 
@@ -1650,3 +1653,106 @@ vlapic_set_tmr_level(struct vlapic *vlapic, uint32_t dest, bool phys,
 	VLAPIC_CTR1(vlapic, "vector %d set to level-triggered", vector);
 	vlapic_set_tmr(vlapic, vector, true);
 }
+
+#ifdef BHYVE_SNAPSHOT
+static void
+vlapic_reset_callout(struct vlapic *vlapic, uint32_t ccr)
+{
+	/* The implementation is similar to the one in the
+	 * `vlapic_icrtmr_write_handler` function
+	 */
+	sbintime_t sbt;
+	struct bintime bt;
+
+	VLAPIC_TIMER_LOCK(vlapic);
+
+	bt = vlapic->timer_freq_bt;
+	bintime_mul(&bt, ccr);
+
+	if (ccr != 0) {
+		binuptime(&vlapic->timer_fire_bt);
+		bintime_add(&vlapic->timer_fire_bt, &bt);
+
+		sbt = bttosbt(bt);
+		callout_reset_sbt(&vlapic->callout, sbt, 0,
+		    vlapic_callout_handler, vlapic, 0);
+	} else {
+		/* even if the CCR was 0, periodic timers should be reset */
+		if (vlapic_periodic_timer(vlapic)) {
+			binuptime(&vlapic->timer_fire_bt);
+			bintime_add(&vlapic->timer_fire_bt,
+				    &vlapic->timer_period_bt);
+			sbt = bttosbt(vlapic->timer_period_bt);
+
+			callout_stop(&vlapic->callout);
+			callout_reset_sbt(&vlapic->callout, sbt, 0,
+					  vlapic_callout_handler, vlapic, 0);
+		}
+	}
+
+	VLAPIC_TIMER_UNLOCK(vlapic);
+}
+
+int
+vlapic_snapshot(struct vm *vm, struct vm_snapshot_meta *meta)
+{
+	int i, ret;
+	struct vlapic *vlapic;
+	struct LAPIC *lapic;
+	uint32_t ccr;
+
+	KASSERT(vm != NULL, ("%s: arg was NULL", __func__));
+
+	ret = 0;
+
+	for (i = 0; i < VM_MAXCPU; i++) {
+		vlapic = vm_lapic(vm, i);
+
+		/* snapshot the page first; timer period depends on icr_timer */
+		lapic = vlapic->apic_page;
+		SNAPSHOT_BUF_OR_LEAVE(lapic, PAGE_SIZE, meta, ret, done);
+
+		SNAPSHOT_VAR_OR_LEAVE(vlapic->esr_pending, meta, ret, done);
+
+		SNAPSHOT_VAR_OR_LEAVE(vlapic->timer_freq_bt.sec,
+				      meta, ret, done);
+		SNAPSHOT_VAR_OR_LEAVE(vlapic->timer_freq_bt.frac,
+				      meta, ret, done);
+
+		/*
+		 * Timer period is equal to 'icr_timer' ticks at a frequency of
+		 * 'timer_freq_bt'.
+		 */
+		if (meta->op == VM_SNAPSHOT_RESTORE) {
+			vlapic->timer_period_bt = vlapic->timer_freq_bt;
+			bintime_mul(&vlapic->timer_period_bt, lapic->icr_timer);
+		}
+
+		SNAPSHOT_BUF_OR_LEAVE(vlapic->isrvec_stk,
+				      sizeof(vlapic->isrvec_stk),
+				      meta, ret, done);
+		SNAPSHOT_VAR_OR_LEAVE(vlapic->isrvec_stk_top, meta, ret, done);
+		SNAPSHOT_VAR_OR_LEAVE(vlapic->boot_state, meta, ret, done);
+
+		SNAPSHOT_BUF_OR_LEAVE(vlapic->lvt_last,
+				      sizeof(vlapic->lvt_last),
+				      meta, ret, done);
+
+		if (meta->op == VM_SNAPSHOT_SAVE)
+			ccr = vlapic_get_ccr(vlapic);
+
+		SNAPSHOT_VAR_OR_LEAVE(ccr, meta, ret, done);
+
+		if (meta->op == VM_SNAPSHOT_RESTORE) {
+			/* Reset the value of the 'timer_fire_bt' and the vlapic
+			 * callout based on the value of the current count
+			 * register saved when the VM snapshot was created
+			 */
+			vlapic_reset_callout(vlapic, ccr);
+		}
+	}
+
+done:
+	return (ret);
+}
+#endif

@@ -633,7 +633,7 @@ __CONCAT(PMTYPE, bootstrap)(vm_paddr_t firstaddr)
 	 * are required for promotion of the corresponding kernel virtual
 	 * addresses to superpage mappings.
 	 */
-	vm_phys_add_seg(KPTphys, KPTphys + ptoa(nkpt));
+	vm_phys_early_add_seg(KPTphys, KPTphys + ptoa(nkpt));
 
 	/*
 	 * Initialize the first available kernel virtual address.
@@ -674,7 +674,6 @@ __CONCAT(PMTYPE, bootstrap)(vm_paddr_t firstaddr)
 
 	va = virtual_avail;
 	pte = vtopte(va);
-
 
 	/*
 	 * Initialize temporary map objects on the current CPU for use
@@ -788,7 +787,7 @@ pmap_init_reserved_pages(void)
 		pc->pc_qmap_addr = pages + ptoa(2);
 	}
 }
- 
+
 SYSINIT(rpages_init, SI_SUB_CPU, SI_ORDER_ANY, pmap_init_reserved_pages, NULL);
 
 /*
@@ -961,7 +960,6 @@ pmap_ptelist_init(vm_offset_t *head, void *base, int npages)
 		pmap_ptelist_free(head, va);
 	}
 }
-
 
 /*
  *	Initialize the pmap module.
@@ -1203,6 +1201,13 @@ pmap_update_pde_invalidate(vm_offset_t va, pd_entry_t newpde)
 }
 
 #ifdef SMP
+
+static void
+pmap_curcpu_cb_dummy(pmap_t pmap __unused, vm_offset_t addr1 __unused,
+    vm_offset_t addr2 __unused)
+{
+}
+
 /*
  * For SMP, these functions have to use the IPI mechanism for coherence.
  *
@@ -1241,7 +1246,7 @@ pmap_invalidate_page_int(pmap_t pmap, vm_offset_t va)
 		CPU_AND(&other_cpus, &pmap->pm_active);
 		mask = &other_cpus;
 	}
-	smp_masked_invlpg(*mask, va, pmap);
+	smp_masked_invlpg(*mask, va, pmap, pmap_curcpu_cb_dummy);
 	sched_unpin();
 }
 
@@ -1274,7 +1279,7 @@ pmap_invalidate_range_int(pmap_t pmap, vm_offset_t sva, vm_offset_t eva)
 		CPU_AND(&other_cpus, &pmap->pm_active);
 		mask = &other_cpus;
 	}
-	smp_masked_invlpg_range(*mask, sva, eva, pmap);
+	smp_masked_invlpg_range(*mask, sva, eva, pmap, pmap_curcpu_cb_dummy);
 	sched_unpin();
 }
 
@@ -1297,18 +1302,21 @@ pmap_invalidate_all_int(pmap_t pmap)
 		CPU_AND(&other_cpus, &pmap->pm_active);
 		mask = &other_cpus;
 	}
-	smp_masked_invltlb(*mask, pmap);
+	smp_masked_invltlb(*mask, pmap, pmap_curcpu_cb_dummy);
 	sched_unpin();
+}
+
+static void
+pmap_invalidate_cache_curcpu_cb(pmap_t pmap __unused,
+    vm_offset_t addr1 __unused, vm_offset_t addr2 __unused)
+{
+	wbinvd();
 }
 
 static void
 __CONCAT(PMTYPE, invalidate_cache)(void)
 {
-
-	sched_pin();
-	wbinvd();
-	smp_cache_flush();
-	sched_unpin();
+	smp_cache_flush(pmap_invalidate_cache_curcpu_cb);
 }
 
 struct pde_action {
@@ -1844,7 +1852,6 @@ __CONCAT(PMTYPE, map)(vm_offset_t *virt, vm_paddr_t start, vm_paddr_t end,
 	return (sva);
 }
 
-
 /*
  * Add a list of wired pages to the kva
  * this routine is only used for temporary
@@ -2201,7 +2208,6 @@ retry:
 	return (m);
 }
 
-
 /***************************************************
 * Pmap allocation/deallocation routines.
  ***************************************************/
@@ -2284,7 +2290,6 @@ __CONCAT(PMTYPE, growkernel)(vm_offset_t addr)
 		}
 	}
 }
-
 
 /***************************************************
  * page management routines.
@@ -2881,7 +2886,7 @@ pmap_demote_pde(pmap_t pmap, pd_entry_t *pde, vm_offset_t va)
 	 */ 
 	if ((*firstpte & PG_PTE_PROMOTE) != (newpte & PG_PTE_PROMOTE))
 		pmap_fill_ptp(firstpte, newpte);
-	
+
 	/*
 	 * Demote the mapping.  This pmap is locked.  The old PDE has
 	 * PG_A set.  If the old PDE has PG_RW set, it also has PG_M
@@ -4371,7 +4376,6 @@ resume:
 	PMAP_UNLOCK(pmap);
 }
 
-
 /*
  *	Copy the range specified by src_addr/len
  *	from the source map to the range dst_addr/len
@@ -5528,8 +5532,10 @@ __CONCAT(PMTYPE, unmapdev)(vm_offset_t va, vm_size_t size)
 			return;
 		}
 	}
-	if (pmap_initialized)
+	if (pmap_initialized) {
+		pmap_qremove(va, atop(size));
 		kva_free(va, size);
+	}
 }
 
 /*
@@ -5749,7 +5755,7 @@ __CONCAT(PMTYPE, mincore)(pmap_t pmap, vm_offset_t addr, vm_paddr_t *pap)
 			/* Compute the physical address of the 4KB page. */
 			pa = ((pde & PG_PS_FRAME) | (addr & PDRMASK)) &
 			    PG_FRAME;
-			val = MINCORE_SUPER;
+			val = MINCORE_PSIND(1);
 		} else {
 			pte = pmap_pte_ufast(pmap, addr, pde);
 			pa = pte & PG_FRAME;

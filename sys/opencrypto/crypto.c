@@ -54,14 +54,12 @@ __FBSDID("$FreeBSD$");
  * PURPOSE.
  */
 
-#define	CRYPTO_TIMING				/* enable timing support */
-
 #include "opt_compat.h"
 #include "opt_ddb.h"
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/eventhandler.h>
+#include <sys/counter.h>
 #include <sys/kernel.h>
 #include <sys/kthread.h>
 #include <sys/linker.h>
@@ -69,16 +67,20 @@ __FBSDID("$FreeBSD$");
 #include <sys/module.h>
 #include <sys/mutex.h>
 #include <sys/malloc.h>
+#include <sys/mbuf.h>
 #include <sys/proc.h>
 #include <sys/refcount.h>
 #include <sys/sdt.h>
 #include <sys/smp.h>
 #include <sys/sysctl.h>
 #include <sys/taskqueue.h>
+#include <sys/uio.h>
 
 #include <ddb/ddb.h>
 
+#include <machine/vmparam.h>
 #include <vm/uma.h>
+
 #include <crypto/intake.h>
 #include <opencrypto/cryptodev.h>
 #include <opencrypto/xform_auth.h>
@@ -115,9 +117,9 @@ static	struct mtx crypto_drivers_mtx;		/* lock on driver table */
 struct cryptocap {
 	device_t	cc_dev;
 	uint32_t	cc_hid;
-	u_int32_t	cc_sessions;		/* (d) # of sessions */
-	u_int32_t	cc_koperations;		/* (d) # os asym operations */
-	u_int8_t	cc_kalg[CRK_ALGORITHM_MAX + 1];
+	uint32_t	cc_sessions;		/* (d) # of sessions */
+	uint32_t	cc_koperations;		/* (d) # os asym operations */
+	uint8_t		cc_kalg[CRK_ALGORITHM_MAX + 1];
 
 	int		cc_flags;		/* (d) flags */
 #define CRYPTOCAP_F_CLEANUP	0x80000000	/* needs resource cleanup */
@@ -150,7 +152,7 @@ static	struct mtx crypto_q_mtx;
 #define	CRYPTO_Q_LOCK()		mtx_lock(&crypto_q_mtx)
 #define	CRYPTO_Q_UNLOCK()	mtx_unlock(&crypto_q_mtx)
 
-static SYSCTL_NODE(_kern, OID_AUTO, crypto, CTLFLAG_RW, 0,
+SYSCTL_NODE(_kern, OID_AUTO, crypto, CTLFLAG_RW, 0,
     "In-kernel cryptography");
 
 /*
@@ -171,8 +173,8 @@ struct crypto_ret_worker {
 	TAILQ_HEAD(,cryptop) crp_ret_q;		/* callback queue for symetric jobs */
 	TAILQ_HEAD(,cryptkop) crp_ret_kq;	/* callback queue for asym jobs */
 
-	u_int32_t reorder_ops;		/* total ordered sym jobs received */
-	u_int32_t reorder_cur_seq;	/* current sym job dispatched */
+	uint32_t reorder_ops;		/* total ordered sym jobs received */
+	uint32_t reorder_cur_seq;	/* current sym job dispatched */
 
 	struct proc *cryptoretproc;
 };
@@ -232,15 +234,31 @@ static	int crypto_kinvoke(struct cryptkop *krp);
 static	void crypto_task_invoke(void *ctx, int pending);
 static void crypto_batch_enqueue(struct cryptop *crp);
 
-static	struct cryptostats cryptostats;
-SYSCTL_STRUCT(_kern_crypto, OID_AUTO, stats, CTLFLAG_RW, &cryptostats,
-	    cryptostats, "Crypto system statistics");
+static counter_u64_t cryptostats[sizeof(struct cryptostats) / sizeof(uint64_t)];
+SYSCTL_COUNTER_U64_ARRAY(_kern_crypto, OID_AUTO, stats, CTLFLAG_RW,
+    cryptostats, nitems(cryptostats),
+    "Crypto system statistics");
 
-#ifdef CRYPTO_TIMING
-static	int crypto_timing = 0;
-SYSCTL_INT(_debug, OID_AUTO, crypto_timing, CTLFLAG_RW,
-	   &crypto_timing, 0, "Enable/disable crypto timing support");
-#endif
+#define	CRYPTOSTAT_INC(stat) do {					\
+	counter_u64_add(						\
+	    cryptostats[offsetof(struct cryptostats, stat) / sizeof(uint64_t)],\
+	    1);								\
+} while (0)
+
+static void
+cryptostats_init(void *arg __unused)
+{
+	COUNTER_ARRAY_ALLOC(cryptostats, nitems(cryptostats), M_WAITOK);
+}
+SYSINIT(cryptostats_init, SI_SUB_COUNTER, SI_ORDER_ANY, cryptostats_init, NULL);
+
+static void
+cryptostats_fini(void *arg __unused)
+{
+	COUNTER_ARRAY_FREE(cryptostats, nitems(cryptostats));
+}
+SYSUNINIT(cryptostats_fini, SI_SUB_COUNTER, SI_ORDER_ANY, cryptostats_fini,
+    NULL);
 
 /* Try to avoid directly exposing the key buffer as a symbol */
 static struct keybuf *keybuf;
@@ -268,7 +286,9 @@ keybuf_init(void)
 }
 
 /* It'd be nice if we could store these in some kind of secure memory... */
-struct keybuf * get_keybuf(void) {
+struct keybuf *
+get_keybuf(void)
+{
 
         return (keybuf);
 }
@@ -309,41 +329,25 @@ crypto_init(void)
 	TAILQ_INIT(&crp_kq);
 	mtx_init(&crypto_q_mtx, "crypto", "crypto op queues", MTX_DEF);
 
-	cryptop_zone = uma_zcreate("cryptop", sizeof (struct cryptop),
-				    0, 0, 0, 0,
-				    UMA_ALIGN_PTR, UMA_ZONE_ZINIT);
+	cryptop_zone = uma_zcreate("cryptop",
+	    sizeof(struct cryptop), NULL, NULL, NULL, NULL,
+	    UMA_ALIGN_PTR, UMA_ZONE_ZINIT);
 	cryptoses_zone = uma_zcreate("crypto_session",
 	    sizeof(struct crypto_session), NULL, NULL, NULL, NULL,
 	    UMA_ALIGN_PTR, UMA_ZONE_ZINIT);
 
-	if (cryptop_zone == NULL || cryptoses_zone == NULL) {
-		printf("crypto_init: cannot setup crypto zones\n");
-		error = ENOMEM;
-		goto bad;
-	}
-
 	crypto_drivers_size = CRYPTO_DRIVERS_INITIAL;
 	crypto_drivers = malloc(crypto_drivers_size *
-	    sizeof(struct cryptocap), M_CRYPTO_DATA, M_NOWAIT | M_ZERO);
-	if (crypto_drivers == NULL) {
-		printf("crypto_init: cannot setup crypto drivers\n");
-		error = ENOMEM;
-		goto bad;
-	}
+	    sizeof(struct cryptocap), M_CRYPTO_DATA, M_WAITOK | M_ZERO);
 
 	if (crypto_workers_num < 1 || crypto_workers_num > mp_ncpus)
 		crypto_workers_num = mp_ncpus;
 
-	crypto_tq = taskqueue_create("crypto", M_WAITOK|M_ZERO,
-				taskqueue_thread_enqueue, &crypto_tq);
-	if (crypto_tq == NULL) {
-		printf("crypto init: cannot setup crypto taskqueue\n");
-		error = ENOMEM;
-		goto bad;
-	}
+	crypto_tq = taskqueue_create("crypto", M_WAITOK | M_ZERO,
+	    taskqueue_thread_enqueue, &crypto_tq);
 
 	taskqueue_start_threads(&crypto_tq, crypto_workers_num, PRI_MIN_KERN,
-		"crypto");
+	    "crypto");
 
 	error = kproc_create((void (*)(void *)) crypto_proc, NULL,
 		    &cryptoproc, 0, 0, "crypto");
@@ -353,14 +357,8 @@ crypto_init(void)
 		goto bad;
 	}
 
-	crypto_ret_workers = malloc(crypto_workers_num * sizeof(struct crypto_ret_worker),
-			M_CRYPTO_DATA, M_NOWAIT|M_ZERO);
-	if (crypto_ret_workers == NULL) {
-		error = ENOMEM;
-		printf("crypto_init: cannot allocate ret workers\n");
-		goto bad;
-	}
-
+	crypto_ret_workers = mallocarray(crypto_workers_num,
+	    sizeof(struct crypto_ret_worker), M_CRYPTO_DATA, M_WAITOK | M_ZERO);
 
 	FOREACH_CRYPTO_RETW(ret_worker) {
 		TAILQ_INIT(&ret_worker->crp_ordered_ret_q);
@@ -415,8 +413,8 @@ crypto_terminate(struct proc **pp, void *q)
 }
 
 static void
-hmac_init_pad(struct auth_hash *axf, const char *key, int klen, void *auth_ctx,
-    uint8_t padval)
+hmac_init_pad(const struct auth_hash *axf, const char *key, int klen,
+    void *auth_ctx, uint8_t padval)
 {
 	uint8_t hmac_key[HMAC_MAX_BLOCK_LEN];
 	u_int i;
@@ -442,10 +440,11 @@ hmac_init_pad(struct auth_hash *axf, const char *key, int klen, void *auth_ctx,
 
 	axf->Init(auth_ctx);
 	axf->Update(auth_ctx, hmac_key, axf->blocksize);
+	explicit_bzero(hmac_key, sizeof(hmac_key));
 }
 
 void
-hmac_init_ipad(struct auth_hash *axf, const char *key, int klen,
+hmac_init_ipad(const struct auth_hash *axf, const char *key, int klen,
     void *auth_ctx)
 {
 
@@ -453,7 +452,7 @@ hmac_init_ipad(struct auth_hash *axf, const char *key, int klen,
 }
 
 void
-hmac_init_opad(struct auth_hash *axf, const char *key, int klen,
+hmac_init_opad(const struct auth_hash *axf, const char *key, int klen,
     void *auth_ctx)
 {
 
@@ -530,8 +529,6 @@ crypto_auth_hash(const struct crypto_session_params *csp)
 {
 
 	switch (csp->csp_auth_alg) {
-	case CRYPTO_MD5_HMAC:
-		return (&auth_hash_hmac_md5);
 	case CRYPTO_SHA1_HMAC:
 		return (&auth_hash_hmac_sha1);
 	case CRYPTO_SHA2_224_HMAC:
@@ -546,14 +543,6 @@ crypto_auth_hash(const struct crypto_session_params *csp)
 		return (&auth_hash_null);
 	case CRYPTO_RIPEMD160_HMAC:
 		return (&auth_hash_hmac_ripemd_160);
-	case CRYPTO_MD5_KPDK:
-		return (&auth_hash_key_md5);
-	case CRYPTO_SHA1_KPDK:
-		return (&auth_hash_key_sha1);
-#ifdef notyet
-	case CRYPTO_MD5:
-		return (&auth_hash_md5);
-#endif
 	case CRYPTO_SHA1:
 		return (&auth_hash_sha1);
 	case CRYPTO_SHA2_224:
@@ -602,16 +591,6 @@ crypto_cipher(const struct crypto_session_params *csp)
 {
 
 	switch (csp->csp_cipher_alg) {
-	case CRYPTO_DES_CBC:
-		return (&enc_xform_des);
-	case CRYPTO_3DES_CBC:
-		return (&enc_xform_3des);
-	case CRYPTO_BLF_CBC:
-		return (&enc_xform_blf);
-	case CRYPTO_CAST_CBC:
-		return (&enc_xform_cast5);
-	case CRYPTO_SKIPJACK_CBC:
-		return (&enc_xform_skipjack);
 	case CRYPTO_RIJNDAEL128_CBC:
 		return (&enc_xform_rijndael128);
 	case CRYPTO_AES_XTS:
@@ -634,7 +613,7 @@ crypto_cipher(const struct crypto_session_params *csp)
 }
 
 static struct cryptocap *
-crypto_checkdriver(u_int32_t hid)
+crypto_checkdriver(uint32_t hid)
 {
 
 	return (hid >= crypto_drivers_size ? NULL : crypto_drivers[hid]);
@@ -684,86 +663,89 @@ crypto_select_driver(const struct crypto_session_params *csp, int flags)
 	return best;
 }
 
+static enum alg_type {
+	ALG_NONE = 0,
+	ALG_CIPHER,
+	ALG_DIGEST,
+	ALG_KEYED_DIGEST,
+	ALG_COMPRESSION,
+	ALG_AEAD
+} alg_types[] = {
+	[CRYPTO_SHA1_HMAC] = ALG_KEYED_DIGEST,
+	[CRYPTO_RIPEMD160_HMAC] = ALG_KEYED_DIGEST,
+	[CRYPTO_AES_CBC] = ALG_CIPHER,
+	[CRYPTO_SHA1] = ALG_DIGEST,
+	[CRYPTO_NULL_HMAC] = ALG_DIGEST,
+	[CRYPTO_NULL_CBC] = ALG_CIPHER,
+	[CRYPTO_DEFLATE_COMP] = ALG_COMPRESSION,
+	[CRYPTO_SHA2_256_HMAC] = ALG_KEYED_DIGEST,
+	[CRYPTO_SHA2_384_HMAC] = ALG_KEYED_DIGEST,
+	[CRYPTO_SHA2_512_HMAC] = ALG_KEYED_DIGEST,
+	[CRYPTO_CAMELLIA_CBC] = ALG_CIPHER,
+	[CRYPTO_AES_XTS] = ALG_CIPHER,
+	[CRYPTO_AES_ICM] = ALG_CIPHER,
+	[CRYPTO_AES_NIST_GMAC] = ALG_KEYED_DIGEST,
+	[CRYPTO_AES_NIST_GCM_16] = ALG_AEAD,
+	[CRYPTO_BLAKE2B] = ALG_KEYED_DIGEST,
+	[CRYPTO_BLAKE2S] = ALG_KEYED_DIGEST,
+	[CRYPTO_CHACHA20] = ALG_CIPHER,
+	[CRYPTO_SHA2_224_HMAC] = ALG_KEYED_DIGEST,
+	[CRYPTO_RIPEMD160] = ALG_DIGEST,
+	[CRYPTO_SHA2_224] = ALG_DIGEST,
+	[CRYPTO_SHA2_256] = ALG_DIGEST,
+	[CRYPTO_SHA2_384] = ALG_DIGEST,
+	[CRYPTO_SHA2_512] = ALG_DIGEST,
+	[CRYPTO_POLY1305] = ALG_KEYED_DIGEST,
+	[CRYPTO_AES_CCM_CBC_MAC] = ALG_KEYED_DIGEST,
+	[CRYPTO_AES_CCM_16] = ALG_AEAD,
+};
+
+static enum alg_type
+alg_type(int alg)
+{
+
+	if (alg < nitems(alg_types))
+		return (alg_types[alg]);
+	return (ALG_NONE);
+}
+
 static bool
 alg_is_compression(int alg)
 {
 
-	if (alg == CRYPTO_DEFLATE_COMP)
-		return (true);
-	return (false);
+	return (alg_type(alg) == ALG_COMPRESSION);
 }
 
 static bool
 alg_is_cipher(int alg)
 {
 
-	if (alg >= CRYPTO_DES_CBC && alg <= CRYPTO_SKIPJACK_CBC)
-		return (true);
-	if (alg >= CRYPTO_AES_CBC && alg <= CRYPTO_ARC4)
-		return (true);
-	if (alg == CRYPTO_NULL_CBC)
-		return (true);
-	if (alg >= CRYPTO_CAMELLIA_CBC && alg <= CRYPTO_AES_ICM)
-		return (true);
-	if (alg == CRYPTO_CHACHA20)
-		return (true);
-	return (false);
+	return (alg_type(alg) == ALG_CIPHER);
 }
 
 static bool
 alg_is_digest(int alg)
 {
 
-	if (alg >= CRYPTO_MD5_HMAC && alg <= CRYPTO_SHA1_KPDK)
-		return (true);
-	if (alg >= CRYPTO_MD5 && alg <= CRYPTO_SHA1)
-		return (true);
-	if (alg == CRYPTO_NULL_HMAC)
-		return (true);
-	if (alg >= CRYPTO_SHA2_256_HMAC && alg <= CRYPTO_SHA2_512_HMAC)
-		return (true);
-	if (alg == CRYPTO_AES_NIST_GMAC)
-		return (true);
-	if (alg >= CRYPTO_BLAKE2B && alg <= CRYPTO_BLAKE2S)
-		return (true);
-	if (alg >= CRYPTO_SHA2_224_HMAC && alg <= CRYPTO_POLY1305)
-		return (true);
-	if (alg == CRYPTO_AES_CCM_CBC_MAC)
-		return (true);
-	return (false);
+	return (alg_type(alg) == ALG_DIGEST ||
+	    alg_type(alg) == ALG_KEYED_DIGEST);
 }
 
 static bool
 alg_is_keyed_digest(int alg)
 {
 
-	if (alg >= CRYPTO_MD5_HMAC && alg <= CRYPTO_SHA1_KPDK)
-		return (true);
-	if (alg >= CRYPTO_SHA2_256_HMAC && alg <= CRYPTO_SHA2_512_HMAC)
-		return (true);
-	if (alg == CRYPTO_AES_NIST_GMAC)
-		return (true);
-	if (alg >= CRYPTO_BLAKE2B && alg <= CRYPTO_BLAKE2S)
-		return (true);
-	if (alg == CRYPTO_SHA2_224_HMAC)
-		return (true);
-	if (alg == CRYPTO_POLY1305)
-		return (true);
-	if (alg == CRYPTO_AES_CCM_CBC_MAC)
-		return (true);
-	return (false);
+	return (alg_type(alg) == ALG_KEYED_DIGEST);
 }
 
 static bool
 alg_is_aead(int alg)
 {
 
-	if (alg == CRYPTO_AES_NIST_GCM_16)
-		return (true);
-	if (alg == CRYPTO_AES_CCM_16)
-		return (true);
-	return (false);
+	return (alg_type(alg) == ALG_AEAD);
 }
+
+#define SUPPORTED_SES (CSP_F_SEPARATE_OUTPUT | CSP_F_SEPARATE_AAD | CSP_F_ESN)
 
 /* Various sanity checks on crypto session parameters. */
 static bool
@@ -772,7 +754,7 @@ check_csp(const struct crypto_session_params *csp)
 	struct auth_hash *axf;
 
 	/* Mode-independent checks. */
-	if (csp->csp_flags != 0)
+	if ((csp->csp_flags & ~(SUPPORTED_SES)) != 0)
 		return (false);
 	if (csp->csp_ivlen < 0 || csp->csp_cipher_klen < 0 ||
 	    csp->csp_auth_klen < 0 || csp->csp_auth_mlen < 0)
@@ -786,7 +768,9 @@ check_csp(const struct crypto_session_params *csp)
 	case CSP_MODE_COMPRESS:
 		if (!alg_is_compression(csp->csp_cipher_alg))
 			return (false);
-		if (csp->csp_flags != 0)
+		if (csp->csp_flags & CSP_F_SEPARATE_OUTPUT)
+			return (false);
+		if (csp->csp_flags & CSP_F_SEPARATE_AAD)
 			return (false);
 		if (csp->csp_cipher_klen != 0 || csp->csp_ivlen != 0 ||
 		    csp->csp_auth_alg != 0 || csp->csp_auth_klen != 0 ||
@@ -796,13 +780,13 @@ check_csp(const struct crypto_session_params *csp)
 	case CSP_MODE_CIPHER:
 		if (!alg_is_cipher(csp->csp_cipher_alg))
 			return (false);
+		if (csp->csp_flags & CSP_F_SEPARATE_AAD)
+			return (false);
 		if (csp->csp_cipher_alg != CRYPTO_NULL_CBC) {
 			if (csp->csp_cipher_klen == 0)
 				return (false);
-			if (csp->csp_cipher_alg != CRYPTO_ARC4) {
-				if (csp->csp_ivlen == 0)
-					return (false);
-			}
+			if (csp->csp_ivlen == 0)
+				return (false);
 		}
 		if (csp->csp_ivlen >= EALG_MAX_BLOCK_LEN)
 			return (false);
@@ -812,6 +796,9 @@ check_csp(const struct crypto_session_params *csp)
 		break;
 	case CSP_MODE_DIGEST:
 		if (csp->csp_cipher_alg != 0 || csp->csp_cipher_klen != 0)
+			return (false);
+
+		if (csp->csp_flags & CSP_F_SEPARATE_AAD)
 			return (false);
 
 		/* IV is optional for digests (e.g. GMAC). */
@@ -866,10 +853,8 @@ check_csp(const struct crypto_session_params *csp)
 		if (csp->csp_cipher_alg != CRYPTO_NULL_CBC) {
 			if (csp->csp_cipher_klen == 0)
 				return (false);
-			if (csp->csp_cipher_alg != CRYPTO_ARC4) {
-				if (csp->csp_ivlen == 0)
-					return (false);
-			}
+			if (csp->csp_ivlen == 0)
+				return (false);
 		}
 		if (csp->csp_ivlen >= EALG_MAX_BLOCK_LEN)
 			return (false);
@@ -910,8 +895,7 @@ crypto_deletesession(crypto_session_t cses)
 
 	cap = cses->cap;
 
-	explicit_bzero(cses->softc, cap->cc_session_size);
-	free(cses->softc, M_CRYPTO_DATA);
+	zfree(cses->softc, M_CRYPTO_DATA);
 	uma_zfree(cryptoses_zone, cses);
 
 	CRYPTO_DRIVER_LOCK();
@@ -1137,7 +1121,7 @@ crypto_getcaps(int hid)
  * is called once for each algorithm supported a driver.
  */
 int
-crypto_kregister(u_int32_t driverid, int kalg, u_int32_t flags)
+crypto_kregister(uint32_t driverid, int kalg, uint32_t flags)
 {
 	struct cryptocap *cap;
 	int err;
@@ -1160,6 +1144,7 @@ crypto_kregister(u_int32_t driverid, int kalg, u_int32_t flags)
 				, kalg
 				, flags
 			);
+		gone_in_dev(cap->cc_dev, 14, "asymmetric crypto");
 		err = 0;
 	} else
 		err = EINVAL;
@@ -1176,7 +1161,7 @@ crypto_kregister(u_int32_t driverid, int kalg, u_int32_t flags)
  * requests.
  */
 int
-crypto_unregister_all(u_int32_t driverid)
+crypto_unregister_all(uint32_t driverid)
 {
 	struct cryptocap *cap;
 
@@ -1207,7 +1192,7 @@ crypto_unregister_all(u_int32_t driverid)
  * the driver is now ready for cryptop's and/or cryptokop's.
  */
 int
-crypto_unblock(u_int32_t driverid, int what)
+crypto_unblock(uint32_t driverid, int what)
 {
 	struct cryptocap *cap;
 	int err;
@@ -1229,20 +1214,84 @@ crypto_unblock(u_int32_t driverid, int what)
 	return err;
 }
 
+size_t
+crypto_buffer_len(struct crypto_buffer *cb)
+{
+	switch (cb->cb_type) {
+	case CRYPTO_BUF_CONTIG:
+		return (cb->cb_buf_len);
+	case CRYPTO_BUF_MBUF:
+		if (cb->cb_mbuf->m_flags & M_PKTHDR)
+			return (cb->cb_mbuf->m_pkthdr.len);
+		return (m_length(cb->cb_mbuf, NULL));
+	case CRYPTO_BUF_VMPAGE:
+		return (cb->cb_vm_page_len);
+	case CRYPTO_BUF_UIO:
+		return (cb->cb_uio->uio_resid);
+	default:
+		return (0);
+	}
+}
+
 #ifdef INVARIANTS
 /* Various sanity checks on crypto requests. */
+static void
+cb_sanity(struct crypto_buffer *cb, const char *name)
+{
+	KASSERT(cb->cb_type > CRYPTO_BUF_NONE && cb->cb_type <= CRYPTO_BUF_LAST,
+	    ("incoming crp with invalid %s buffer type", name));
+	switch (cb->cb_type) {
+	case CRYPTO_BUF_CONTIG:
+		KASSERT(cb->cb_buf_len >= 0,
+		    ("incoming crp with -ve %s buffer length", name));
+		break;
+	case CRYPTO_BUF_VMPAGE:
+		KASSERT(CRYPTO_HAS_VMPAGE,
+		    ("incoming crp uses dmap on supported arch"));
+		KASSERT(cb->cb_vm_page_len >= 0,
+		    ("incoming crp with -ve %s buffer length", name));
+		KASSERT(cb->cb_vm_page_offset >= 0,
+		    ("incoming crp with -ve %s buffer offset", name));
+		KASSERT(cb->cb_vm_page_offset < PAGE_SIZE,
+		    ("incoming crp with %s buffer offset greater than page size"
+		     , name));
+		break;
+	default:
+		break;
+	}
+}
+
 static void
 crp_sanity(struct cryptop *crp)
 {
 	struct crypto_session_params *csp;
+	struct crypto_buffer *out;
+	size_t ilen, len, olen;
 
 	KASSERT(crp->crp_session != NULL, ("incoming crp without a session"));
-	KASSERT(crp->crp_ilen >= 0, ("incoming crp with -ve input length"));
+	KASSERT(crp->crp_obuf.cb_type >= CRYPTO_BUF_NONE &&
+	    crp->crp_obuf.cb_type <= CRYPTO_BUF_LAST,
+	    ("incoming crp with invalid output buffer type"));
 	KASSERT(crp->crp_etype == 0, ("incoming crp with error"));
 	KASSERT(!(crp->crp_flags & CRYPTO_F_DONE),
 	    ("incoming crp already done"));
 
 	csp = &crp->crp_session->csp;
+	cb_sanity(&crp->crp_buf, "input");
+	ilen = crypto_buffer_len(&crp->crp_buf);
+	olen = ilen;
+	out = NULL;
+	if (csp->csp_flags & CSP_F_SEPARATE_OUTPUT) {
+		if (crp->crp_obuf.cb_type != CRYPTO_BUF_NONE) {
+			cb_sanity(&crp->crp_obuf, "output");
+			out = &crp->crp_obuf;
+			olen = crypto_buffer_len(out);
+		}
+	} else
+		KASSERT(crp->crp_obuf.cb_type == CRYPTO_BUF_NONE,
+		    ("incoming crp with separate output buffer "
+		    "but no session support"));
+
 	switch (csp->csp_mode) {
 	case CSP_MODE_COMPRESS:
 		KASSERT(crp->crp_op == CRYPTO_OP_COMPRESS ||
@@ -1280,20 +1329,28 @@ crp_sanity(struct cryptop *crp)
 		    ("invalid ETA op %x", crp->crp_op));
 		break;
 	}
-	KASSERT(crp->crp_buf_type >= CRYPTO_BUF_CONTIG &&
-	    crp->crp_buf_type <= CRYPTO_BUF_MBUF,
-	    ("invalid crp buffer type %d", crp->crp_buf_type));
 	if (csp->csp_mode == CSP_MODE_AEAD || csp->csp_mode == CSP_MODE_ETA) {
-		KASSERT(crp->crp_aad_start == 0 ||
-		    crp->crp_aad_start < crp->crp_ilen,
-		    ("invalid AAD start"));
-		KASSERT(crp->crp_aad_length != 0 || crp->crp_aad_start == 0,
-		    ("AAD with zero length and non-zero start"));
-		KASSERT(crp->crp_aad_length == 0 ||
-		    crp->crp_aad_start + crp->crp_aad_length <= crp->crp_ilen,
-		    ("AAD outside input length"));
+		if (crp->crp_aad == NULL) {
+			KASSERT(crp->crp_aad_start == 0 ||
+			    crp->crp_aad_start < ilen,
+			    ("invalid AAD start"));
+			KASSERT(crp->crp_aad_length != 0 ||
+			    crp->crp_aad_start == 0,
+			    ("AAD with zero length and non-zero start"));
+			KASSERT(crp->crp_aad_length == 0 ||
+			    crp->crp_aad_start + crp->crp_aad_length <= ilen,
+			    ("AAD outside input length"));
+		} else {
+			KASSERT(csp->csp_flags & CSP_F_SEPARATE_AAD,
+			    ("session doesn't support separate AAD buffer"));
+			KASSERT(crp->crp_aad_start == 0,
+			    ("separate AAD buffer with non-zero AAD start"));
+			KASSERT(crp->crp_aad_length != 0,
+			    ("separate AAD buffer with zero length"));
+		}
 	} else {
-		KASSERT(crp->crp_aad_start == 0 && crp->crp_aad_length == 0,
+		KASSERT(crp->crp_aad == NULL && crp->crp_aad_start == 0 &&
+		    crp->crp_aad_length == 0,
 		    ("AAD region in request not supporting AAD"));
 	}
 	if (csp->csp_ivlen == 0) {
@@ -1305,25 +1362,39 @@ crp_sanity(struct cryptop *crp)
 		KASSERT(crp->crp_iv_start == 0,
 		    ("IV_SEPARATE used with non-zero IV start"));
 	} else {
-		KASSERT(crp->crp_iv_start < crp->crp_ilen,
+		KASSERT(crp->crp_iv_start < ilen,
 		    ("invalid IV start"));
-		KASSERT(crp->crp_iv_start + csp->csp_ivlen <= crp->crp_ilen,
-		    ("IV outside input length"));
+		KASSERT(crp->crp_iv_start + csp->csp_ivlen <= ilen,
+		    ("IV outside buffer length"));
 	}
+	/* XXX: payload_start of 0 should always be < ilen? */
 	KASSERT(crp->crp_payload_start == 0 ||
-	    crp->crp_payload_start < crp->crp_ilen,
+	    crp->crp_payload_start < ilen,
 	    ("invalid payload start"));
 	KASSERT(crp->crp_payload_start + crp->crp_payload_length <=
-	    crp->crp_ilen, ("payload outside input length"));
+	    ilen, ("payload outside input buffer"));
+	if (out == NULL) {
+		KASSERT(crp->crp_payload_output_start == 0,
+		    ("payload output start non-zero without output buffer"));
+	} else {
+		KASSERT(crp->crp_payload_output_start < olen,
+		    ("invalid payload output start"));
+		KASSERT(crp->crp_payload_output_start +
+		    crp->crp_payload_length <= olen,
+		    ("payload outside output buffer"));
+	}
 	if (csp->csp_mode == CSP_MODE_DIGEST ||
 	    csp->csp_mode == CSP_MODE_AEAD || csp->csp_mode == CSP_MODE_ETA) {
+		if (crp->crp_op & CRYPTO_OP_VERIFY_DIGEST)
+			len = ilen;
+		else
+			len = olen;
 		KASSERT(crp->crp_digest_start == 0 ||
-		    crp->crp_digest_start < crp->crp_ilen,
+		    crp->crp_digest_start < len,
 		    ("invalid digest start"));
 		/* XXX: For the mlen == 0 case this check isn't perfect. */
-		KASSERT(crp->crp_digest_start + csp->csp_auth_mlen <=
-		    crp->crp_ilen,
-		    ("digest outside input length"));
+		KASSERT(crp->crp_digest_start + csp->csp_auth_mlen <= len,
+		    ("digest outside buffer"));
 	} else {
 		KASSERT(crp->crp_digest_start == 0,
 		    ("non-zero digest start for request without a digest"));
@@ -1352,12 +1423,7 @@ crypto_dispatch(struct cryptop *crp)
 	crp_sanity(crp);
 #endif
 
-	cryptostats.cs_ops++;
-
-#ifdef CRYPTO_TIMING
-	if (crypto_timing)
-		binuptime(&crp->crp_tstamp);
-#endif
+	CRYPTOSTAT_INC(cs_ops);
 
 	crp->crp_retw_id = ((uintptr_t)crp->crp_session) % crypto_workers_num;
 
@@ -1418,7 +1484,7 @@ crypto_kdispatch(struct cryptkop *krp)
 {
 	int error;
 
-	cryptostats.cs_kops++;
+	CRYPTOSTAT_INC(cs_kops);
 
 	krp->krp_cap = NULL;
 	error = crypto_kinvoke(krp);
@@ -1476,7 +1542,7 @@ again:
 		 * match), then skip.
 		 */
 		cap = crypto_drivers[hid];
-		if (cap->cc_dev == NULL ||
+		if (cap == NULL ||
 		    (cap->cc_flags & match) == 0)
 			continue;
 
@@ -1592,32 +1658,6 @@ crypto_kinvoke(struct cryptkop *krp)
 	return (0);
 }
 
-#ifdef CRYPTO_TIMING
-static void
-crypto_tstat(struct cryptotstat *ts, struct bintime *bt)
-{
-	struct bintime now, delta;
-	struct timespec t;
-	uint64_t u;
-
-	binuptime(&now);
-	u = now.frac;
-	delta.frac = now.frac - bt->frac;
-	delta.sec = now.sec - bt->sec;
-	if (u < delta.frac)
-		delta.sec--;
-	bintime2timespec(&delta, &t);
-	timespecadd(&ts->acc, &t, &ts->acc);
-	if (timespeccmp(&t, &ts->min, <))
-		ts->min = t;
-	if (timespeccmp(&t, &ts->max, >))
-		ts->max = t;
-	ts->count++;
-
-	*bt = now;
-}
-#endif
-
 static void
 crypto_task_invoke(void *ctx, int pending)
 {
@@ -1645,10 +1685,6 @@ crypto_invoke(struct cryptocap *cap, struct cryptop *crp, int hint)
 	KASSERT(crp->crp_session != NULL,
 	    ("%s: crp->crp_session == NULL", __func__));
 
-#ifdef CRYPTO_TIMING
-	if (crypto_timing)
-		crypto_tstat(&cryptostats.cs_invoke, &crp->crp_tstamp);
-#endif
 	if (cap->cc_flags & CRYPTOCAP_F_CLEANUP) {
 		struct crypto_session_params csp;
 		crypto_session_t nses;
@@ -1700,12 +1736,8 @@ crypto_invoke(struct cryptocap *cap, struct cryptop *crp, int hint)
 }
 
 void
-crypto_freereq(struct cryptop *crp)
+crypto_destroyreq(struct cryptop *crp)
 {
-
-	if (crp == NULL)
-		return;
-
 #ifdef DIAGNOSTIC
 	{
 		struct cryptop *crp2;
@@ -1730,8 +1762,29 @@ crypto_freereq(struct cryptop *crp)
 		}
 	}
 #endif
+}
 
+void
+crypto_freereq(struct cryptop *crp)
+{
+	if (crp == NULL)
+		return;
+
+	crypto_destroyreq(crp);
 	uma_zfree(cryptop_zone, crp);
+}
+
+static void
+_crypto_initreq(struct cryptop *crp, crypto_session_t cses)
+{
+	crp->crp_session = cses;
+}
+
+void
+crypto_initreq(struct cryptop *crp, crypto_session_t cses)
+{
+	memset(crp, 0, sizeof(*crp));
+	_crypto_initreq(crp, cses);
 }
 
 struct cryptop *
@@ -1741,7 +1794,8 @@ crypto_getreq(crypto_session_t cses, int how)
 
 	MPASS(how == M_WAITOK || how == M_NOWAIT);
 	crp = uma_zalloc(cryptop_zone, how | M_ZERO);
-	crp->crp_session = cses;
+	if (crp != NULL)
+		_crypto_initreq(crp, cses);
 	return (crp);
 }
 
@@ -1755,11 +1809,8 @@ crypto_done(struct cryptop *crp)
 		("crypto_done: op already done, flags 0x%x", crp->crp_flags));
 	crp->crp_flags |= CRYPTO_F_DONE;
 	if (crp->crp_etype != 0)
-		cryptostats.cs_errs++;
-#ifdef CRYPTO_TIMING
-	if (crypto_timing)
-		crypto_tstat(&cryptostats.cs_done, &crp->crp_tstamp);
-#endif
+		CRYPTOSTAT_INC(cs_errs);
+
 	/*
 	 * CBIMM means unconditionally do the callback immediately;
 	 * CBIFSYNC means do the callback immediately only if the
@@ -1776,20 +1827,7 @@ crypto_done(struct cryptop *crp)
 		 * callback routine does very little (e.g. the
 		 * /dev/crypto callback method just does a wakeup).
 		 */
-#ifdef CRYPTO_TIMING
-		if (crypto_timing) {
-			/*
-			 * NB: We must copy the timestamp before
-			 * doing the callback as the cryptop is
-			 * likely to be reclaimed.
-			 */
-			struct bintime t = crp->crp_tstamp;
-			crypto_tstat(&cryptostats.cs_cb, &t);
-			crp->crp_callback(crp);
-			crypto_tstat(&cryptostats.cs_finis, &t);
-		} else
-#endif
-			crp->crp_callback(crp);
+		crp->crp_callback(crp);
 	} else {
 		struct crypto_ret_worker *ret_worker;
 		bool wake;
@@ -1843,16 +1881,19 @@ crypto_kdone(struct cryptkop *krp)
 	struct cryptocap *cap;
 
 	if (krp->krp_status != 0)
-		cryptostats.cs_kerrs++;
-	CRYPTO_DRIVER_LOCK();
+		CRYPTOSTAT_INC(cs_kerrs);
 	cap = krp->krp_cap;
-	KASSERT(cap->cc_koperations > 0, ("cc_koperations == 0"));
-	cap->cc_koperations--;
-	if (cap->cc_koperations == 0 && cap->cc_flags & CRYPTOCAP_F_CLEANUP)
-		wakeup(cap);
-	CRYPTO_DRIVER_UNLOCK();
-	krp->krp_cap = NULL;
-	cap_rele(cap);
+	if (cap != NULL) {
+		CRYPTO_DRIVER_LOCK();
+		KASSERT(cap->cc_koperations > 0, ("cc_koperations == 0"));
+		cap->cc_koperations--;
+		if (cap->cc_koperations == 0 &&
+		    cap->cc_flags & CRYPTOCAP_F_CLEANUP)
+			wakeup(cap);
+		CRYPTO_DRIVER_UNLOCK();
+		krp->krp_cap = NULL;
+		cap_rele(cap);
+	}
 
 	ret_worker = CRYPTO_RETW(0);
 
@@ -1983,7 +2024,7 @@ crypto_proc(void)
 				 */
 				cap->cc_qblocked = 1;
 				TAILQ_INSERT_HEAD(&crp_q, submit, crp_next);
-				cryptostats.cs_blocks++;
+				CRYPTOSTAT_INC(cs_blocks);
 			}
 		}
 
@@ -2020,7 +2061,7 @@ crypto_proc(void)
 				 */
 				krp->krp_cap->cc_kqblocked = 1;
 				TAILQ_INSERT_HEAD(&crp_kq, krp, krp_next);
-				cryptostats.cs_kblocks++;
+				CRYPTOSTAT_INC(cs_kblocks);
 			}
 		}
 
@@ -2042,7 +2083,7 @@ crypto_proc(void)
 			crp_sleep = 0;
 			if (cryptoproc == NULL)
 				break;
-			cryptostats.cs_intrs++;
+			CRYPTOSTAT_INC(cs_intrs);
 		}
 	}
 	CRYPTO_Q_UNLOCK();
@@ -2089,22 +2130,8 @@ crypto_ret_proc(struct crypto_ret_worker *ret_worker)
 			/*
 			 * Run callbacks unlocked.
 			 */
-			if (crpt != NULL) {
-#ifdef CRYPTO_TIMING
-				if (crypto_timing) {
-					/*
-					 * NB: We must copy the timestamp before
-					 * doing the callback as the cryptop is
-					 * likely to be reclaimed.
-					 */
-					struct bintime t = crpt->crp_tstamp;
-					crypto_tstat(&cryptostats.cs_cb, &t);
-					crpt->crp_callback(crpt);
-					crypto_tstat(&cryptostats.cs_finis, &t);
-				} else
-#endif
-					crpt->crp_callback(crpt);
-			}
+			if (crpt != NULL)
+				crpt->crp_callback(crpt);
 			if (krpt != NULL)
 				krpt->krp_callback(krpt);
 			CRYPTO_RETW_LOCK(ret_worker);
@@ -2117,7 +2144,7 @@ crypto_ret_proc(struct crypto_ret_worker *ret_worker)
 				"crypto_ret_wait", 0);
 			if (ret_worker->cryptoretproc == NULL)
 				break;
-			cryptostats.cs_rets++;
+			CRYPTOSTAT_INC(cs_rets);
 		}
 	}
 	CRYPTO_RETW_UNLOCK(ret_worker);
@@ -2166,10 +2193,10 @@ DB_SHOW_COMMAND(crypto, db_show_crypto)
 	    "HID", "Caps", "Ilen", "Olen", "Etype", "Flags",
 	    "Device", "Callback");
 	TAILQ_FOREACH(crp, &crp_q, crp_next) {
-		db_printf("%4u %08x %4u %4u %4u %04x %8p %8p\n"
+		db_printf("%4u %08x %4u %4u %04x %8p %8p\n"
 		    , crp->crp_session->cap->cc_hid
 		    , (int) crypto_ses2caps(crp->crp_session)
-		    , crp->crp_ilen, crp->crp_olen
+		    , crp->crp_olen
 		    , crp->crp_etype
 		    , crp->crp_flags
 		    , device_get_nameunit(crp->crp_session->cap->cc_dev)

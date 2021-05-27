@@ -64,14 +64,6 @@ __FBSDID("$FreeBSD$");
  */
 #define	tls_tcp_seq	PH_loc.thirtytwo[0]
 
-/*
- * Handshake lock used for the handshake timer.  Having a global lock
- * is perhaps not ideal, but it avoids having to use callout_drain()
- * in tls_uninit_toep() which can't block.  Also, the timer shouldn't
- * actually fire for most connections.
- */
-static struct mtx tls_handshake_lock;
-
 static void
 t4_set_tls_tcb_field(struct toepcb *toep, uint16_t word, uint64_t mask,
     uint64_t val)
@@ -138,11 +130,19 @@ tls_clr_ofld_mode(struct toepcb *toep)
 
 	tls_stop_handshake_timer(toep);
 
-	/* Operate in PDU extraction mode only. */
+	KASSERT(toep->tls.rx_key_addr == -1,
+	    ("%s: tid %d has RX key", __func__, toep->tid));
+
+	/* Switch to plain TOE mode. */
 	t4_set_tls_tcb_field(toep, W_TCB_ULP_RAW,
-	    V_TCB_ULP_RAW(M_TCB_ULP_RAW),
-	    V_TCB_ULP_RAW(V_TF_TLS_ENABLE(1)));
+	    V_TCB_ULP_RAW(V_TF_TLS_ENABLE(1)),
+	    V_TCB_ULP_RAW(V_TF_TLS_ENABLE(0)));
+	t4_set_tls_tcb_field(toep, W_TCB_ULP_TYPE,
+	    V_TCB_ULP_TYPE(M_TCB_ULP_TYPE), V_TCB_ULP_TYPE(ULP_MODE_NONE));
 	t4_clear_rx_quiesce(toep);
+
+	toep->flags &= ~(TPF_FORCE_CREDITS | TPF_TLS_ESTABLISHED);
+	toep->params.ulp_mode = ULP_MODE_NONE;
 }
 
 static void
@@ -707,6 +707,8 @@ program_key_context(struct tcpcb *tp, struct toepcb *toep,
 				 V_TCB_TLS_SEQ(M_TCB_TLS_SEQ),
 				 V_TCB_TLS_SEQ(0));
 		t4_clear_rx_quiesce(toep);
+
+		toep->flags |= TPF_TLS_RECEIVE;
 	} else {
 		unsigned short pdus_per_ulp;
 
@@ -738,6 +740,25 @@ tls_send_handshake_ack(void *arg)
 	struct adapter *sc = td_adapter(toep->td);
 
 	/*
+	 * If this connection has timed out without receiving more
+	 * data, downgrade to plain TOE mode and don't re-arm the
+	 * timer.
+	 */
+	if (sc->tt.tls_rx_timeout != 0) {
+		struct inpcb *inp;
+		struct tcpcb *tp;
+
+		inp = toep->inp;
+		tp = intotcpcb(inp);
+		if ((ticks - tp->t_rcvtime) >= sc->tt.tls_rx_timeout) {
+			CTR2(KTR_CXGBE, "%s: tid %d clr_ofld_mode", __func__,
+			    toep->tid);
+			tls_clr_ofld_mode(toep);
+			return;
+		}
+	}
+
+	/*
 	 * XXX: Does not have the t4_get_tcb() checks to refine the
 	 * workaround.
 	 */
@@ -752,10 +773,9 @@ tls_start_handshake_timer(struct toepcb *toep)
 {
 	struct tls_ofld_info *tls_ofld = &toep->tls;
 
-	mtx_lock(&tls_handshake_lock);
+	INP_WLOCK_ASSERT(toep->inp);
 	callout_reset(&tls_ofld->handshake_timer, TLS_SRV_HELLO_BKOFF_TM * hz,
 	    tls_send_handshake_ack, toep);
-	mtx_unlock(&tls_handshake_lock);
 }
 
 void
@@ -763,9 +783,8 @@ tls_stop_handshake_timer(struct toepcb *toep)
 {
 	struct tls_ofld_info *tls_ofld = &toep->tls;
 
-	mtx_lock(&tls_handshake_lock);
+	INP_WLOCK_ASSERT(toep->inp);
 	callout_stop(&tls_ofld->handshake_timer);
-	mtx_unlock(&tls_handshake_lock);
 }
 
 int
@@ -976,7 +995,8 @@ tls_alloc_ktls(struct toepcb *toep, struct ktls_session *tls, int direction)
 		case 256 / 8:
 			break;
 		default:
-			return (EINVAL);
+			error = EINVAL;
+			goto clr_ofld;
 		}
 		switch (tls->params.auth_algorithm) {
 		case CRYPTO_SHA1_HMAC:
@@ -984,30 +1004,37 @@ tls_alloc_ktls(struct toepcb *toep, struct ktls_session *tls, int direction)
 		case CRYPTO_SHA2_384_HMAC:
 			break;
 		default:
-			return (EPROTONOSUPPORT);
+			error = EPROTONOSUPPORT;
+			goto clr_ofld;
 		}
 		break;
 	case CRYPTO_AES_NIST_GCM_16:
-		if (tls->params.iv_len != SALT_SIZE)
-			return (EINVAL);
+		if (tls->params.iv_len != SALT_SIZE) {
+			error = EINVAL;
+			goto clr_ofld;
+		}
 		switch (tls->params.cipher_key_len) {
 		case 128 / 8:
 		case 192 / 8:
 		case 256 / 8:
 			break;
 		default:
-			return (EINVAL);
+			error = EINVAL;
+			goto clr_ofld;
 		}
 		break;
 	default:
-		return (EPROTONOSUPPORT);
+		error = EPROTONOSUPPORT;
+		goto clr_ofld;
 	}
 
 	/* Only TLS 1.1 and TLS 1.2 are currently supported. */
 	if (tls->params.tls_vmajor != TLS_MAJOR_VER_ONE ||
 	    tls->params.tls_vminor < TLS_MINOR_VER_ONE ||
-	    tls->params.tls_vminor > TLS_MINOR_VER_TWO)
-		return (EPROTONOSUPPORT);
+	    tls->params.tls_vminor > TLS_MINOR_VER_TWO) {
+		error = EPROTONOSUPPORT;
+		goto clr_ofld;
+	}
 
 	/* Bail if we already have a key. */
 	if (direction == KTLS_TX) {
@@ -1027,8 +1054,11 @@ tls_alloc_ktls(struct toepcb *toep, struct ktls_session *tls, int direction)
 	init_ktls_key_context(tls, k_ctx, direction);
 
 	error = tls_program_key_id(toep, k_ctx);
-	if (error)
+	if (error) {
+		if (direction == KTLS_RX)
+			goto clr_ofld;
 		return (error);
+	}
 
 	if (direction == KTLS_TX) {
 		toep->tls.scmd0.seqno_numivs =
@@ -1064,6 +1094,7 @@ tls_alloc_ktls(struct toepcb *toep, struct ktls_session *tls, int direction)
 		tls_stop_handshake_timer(toep);
 
 		toep->flags &= ~TPF_FORCE_CREDITS;
+		toep->flags |= TPF_TLS_RECEIVE;
 
 		/*
 		 * RX key tags are an index into the key portion of MA
@@ -1087,6 +1118,14 @@ tls_alloc_ktls(struct toepcb *toep, struct ktls_session *tls, int direction)
 	toep->tls.mode = TLS_MODE_KTLS;
 
 	return (0);
+
+clr_ofld:
+	if (ulp_mode(toep) == ULP_MODE_TLS) {
+		CTR2(KTR_CXGBE, "%s: tid %d clr_ofld_mode", __func__,
+		    toep->tid);
+		tls_clr_ofld_mode(toep);
+	}
+	return (error);
 }
 #endif
 
@@ -1099,9 +1138,6 @@ tls_init_toep(struct toepcb *toep)
 	tls_ofld->key_location = TLS_SFO_WR_CONTEXTLOC_DDR;
 	tls_ofld->rx_key_addr = -1;
 	tls_ofld->tx_key_addr = -1;
-	if (ulp_mode(toep) == ULP_MODE_TLS)
-		callout_init_mtx(&tls_ofld->handshake_timer,
-		    &tls_handshake_lock, 0);
 }
 
 void
@@ -1119,17 +1155,27 @@ tls_establish(struct toepcb *toep)
 	t4_set_tls_tcb_field(toep, W_TCB_ULP_RAW, V_TCB_ULP_RAW(M_TCB_ULP_RAW),
 	    V_TCB_ULP_RAW(V_TF_TLS_ENABLE(1)));
 
-	toep->flags |= TPF_FORCE_CREDITS;
+	toep->flags |= TPF_FORCE_CREDITS | TPF_TLS_ESTABLISHED;
 
+	callout_init_rw(&toep->tls.handshake_timer, &toep->inp->inp_lock, 0);
 	tls_start_handshake_timer(toep);
+}
+
+void
+tls_detach(struct toepcb *toep)
+{
+
+	if (toep->flags & TPF_TLS_ESTABLISHED) {
+		tls_stop_handshake_timer(toep);
+		toep->flags &= ~TPF_TLS_ESTABLISHED;
+	}
 }
 
 void
 tls_uninit_toep(struct toepcb *toep)
 {
 
-	if (ulp_mode(toep) == ULP_MODE_TLS)
-		tls_stop_handshake_timer(toep);
+	MPASS((toep->flags & TPF_TLS_ESTABLISHED) == 0);
 	clear_tls_keyid(toep);
 }
 
@@ -1623,26 +1669,24 @@ t4_push_tls_records(struct adapter *sc, struct toepcb *toep, int drop)
 
 #ifdef KERN_TLS
 static int
-count_ext_pgs_segs(struct mbuf_ext_pgs *ext_pgs,
-	struct mbuf_ext_pgs_data *ext_pgs_data)
+count_ext_pgs_segs(struct mbuf *m)
 {
 	vm_paddr_t nextpa;
 	u_int i, nsegs;
 
-	MPASS(ext_pgs->npgs > 0);
+	MPASS(m->m_epg_npgs > 0);
 	nsegs = 1;
-	nextpa = ext_pgs_data->pa[0] + PAGE_SIZE;
-	for (i = 1; i < ext_pgs->npgs; i++) {
-		if (nextpa != ext_pgs_data->pa[i])
+	nextpa = m->m_epg_pa[0] + PAGE_SIZE;
+	for (i = 1; i < m->m_epg_npgs; i++) {
+		if (nextpa != m->m_epg_pa[i])
 			nsegs++;
-		nextpa = ext_pgs_data->pa[i] + PAGE_SIZE;
+		nextpa = m->m_epg_pa[i] + PAGE_SIZE;
 	}
 	return (nsegs);
 }
 
 static void
-write_ktlstx_sgl(void *dst, struct mbuf_ext_pgs *ext_pgs,
-    struct mbuf_ext_pgs_data *ext_pgs_data, int nsegs)
+write_ktlstx_sgl(void *dst, struct mbuf *m, int nsegs)
 {
 	struct ulptx_sgl *usgl = dst;
 	vm_paddr_t pa;
@@ -1655,15 +1699,15 @@ write_ktlstx_sgl(void *dst, struct mbuf_ext_pgs *ext_pgs,
 	    V_ULPTX_NSGE(nsegs));
 
 	/* Figure out the first S/G length. */
-	pa = ext_pgs_data->pa[0] + ext_pgs->first_pg_off;
+	pa = m->m_epg_pa[0] + m->m_epg_1st_off;
 	usgl->addr0 = htobe64(pa);
-	len = mbuf_ext_pg_len(ext_pgs, 0, ext_pgs->first_pg_off);
+	len = m_epg_pagelen(m, 0, m->m_epg_1st_off);
 	pa += len;
-	for (i = 1; i < ext_pgs->npgs; i++) {
-		if (ext_pgs_data->pa[i] != pa)
+	for (i = 1; i < m->m_epg_npgs; i++) {
+		if (m->m_epg_pa[i] != pa)
 			break;
-		len += mbuf_ext_pg_len(ext_pgs, i, 0);
-		pa += mbuf_ext_pg_len(ext_pgs, i, 0);
+		len += m_epg_pagelen(m, i, 0);
+		pa += m_epg_pagelen(m, i, 0);
 	}
 	usgl->len0 = htobe32(len);
 #ifdef INVARIANTS
@@ -1671,21 +1715,21 @@ write_ktlstx_sgl(void *dst, struct mbuf_ext_pgs *ext_pgs,
 #endif
 
 	j = -1;
-	for (; i < ext_pgs->npgs; i++) {
-		if (j == -1 || ext_pgs_data->pa[i] != pa) {
+	for (; i < m->m_epg_npgs; i++) {
+		if (j == -1 || m->m_epg_pa[i] != pa) {
 			if (j >= 0)
 				usgl->sge[j / 2].len[j & 1] = htobe32(len);
 			j++;
 #ifdef INVARIANTS
 			nsegs--;
 #endif
-			pa = ext_pgs_data->pa[i];
+			pa = m->m_epg_pa[i];
 			usgl->sge[j / 2].addr[j & 1] = htobe64(pa);
-			len = mbuf_ext_pg_len(ext_pgs, i, 0);
+			len = m_epg_pagelen(m, i, 0);
 			pa += len;
 		} else {
-			len += mbuf_ext_pg_len(ext_pgs, i, 0);
-			pa += mbuf_ext_pg_len(ext_pgs, i, 0);
+			len += m_epg_pagelen(m, i, 0);
+			pa += m_epg_pagelen(m, i, 0);
 		}
 	}
 	if (j >= 0) {
@@ -1694,8 +1738,7 @@ write_ktlstx_sgl(void *dst, struct mbuf_ext_pgs *ext_pgs,
 		if ((j & 1) == 0)
 			usgl->sge[j / 2].len[1] = htobe32(0);
 	}
-	KASSERT(nsegs == 0, ("%s: nsegs %d, ext_pgs %p", __func__, nsegs,
-	    ext_pgs));
+	KASSERT(nsegs == 0, ("%s: nsegs %d, m %p", __func__, nsegs, m));
 }
 
 /*
@@ -1799,9 +1842,9 @@ t4_push_ktls(struct adapter *sc, struct toepcb *toep, int drop)
 			return;
 		}
 
-		KASSERT(m->m_flags & M_NOMAP, ("%s: mbuf %p is not NOMAP",
+		KASSERT(m->m_flags & M_EXTPG, ("%s: mbuf %p is not NOMAP",
 		    __func__, m));
-		KASSERT(m->m_ext_pgs.tls != NULL,
+		KASSERT(m->m_epg_tls != NULL,
 		    ("%s: mbuf %p doesn't have TLS session", __func__, m));
 
 		/* Calculate WR length. */
@@ -1813,8 +1856,7 @@ t4_push_ktls(struct adapter *sc, struct toepcb *toep, int drop)
 		wr_len += AES_BLOCK_LEN;
 
 		/* Account for SGL in work request length. */
-		nsegs = count_ext_pgs_segs(&m->m_ext_pgs,
-		    &m->m_ext.ext_pgs);
+		nsegs = count_ext_pgs_segs(m);
 		wr_len += sizeof(struct ulptx_sgl) +
 		    ((3 * (nsegs - 1)) / 2 + ((nsegs - 1) & 1)) * 8;
 
@@ -1871,19 +1913,19 @@ t4_push_ktls(struct adapter *sc, struct toepcb *toep, int drop)
 		thdr = (struct tls_hdr *)&m->m_epg_hdr;
 #ifdef VERBOSE_TRACES
 		CTR5(KTR_CXGBE, "%s: tid %d TLS record %ju type %d len %#x",
-		    __func__, toep->tid, m->m_ext_pgs.seqno, thdr->type,
+		    __func__, toep->tid, m->m_epg_seqno, thdr->type,
 		    m->m_len);
 #endif
 		txwr = wrtod(wr);
 		cpl = (struct cpl_tx_tls_sfo *)(txwr + 1);
 		memset(txwr, 0, roundup2(wr_len, 16));
 		credits = howmany(wr_len, 16);
-		expn_size = m->m_ext_pgs.hdr_len +
-		    m->m_ext_pgs.trail_len;
+		expn_size = m->m_epg_hdrlen +
+		    m->m_epg_trllen;
 		tls_size = m->m_len - expn_size;
 		write_tlstx_wr(txwr, toep, 0,
 		    tls_size, expn_size, 1, credits, shove, 1);
-		toep->tls.tx_seq_no = m->m_ext_pgs.seqno;
+		toep->tls.tx_seq_no = m->m_epg_seqno;
 		write_tlstx_cpl(cpl, toep, thdr, tls_size, 1);
 		tls_copy_tx_key(toep, cpl + 1);
 
@@ -1892,8 +1934,7 @@ t4_push_ktls(struct adapter *sc, struct toepcb *toep, int drop)
 		memcpy(buf, thdr + 1, toep->tls.iv_len);
 		buf += AES_BLOCK_LEN;
 
-		write_ktlstx_sgl(buf, &m->m_ext_pgs, &m->m_ext.ext_pgs,
-		    nsegs);
+		write_ktlstx_sgl(buf, m, nsegs);
 
 		KASSERT(toep->tx_credits >= credits,
 			("%s: not enough credits", __func__));
@@ -2050,11 +2091,9 @@ do_rx_tls_cmp(struct sge_iq *iq, const struct rss_header *rss, struct mbuf *m)
 #endif
 
 	tp->rcv_nxt += pdu_length;
-	if (tp->rcv_wnd < pdu_length) {
-		toep->tls.rcv_over += pdu_length - tp->rcv_wnd;
-		tp->rcv_wnd = 0;
-	} else
-		tp->rcv_wnd -= pdu_length;
+	KASSERT(tp->rcv_wnd >= pdu_length,
+	    ("%s: negative window size", __func__));
+	tp->rcv_wnd -= pdu_length;
 
 	/* XXX: Not sure what to do about urgent data. */
 
@@ -2228,10 +2267,138 @@ do_rx_tls_cmp(struct sge_iq *iq, const struct rss_header *rss, struct mbuf *m)
 }
 
 void
+do_rx_data_tls(const struct cpl_rx_data *cpl, struct toepcb *toep,
+    struct mbuf *m)
+{
+	struct inpcb *inp = toep->inp;
+	struct tls_ofld_info *tls_ofld = &toep->tls;
+	struct tls_hdr *hdr;
+	struct tcpcb *tp;
+	struct socket *so;
+	struct sockbuf *sb;
+	int error, len, rx_credits;
+
+	len = m->m_pkthdr.len;
+
+	INP_WLOCK_ASSERT(inp);
+
+	so = inp_inpcbtosocket(inp);
+	tp = intotcpcb(inp);
+	sb = &so->so_rcv;
+	SOCKBUF_LOCK(sb);
+	CURVNET_SET(toep->vnet);
+
+	tp->rcv_nxt += len;
+	KASSERT(tp->rcv_wnd >= len, ("%s: negative window size", __func__));
+	tp->rcv_wnd -= len;
+
+	/* Do we have a full TLS header? */
+	if (len < sizeof(*hdr)) {
+		CTR3(KTR_CXGBE, "%s: tid %u len %d: too short for a TLS header",
+		    __func__, toep->tid, len);
+		so->so_error = EMSGSIZE;
+		goto out;
+	}
+	hdr = mtod(m, struct tls_hdr *);
+
+	/* Is the header valid? */
+	if (be16toh(hdr->version) != tls_ofld->k_ctx.proto_ver) {
+		CTR3(KTR_CXGBE, "%s: tid %u invalid version %04x",
+		    __func__, toep->tid, be16toh(hdr->version));
+		error = EINVAL;
+		goto report_error;
+	}
+	if (be16toh(hdr->length) < sizeof(*hdr)) {
+		CTR3(KTR_CXGBE, "%s: tid %u invalid length %u",
+		    __func__, toep->tid, be16toh(hdr->length));
+		error = EBADMSG;
+		goto report_error;
+	}
+
+	/* Did we get a truncated record? */
+	if (len < be16toh(hdr->length)) {
+		CTR4(KTR_CXGBE, "%s: tid %u truncated TLS record (%d vs %u)",
+		    __func__, toep->tid, len, be16toh(hdr->length));
+
+		error = EMSGSIZE;
+		goto report_error;
+	}
+
+	/* Is the header type unknown? */
+	switch (hdr->type) {
+	case CONTENT_TYPE_CCS:
+	case CONTENT_TYPE_ALERT:
+	case CONTENT_TYPE_APP_DATA:
+	case CONTENT_TYPE_HANDSHAKE:
+		break;
+	default:
+		CTR3(KTR_CXGBE, "%s: tid %u invalid TLS record type %u",
+		    __func__, toep->tid, hdr->type);
+		error = EBADMSG;
+		goto report_error;
+	}
+
+	/*
+	 * Just punt.  Although this could fall back to software
+	 * decryption, this case should never really happen.
+	 */
+	CTR4(KTR_CXGBE, "%s: tid %u dropping TLS record type %u, length %u",
+	    __func__, toep->tid, hdr->type, be16toh(hdr->length));
+	error = EBADMSG;
+
+report_error:
+#ifdef KERN_TLS
+	if (toep->tls.mode == TLS_MODE_KTLS)
+		so->so_error = error;
+	else
+#endif
+	{
+		/*
+		 * Report errors by sending an empty TLS record
+		 * with an error record type.
+		 */
+		hdr->type = CONTENT_TYPE_ERROR;
+
+		/* Trim this CPL's mbuf to only include the TLS header. */
+		KASSERT(m->m_len == len && m->m_next == NULL,
+		    ("%s: CPL spans multiple mbufs", __func__));
+		m->m_len = TLS_HEADER_LENGTH;
+		m->m_pkthdr.len = TLS_HEADER_LENGTH;
+
+		sbappendstream_locked(sb, m, 0);
+		m = NULL;
+	}
+
+out:
+	/*
+	 * This connection is going to die anyway, so probably don't
+	 * need to bother with returning credits.
+	 */
+	rx_credits = sbspace(sb) > tp->rcv_wnd ? sbspace(sb) - tp->rcv_wnd : 0;
+#ifdef VERBOSE_TRACES
+	CTR4(KTR_CXGBE, "%s: tid %u rx_credits %u rcv_wnd %u",
+	    __func__, toep->tid, rx_credits, tp->rcv_wnd);
+#endif
+	if (rx_credits > 0 && sbused(sb) + tp->rcv_wnd < sb->sb_lowat) {
+		rx_credits = send_rx_credits(toep->vi->adapter, toep,
+		    rx_credits);
+		tp->rcv_wnd += rx_credits;
+		tp->rcv_adv += rx_credits;
+	}
+
+	sorwakeup_locked(so);
+	SOCKBUF_UNLOCK_ASSERT(sb);
+
+	INP_WUNLOCK(inp);
+	CURVNET_RESTORE();
+
+	m_freem(m);
+}
+
+void
 t4_tls_mod_load(void)
 {
 
-	mtx_init(&tls_handshake_lock, "t4tls handshake", NULL, MTX_DEF);
 	t4_register_cpl_handler(CPL_TLS_DATA, do_tls_data);
 	t4_register_cpl_handler(CPL_RX_TLS_CMP, do_rx_tls_cmp);
 }
@@ -2242,6 +2409,5 @@ t4_tls_mod_unload(void)
 
 	t4_register_cpl_handler(CPL_TLS_DATA, NULL);
 	t4_register_cpl_handler(CPL_RX_TLS_CMP, NULL);
-	mtx_destroy(&tls_handshake_lock);
 }
 #endif	/* TCP_OFFLOAD */

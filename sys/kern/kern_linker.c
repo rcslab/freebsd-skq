@@ -369,8 +369,7 @@ linker_file_register_modules(linker_file_t lf)
 
 	sx_assert(&kld_sx, SA_XLOCKED);
 
-	if (linker_file_lookup_set(lf, "modmetadata_set", &start,
-	    &stop, NULL) != 0) {
+	if (linker_file_lookup_set(lf, MDT_SETNAME, &start, &stop, NULL) != 0) {
 		/*
 		 * This fallback should be unnecessary, but if we get booted
 		 * from boot2 instead of loader and we are missing our
@@ -481,7 +480,6 @@ linker_load_file(const char *filename, linker_file_t *result)
 	 * the module was not found.
 	 */
 	if (foundfile) {
-
 		/*
 		 * If the file type has not been recognized by the last try
 		 * printout a message before to fail.
@@ -669,7 +667,6 @@ linker_file_unload(linker_file_t file, int flags)
 	MOD_SLOCK;
 	for (mod = TAILQ_FIRST(&file->modules); mod;
 	     mod = module_getfnext(mod)) {
-
 		error = module_quiesce(mod);
 		if (error != 0 && flags != LINKER_UNLOAD_FORCE) {
 			KLD_DPF(FILE, ("linker_file_unload: module %s"
@@ -1871,7 +1868,7 @@ linker_hints_lookup(const char *path, int pathlen, const char *modname,
 	 * XXX: we need to limit this number to some reasonable value
 	 */
 	if (vattr.va_size > LINKER_HINTS_MAX) {
-		printf("hints file too large %ld\n", (long)vattr.va_size);
+		printf("linker.hints file too large %ld\n", (long)vattr.va_size);
 		goto bad;
 	}
 	hints = malloc(vattr.va_size, M_TEMP, M_WAITOK);
@@ -1889,7 +1886,7 @@ linker_hints_lookup(const char *path, int pathlen, const char *modname,
 	intp = (int *)hints;
 	ival = *intp++;
 	if (ival != LINKER_HINTS_VERSION) {
-		printf("hints file version mismatch %d\n", ival);
+		printf("linker.hints file version mismatch %d\n", ival);
 		goto bad;
 	}
 	bufend = hints + vattr.va_size;
@@ -2045,7 +2042,6 @@ linker_hwpmc_list_objects(void)
 	    M_LINKER, M_WAITOK | M_ZERO);
 	i = 0;
 	TAILQ_FOREACH(lf, &linker_files, link) {
-
 		/* Save the info for this linker file. */
 		kobase[i].pm_file = lf->filename;
 		kobase[i].pm_address = (uintptr_t)lf->address;

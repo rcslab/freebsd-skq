@@ -3,6 +3,7 @@
 #
 
 .include <src.opts.mk>
+CFLAGS+=-I${.CURDIR}/../../contrib/lib9p
 CFLAGS+=-I${SRCTOP}/sys
 .PATH:  ${SRCTOP}/sys/cam/ctl
 
@@ -31,6 +32,7 @@ SRCS=	\
 	hda_codec.c		\
 	inout.c			\
 	ioapic.c		\
+	kernemu_dev.c		\
 	mem.c			\
 	mevent.c		\
 	mptbl.c			\
@@ -46,6 +48,7 @@ SRCS=	\
 	pci_lpc.c		\
 	pci_nvme.c		\
 	pci_passthru.c		\
+	pci_virtio_9p.c		\
 	pci_virtio_block.c	\
 	pci_virtio_console.c	\
 	pci_virtio_net.c	\
@@ -53,6 +56,7 @@ SRCS=	\
 	pci_virtio_scsi.c	\
 	pci_uart.c		\
 	pci_xhci.c		\
+	pctestdev.c		\
 	pm.c			\
 	post.c			\
 	ps2kbd.c		\
@@ -72,16 +76,29 @@ SRCS=	\
 	spinup_ap.c		\
 	iov.c
 
+.if ${MK_BHYVE_SNAPSHOT} != "no"
+SRCS+=	snapshot.c
+.endif
+
+CFLAGS.kernemu_dev.c+=	-I${SRCTOP}/sys/amd64
+
 .PATH:  ${BHYVE_SYSDIR}/sys/amd64/vmm
 SRCS+=	vmm_instruction_emul.c
 
-LIBADD=	vmmapi md pthread z util sbuf cam
+LIBADD=	vmmapi md pthread z util sbuf cam 9p casper cap_pwd cap_grp
+.if ${MK_BHYVE_SNAPSHOT} != "no"
+LIBADD+= ucl xo
+.endif
 
 .if ${MK_INET_SUPPORT} != "no"
 CFLAGS+=-DINET
 .endif
 .if ${MK_INET6_SUPPORT} != "no"
 CFLAGS+=-DINET6
+.endif
+.if ${MK_NETGRAPH_SUPPORT} != "no"
+CFLAGS+=-DNETGRAPH
+LIBADD+=    netgraph
 .endif
 .if ${MK_OPENSSL} == "no"
 CFLAGS+=-DNO_OPENSSL
@@ -92,6 +109,14 @@ LIBADD+=	crypto
 CFLAGS+= -I${BHYVE_SYSDIR}/sys/dev/e1000
 CFLAGS+= -I${BHYVE_SYSDIR}/sys/dev/mii
 CFLAGS+= -I${BHYVE_SYSDIR}/sys/dev/usb/controller
+.if ${MK_BHYVE_SNAPSHOT} != "no"
+CFLAGS+= -I${SRCTOP}/contrib/libucl/include
+
+# Temporary disable capsicum, until we integrate checkpoint code with it.
+CFLAGS+= -DWITHOUT_CAPSICUM
+
+CFLAGS+= -DBHYVE_SNAPSHOT
+.endif
 
 .ifdef GDB_LOG
 CFLAGS+=-DGDB_LOG

@@ -32,7 +32,6 @@
 #ifndef _MACHINE_VFP_H_
 #define	_MACHINE_VFP_H_
 
-
 #ifndef LOCORE
 struct vfpstate {
 	__uint128_t	vfp_regs[32];
@@ -42,6 +41,7 @@ struct vfpstate {
 
 #ifdef _KERNEL
 struct pcb;
+struct thread;
 
 void	vfp_init(void);
 void	vfp_discard(struct thread *);

@@ -45,8 +45,8 @@ __FBSDID("$FreeBSD$");
 #include <sys/kernel.h>
 #include <sys/sysctl.h>
 #include <sys/bio.h>
-#include <sys/bus.h>
 #include <sys/ctype.h>
+#include <sys/devctl.h>
 #include <sys/fcntl.h>
 #include <sys/malloc.h>
 #include <sys/sbuf.h>
@@ -498,8 +498,6 @@ g_disk_start(struct bio *bp)
 			break;
 		else if (g_handleattr_int(bp, "GEOM::fwheads", dp->d_fwheads))
 			break;
-		else if (g_handleattr_off_t(bp, "GEOM::frontstuff", 0))
-			break;
 		else if (g_handleattr_str(bp, "GEOM::ident", dp->d_ident))
 			break;
 		else if (g_handleattr_str(bp, "GEOM::descr", dp->d_descr))
@@ -718,11 +716,9 @@ g_disk_create(void *arg, int flag)
 	sc->d_devstat = dp->d_devstat;
 	gp = g_new_geomf(&g_disk_class, "%s%d", dp->d_name, dp->d_unit);
 	gp->softc = sc;
-	LIST_FOREACH(dap, &dp->d_aliases, da_next) {
-		snprintf(tmpstr, sizeof(tmpstr), "%s%d", dap->da_alias, dp->d_unit);
-		g_geom_add_alias(gp, tmpstr);
-	}
 	pp = g_new_providerf(gp, "%s", gp->name);
+	LIST_FOREACH(dap, &dp->d_aliases, da_next)
+		g_provider_add_alias(pp, "%s%d", dap->da_alias, dp->d_unit);
 	devstat_remove_entry(pp->stat);
 	pp->stat = NULL;
 	dp->d_devstat->id = pp;
@@ -1083,7 +1079,7 @@ sysctl_disks(SYSCTL_HANDLER_ARGS)
 	sbuf_delete(sb);
 	return error;
 }
- 
+
 SYSCTL_PROC(_kern, OID_AUTO, disks,
     CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, 0,
     sysctl_disks, "A", "names of available disks");

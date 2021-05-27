@@ -209,14 +209,13 @@ vm_radix_node_load(smrnode_t *p, enum vm_radix_access access)
 	case SMR:
 		return (smr_entered_load(p, vm_radix_smr));
 	}
-	__unreachable();
+	__assert_unreachable();
 }
 
 static __inline void
 vm_radix_node_store(smrnode_t *p, struct vm_radix_node *v,
     enum vm_radix_access access)
 {
-
 
 	switch (access) {
 	case UNSERIALIZED:

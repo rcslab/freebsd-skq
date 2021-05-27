@@ -188,22 +188,19 @@ sendfile_free_mext(struct mbuf *m)
 static void
 sendfile_free_mext_pg(struct mbuf *m)
 {
-	struct mbuf_ext_pgs *ext_pgs;
 	vm_page_t pg;
 	int flags, i;
 	bool cache_last;
 
-	KASSERT(m->m_flags & M_EXT && m->m_ext.ext_type == EXT_PGS,
-	    ("%s: m %p !M_EXT or !EXT_PGS", __func__, m));
+	M_ASSERTEXTPG(m);
 
 	cache_last = m->m_ext.ext_flags & EXT_FLAG_CACHE_LAST;
-	ext_pgs = &m->m_ext_pgs;
 	flags = (m->m_ext.ext_flags & EXT_FLAG_NOCACHE) != 0 ? VPR_TRYFREE : 0;
 
-	for (i = 0; i < ext_pgs->npgs; i++) {
-		if (cache_last && i == ext_pgs->npgs - 1)
+	for (i = 0; i < m->m_epg_npgs; i++) {
+		if (cache_last && i == m->m_epg_npgs - 1)
 			flags = 0;
-		pg = PHYS_TO_VM_PAGE(ext_pgs->m_epg_pa[i]);
+		pg = PHYS_TO_VM_PAGE(m->m_epg_pa[i]);
 		vm_page_release(pg, flags);
 	}
 
@@ -295,36 +292,30 @@ sendfile_iodone(void *arg, vm_page_t *pa, int count, int error)
 	struct socket *so;
 	int i;
 
-	if (error != 0) {
+	if (error != 0)
 		sfio->error = error;
-		/*
-		 * Restore of the pg[] elements is done by
-		 * sendfile_swapin().
-		 */
-	} else {
-		/*
-		 * Restore the valid page pointers.  They are already
-		 * unbusied, but still wired.  For error != 0 case,
-		 * sendfile_swapin() handles unbusy.
-		 *
-		 * XXXKIB since pages are only wired, and we do not
-		 * own the object lock, other users might have
-		 * invalidated them in meantime.  Similarly, after we
-		 * unbusied the swapped-in pages, they can become
-		 * invalid under us.
-		 */
-		MPASS(count == 0 || pa[0] != bogus_page);
-		for (i = 0; i < count; i++) {
-			if (pa[i] == bogus_page) {
-				sfio->pa[(pa[0]->pindex - sfio->pindex0) + i] =
-				    pa[i] = vm_page_relookup(sfio->obj,
-				    pa[0]->pindex + i);
-				KASSERT(pa[i] != NULL,
-				    ("%s: page %p[%d] disappeared",
-				    __func__, pa, i));
-			} else {
-				vm_page_xunbusy_unchecked(pa[i]);
-			}
+
+	/*
+	 * Restore the valid page pointers.  They are already
+	 * unbusied, but still wired.
+	 *
+	 * XXXKIB since pages are only wired, and we do not
+	 * own the object lock, other users might have
+	 * invalidated them in meantime.  Similarly, after we
+	 * unbusied the swapped-in pages, they can become
+	 * invalid under us.
+	 */
+	MPASS(count == 0 || pa[0] != bogus_page);
+	for (i = 0; i < count; i++) {
+		if (pa[i] == bogus_page) {
+			sfio->pa[(pa[0]->pindex - sfio->pindex0) + i] =
+			    pa[i] = vm_page_relookup(sfio->obj,
+			    pa[0]->pindex + i);
+			KASSERT(pa[i] != NULL,
+			    ("%s: page %p[%d] disappeared",
+			    __func__, pa, i));
+		} else {
+			vm_page_xunbusy_unchecked(pa[i]);
 		}
 	}
 
@@ -365,9 +356,8 @@ sendfile_iodone(void *arg, vm_page_t *pa, int count, int error)
 	}
 
 #if defined(KERN_TLS) && defined(INVARIANTS)
-	if ((sfio->m->m_flags & M_EXT) != 0 &&
-	    sfio->m->m_ext.ext_type == EXT_PGS)
-		KASSERT(sfio->tls == sfio->m->m_ext_pgs.tls,
+	if ((sfio->m->m_flags & M_EXTPG) != 0)
+		KASSERT(sfio->tls == sfio->m->m_epg_tls,
 		    ("TLS session mismatch"));
 	else
 		KASSERT(sfio->tls == NULL,
@@ -538,22 +528,12 @@ sendfile_swapin(vm_object_t obj, struct sf_io *sfio, int *nios, off_t off,
 			sendfile_iowait(sfio, "sferrio");
 
 			/*
-			 * Perform full pages recovery before returning EIO.
+			 * Do remaining pages recovery before returning EIO.
 			 * Pages from 0 to npages are wired.
-			 * Pages from (i + 1) to (i + count - 1) may be
-			 * substituted to bogus page, and not busied.
-			 * Pages from (i + count) to (i + count1 - 1) are
-			 * not busied.
-			 * Rest of the pages from i to npages are busied.
+			 * Pages from (i + count1) to npages are busied.
 			 */
 			for (j = 0; j < npages; j++) {
-				if (j >= i + count && j < i + count1)
-					;
-				else if (j > i && j < i + count - 1 &&
-				    pa[j] == bogus_page)
-					pa[j] = vm_page_relookup(obj,
-					    OFF_TO_IDX(vmoff(j, off)));
-				else if (j >= i)
+				if (j >= i + count1)
 					vm_page_xunbusy(pa[j]);
 				KASSERT(pa[j] != NULL && pa[j] != bogus_page,
 				    ("%s: page %p[%d] I/O recovery failure",
@@ -692,7 +672,6 @@ vn_sendfile(struct file *fp, int sockfd, struct uio *hdr_uio,
 #ifdef KERN_TLS
 	struct ktls_session *tls;
 #endif
-	struct mbuf_ext_pgs *ext_pgs;
 	struct mbuf *m, *mh, *mhtail;
 	struct sf_buf *sf;
 	struct shmfd *shmfd;
@@ -848,7 +827,7 @@ retry_space:
 #ifdef KERN_TLS
 			if (tls != NULL)
 				mh = m_uiotombuf(hdr_uio, M_WAITOK, space,
-				    tls->params.max_frame_len, M_NOMAP);
+				    tls->params.max_frame_len, M_EXTPG);
 			else
 #endif
 				mh = m_uiotombuf(hdr_uio, M_WAITOK,
@@ -906,7 +885,7 @@ retry_space:
 		 * do any heuristics and use exactly the value supplied by
 		 * application.  Otherwise, we allow readahead up to "rem".
 		 * If application wants more, let it be, but there is no
-		 * reason to go above MAXPHYS.  Also check against "obj_size",
+		 * reason to go above maxphys.  Also check against "obj_size",
 		 * since vm_pager_has_page() can hint beyond EOF.
 		 */
 		if (flags & SF_USER_READAHEAD) {
@@ -916,7 +895,7 @@ retry_space:
 			    npages;
 			rhpages += SF_READAHEAD(flags);
 		}
-		rhpages = min(howmany(MAXPHYS, PAGE_SIZE), rhpages);
+		rhpages = min(howmany(maxphys, PAGE_SIZE), rhpages);
 		rhpages = min(howmany(obj_size - trunc_page(off), PAGE_SIZE) -
 		    npages, rhpages);
 
@@ -1018,18 +997,11 @@ retry_space:
 					if (sfs != NULL) {
 						m0->m_ext.ext_flags |=
 						    EXT_FLAG_SYNC;
-						if (m0->m_ext.ext_type ==
-						    EXT_PGS)
-							m0->m_ext.ext_arg1 =
-								sfs;
-						else
-							m0->m_ext.ext_arg2 =
-								sfs;
+						m0->m_ext.ext_arg1 = sfs;
 						mtx_lock(&sfs->mtx);
 						sfs->count++;
 						mtx_unlock(&sfs->mtx);
 					}
-					ext_pgs = &m0->m_ext_pgs;
 					ext_pgs_idx = 0;
 
 					/* Append to mbuf chain. */
@@ -1038,19 +1010,19 @@ retry_space:
 					else
 						m = m0;
 					mtail = m0;
-					ext_pgs->first_pg_off =
+					m0->m_epg_1st_off =
 					    vmoff(i, off) & PAGE_MASK;
 				}
 				if (nios) {
 					mtail->m_flags |= M_NOTREADY;
-					ext_pgs->nrdy++;
+					m0->m_epg_nrdy++;
 				}
 
-				ext_pgs->m_epg_pa[ext_pgs_idx] = VM_PAGE_TO_PHYS(pga);
-				ext_pgs->npgs++;
+				m0->m_epg_pa[ext_pgs_idx] = VM_PAGE_TO_PHYS(pga);
+				m0->m_epg_npgs++;
 				xfs = xfsize(i, npages, off, space);
-				ext_pgs->last_pg_len = xfs;
-				MBUF_EXT_PGS_ASSERT_SANITY(ext_pgs);
+				m0->m_epg_last_len = xfs;
+				MBUF_EXT_PGS_ASSERT_SANITY(m0);
 				mtail->m_len += xfs;
 				mtail->m_ext.ext_size += PAGE_SIZE;
 				continue;
@@ -1100,10 +1072,6 @@ retry_space:
 				m0->m_ext.ext_flags |= EXT_FLAG_NOCACHE;
 			if (sfs != NULL) {
 				m0->m_ext.ext_flags |= EXT_FLAG_SYNC;
-				if (m0->m_ext.ext_type == EXT_PGS)
-					m0->m_ext.ext_arg1 = sfs;
-				else
-					m0->m_ext.ext_arg2 = sfs;
 				m0->m_ext.ext_arg2 = sfs;
 				mtx_lock(&sfs->mtx);
 				sfs->count++;
@@ -1345,7 +1313,7 @@ out:
 int
 sys_sendfile(struct thread *td, struct sendfile_args *uap)
 {
- 
+
 	return (sendfile(td, uap, 0));
 }
 

@@ -517,6 +517,7 @@ static int verbose = PSM_DEBUG;
 static int synaptics_support = 1;
 static int trackpoint_support = 1;
 static int elantech_support = 1;
+static int mux_disabled = -1;
 
 /* for backward compatibility */
 #define	OLD_MOUSE_GETHWINFO	_IOR('M', 1, old_mousehw_t)
@@ -726,7 +727,6 @@ static device_method_t psm_methods[] = {
 	DEVMETHOD(device_attach,	psmattach),
 	DEVMETHOD(device_detach,	psmdetach),
 	DEVMETHOD(device_resume,	psmresume),
-
 	{ 0, 0 }
 };
 
@@ -1690,7 +1690,6 @@ psmprobe(device_t dev)
 #define	PS2_MOUSE_ELANTECH_NAME		"ETPS/2 Elantech Touchpad"
 #define	PS2_MOUSE_ELANTECH_ST_NAME	"ETPS/2 Elantech TrackPoint"
 #define	PS2_MOUSE_ELANTECH_PRODUCT	0x000E
-
 #define	ABSINFO_END	{ ABS_CNT, 0, 0, 0 }
 
 static void
@@ -2628,7 +2627,6 @@ psmioctl(struct cdev *dev, u_long cmd, caddr_t addr, int flag,
 
 	/* Perform IOCTL command */
 	switch (cmd) {
-
 	case OLD_MOUSE_GETHWINFO:
 		s = spltty();
 		((old_mousehw_t *)addr)->buttons = sc->hw.buttons;
@@ -2988,6 +2986,9 @@ SYSCTL_INT(_hw_psm, OID_AUTO, trackpoint_support, CTLFLAG_RDTUN,
 
 SYSCTL_INT(_hw_psm, OID_AUTO, elantech_support, CTLFLAG_RDTUN,
     &elantech_support, 0, "Enable support for Elantech touchpads");
+
+SYSCTL_INT(_hw_psm, OID_AUTO, mux_disabled, CTLFLAG_RDTUN,
+    &mux_disabled, 0, "Disable active multiplexing");
 
 static void
 psmintr(void *arg)
@@ -4441,7 +4442,7 @@ proc_elantech(struct psm_softc *sc, packetbuf_t *pb, mousestatus_t *ms,
 	*x = *y = *z = 0;
 	ms->button = ms->obutton;
 
-	if (sc->syninfo.touchpad_off)
+	if (sc->syninfo.touchpad_off && pkt != ELANTECH_PKT_TRACKPOINT)
 		return (0);
 
 	/* Common legend
@@ -4712,7 +4713,6 @@ proc_elantech(struct psm_softc *sc, packetbuf_t *pb, mousestatus_t *ms,
 		    !(pb->ipacket[0] & 0x10) != !(pb->ipacket[3] & 0x10) &&
 		    !(pb->ipacket[0] & 0x20) != !(pb->ipacket[2] & 0x80) &&
 		    !(pb->ipacket[0] & 0x20) != !(pb->ipacket[3] & 0x20)) {
-
 			*x = (pb->ipacket[0] & MOUSE_PS2_XNEG) ?
 			    pb->ipacket[4] - 256 : pb->ipacket[4];
 			*y = (pb->ipacket[0] & MOUSE_PS2_YNEG) ?
@@ -4978,7 +4978,6 @@ psmsoftintr(void *arg)
 		sc->idlepacket.inputbytes = 0;
 
 		switch (sc->hw.model) {
-
 		case MOUSE_MODEL_EXPLORER:
 			/*
 			 *          b7 b6 b5 b4 b3 b2 b1 b0
@@ -6293,6 +6292,10 @@ enable_synaptics_mux(struct psm_softc *sc, enum probearg arg)
 	int active_ports_count = 0;
 	int active_ports_mask = 0;
 
+	if (mux_disabled == 1 || (mux_disabled == -1 &&
+	    (kbdc->quirks & KBDC_QUIRK_DISABLE_MUX_PROBE) != 0))
+		return (FALSE);
+
 	version = enable_aux_mux(kbdc);
 	if (version == -1)
 		return (FALSE);
@@ -6329,6 +6332,21 @@ enable_synaptics_mux(struct psm_softc *sc, enum probearg arg)
 
 	/* IRQ handler does not support active multiplexing mode */
 	disable_aux_mux(kbdc);
+
+	/* Is MUX still alive after switching back to legacy mode? */
+	if (!enable_aux_dev(kbdc) || !disable_aux_dev(kbdc)) {
+		/*
+		 * On some laptops e.g. Lenovo X121e dead AUX MUX can be
+		 * brought back to life with resetting of keyboard.
+		 */
+		reset_kbd(kbdc);
+		if (!enable_aux_dev(kbdc) || !disable_aux_dev(kbdc)) {
+			printf("psm%d: AUX MUX hang detected!\n", sc->unit);
+			printf("Consider adding hw.psm.mux_disabled=1 to "
+			    "loader tunables\n");
+		}
+	}
+	empty_both_buffers(kbdc, 10);	/* remove stray data if any */
 
 	return (probe);
 }
@@ -7467,7 +7485,6 @@ static	device_attach_t			psmcpnp_attach;
 static device_method_t psmcpnp_methods[] = {
 	DEVMETHOD(device_probe,		psmcpnp_probe),
 	DEVMETHOD(device_attach,	psmcpnp_attach),
-
 	{ 0, 0 }
 };
 

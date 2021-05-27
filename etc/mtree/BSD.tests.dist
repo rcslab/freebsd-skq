@@ -12,6 +12,8 @@
         ..
         chmod
         ..
+        cp
+        ..
         date
         ..
         dd
@@ -446,7 +448,7 @@
         ..
         ping
         ..
-        ping6
+        route
         ..
     ..
     secure
@@ -796,6 +798,8 @@
         ..
         net
         ..
+        netgraph
+        ..
         netinet
         ..
         netinet6
@@ -806,8 +810,8 @@
             tunnel
             ..
         ..
-    netmap
-    ..
+        netmap
+        ..
         netpfil
             common
             ..
@@ -999,6 +1003,8 @@
         fold
         ..
         getconf
+        ..
+        gh-bc
         ..
         grep
         ..

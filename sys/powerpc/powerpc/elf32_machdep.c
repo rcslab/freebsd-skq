@@ -90,8 +90,6 @@ struct sysentvec elf32_freebsd_sysvec = {
 #else
 	.sv_table	= sysent,
 #endif
-	.sv_errsize	= 0,
-	.sv_errtbl	= NULL,
 	.sv_transtrap	= NULL,
 	.sv_fixup	= __elfN(freebsd_fixup),
 	.sv_copyout_auxargs = __elfN(powerpc_copyout_auxargs),
@@ -122,7 +120,8 @@ struct sysentvec elf32_freebsd_sysvec = {
 	.sv_fixlimit	= NULL,
 #endif
 	.sv_maxssiz	= NULL,
-	.sv_flags	= SV_ABI_FREEBSD | SV_ILP32 | SV_SHP | SV_ASLR,
+	.sv_flags	= SV_ABI_FREEBSD | SV_ILP32 | SV_SHP | SV_ASLR |
+			    SV_TIMEKEEP | SV_RNG_SEED_VER,
 	.sv_set_syscall_retval = cpu_set_syscall_retval,
 	.sv_fetch_syscall_args = cpu_fetch_syscall_args,
 	.sv_shared_page_base = FREEBSD32_SHAREDPAGE,
@@ -221,10 +220,10 @@ elf32_dump_thread(struct thread *td, void *dst, size_t *off)
 
 #ifndef __powerpc64__
 bool
-elf_is_ifunc_reloc(Elf_Size r_info __unused)
+elf_is_ifunc_reloc(Elf_Size r_info)
 {
 
-	return (false);
+	return (ELF_R_TYPE(r_info) == R_PPC_IRELATIVE);
 }
 
 /* Process one elf relocation with addend. */
@@ -235,7 +234,7 @@ elf_reloc_internal(linker_file_t lf, Elf_Addr relocbase, const void *data,
 	Elf_Addr *where;
 	Elf_Half *hwhere;
 	Elf_Addr addr;
-	Elf_Addr addend;
+	Elf_Addr addend, val;
 	Elf_Word rtype, symidx;
 	const Elf_Rela *rela;
 	int error;
@@ -257,21 +256,20 @@ elf_reloc_internal(linker_file_t lf, Elf_Addr relocbase, const void *data,
 	}
 
 	switch (rtype) {
-
 	case R_PPC_NONE:
 		break;
 
 	case R_PPC_ADDR32: /* word32 S + A */
 		error = lookup(lf, symidx, 1, &addr);
 		if (error != 0)
-			return -1;
+			return (-1);
 		*where = elf_relocaddr(lf, addr + addend);
 			break;
 
 	case R_PPC_ADDR16_LO: /* #lo(S) */
 		error = lookup(lf, symidx, 1, &addr);
 		if (error != 0)
-			return -1;
+			return (-1);
 		/*
 		 * addend values are sometimes relative to sections
 		 * (i.e. .rodata) in rela, where in reality they
@@ -286,7 +284,7 @@ elf_reloc_internal(linker_file_t lf, Elf_Addr relocbase, const void *data,
 	case R_PPC_ADDR16_HA: /* #ha(S) */
 		error = lookup(lf, symidx, 1, &addr);
 		if (error != 0)
-			return -1;
+			return (-1);
 		/*
 		 * addend values are sometimes relative to sections
 		 * (i.e. .rodata) in rela, where in reality they
@@ -313,16 +311,23 @@ elf_reloc_internal(linker_file_t lf, Elf_Addr relocbase, const void *data,
 		 */
 		error = lookup(lf, symidx, 1, &addr);
 		if (error != 0)
-			return -1;
+			return (-1);
 		*where = elf_relocaddr(lf, addr + addend);
 		break;
 
+	case R_PPC_IRELATIVE:
+		addr = relocbase + addend;
+		val = ((Elf32_Addr (*)(void))addr)();
+		if (*where != val)
+			*where = val;
+		break;
+
 	default:
-		printf("kldload: unexpected relocation type %d\n",
-		    (int) rtype);
-		return -1;
+		printf("kldload: unexpected relocation type %d, "
+		    "symbol index %d\n", (int)rtype, symidx);
+		return (-1);
 	}
-	return(0);
+	return (0);
 }
 
 void

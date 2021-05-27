@@ -52,16 +52,6 @@ SYSCTL_BOOL(_hw_nvme, OID_AUTO, verbose_cmd_dump, CTLFLAG_RWTUN,
     &nvme_verbose_cmd_dump, 0,
     "enable verbose command printting when a command fails");
 
-/*
- * CTLTYPE_S64 and sysctl_handle_64 were added in r217616.  Define these
- *  explicitly here for older kernels that don't include the r217616
- *  changeset.
- */
-#ifndef CTLTYPE_S64
-#define CTLTYPE_S64		CTLTYPE_QUAD
-#define sysctl_handle_64	sysctl_handle_quad
-#endif
-
 static void
 nvme_dump_queue(struct nvme_qpair *qpair)
 {
@@ -85,7 +75,6 @@ nvme_dump_queue(struct nvme_qpair *qpair)
 		nvme_dump_command(cmd);
 	}
 }
-
 
 static int
 nvme_sysctl_dump_debug(SYSCTL_HANDLER_ARGS)
@@ -146,16 +135,17 @@ static int
 nvme_sysctl_timeout_period(SYSCTL_HANDLER_ARGS)
 {
 	struct nvme_controller *ctrlr = arg1;
-	uint32_t oldval = ctrlr->timeout_period;
-	int error = sysctl_handle_int(oidp, &ctrlr->timeout_period, 0, req);
+	uint32_t newval = ctrlr->timeout_period;
+	int error = sysctl_handle_int(oidp, &newval, 0, req);
 
-	if (error)
+	if (error || (req->newptr == NULL))
 		return (error);
 
-	if (ctrlr->timeout_period > NVME_MAX_TIMEOUT_PERIOD ||
-	    ctrlr->timeout_period < NVME_MIN_TIMEOUT_PERIOD) {
-		ctrlr->timeout_period = oldval;
+	if (newval > NVME_MAX_TIMEOUT_PERIOD ||
+	    newval < NVME_MIN_TIMEOUT_PERIOD) {
 		return (EINVAL);
+	} else {
+		ctrlr->timeout_period = newval;
 	}
 
 	return (0);
@@ -251,7 +241,6 @@ nvme_sysctl_reset_stats(SYSCTL_HANDLER_ARGS)
 
 	return (0);
 }
-
 
 static void
 nvme_sysctl_initialize_queue(struct nvme_qpair *qpair,

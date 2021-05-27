@@ -154,10 +154,8 @@ dctcp_ack_received(struct cc_var *ccv, uint16_t type)
 		 * Update the fraction of marked bytes at the end of
 		 * current window size.
 		 */
-		if ((IN_FASTRECOVERY(CCV(ccv, t_flags)) &&
-		    SEQ_GEQ(ccv->curack, CCV(ccv, snd_recover))) ||
-		    (!IN_FASTRECOVERY(CCV(ccv, t_flags)) &&
-		    SEQ_GT(ccv->curack, dctcp_data->save_sndnxt)))
+		if (!IN_FASTRECOVERY(CCV(ccv, t_flags)) &&
+		    SEQ_GT(ccv->curack, dctcp_data->save_sndnxt))
 			dctcp_update_alpha(ccv);
 	} else
 		newreno_cc_algo.ack_received(ccv, type);
@@ -237,7 +235,7 @@ dctcp_cong_signal(struct cc_var *ccv, uint32_t type)
 	if (CCV(ccv, t_flags2) & TF2_ECN_PERMIT) {
 		dctcp_data = ccv->cc_data;
 		cwin = CCV(ccv, snd_cwnd);
-		mss = CCV(ccv, t_maxseg);
+		mss = tcp_maxseg(ccv->ccvc.tcp);
 
 		switch (type) {
 		case CC_NDUPACK:
@@ -284,6 +282,10 @@ dctcp_cong_signal(struct cc_var *ccv, uint32_t type)
 			dctcp_data->ece_curr = 1;
 			break;
 		case CC_RTO:
+			CCV(ccv, snd_ssthresh) = max(min(CCV(ccv, snd_wnd),
+							 CCV(ccv, snd_cwnd)) / 2 / mss,
+						     2) * mss;
+			CCV(ccv, snd_cwnd) = mss;
 			dctcp_update_alpha(ccv);
 			dctcp_data->save_sndnxt += CCV(ccv, t_maxseg);
 			dctcp_data->num_cong_events++;
@@ -466,3 +468,4 @@ SYSCTL_PROC(_net_inet_tcp_cc_dctcp, OID_AUTO, slowstart,
     "half CWND reduction after the first slow start");
 
 DECLARE_CC_MODULE(dctcp, &dctcp_cc_algo);
+MODULE_VERSION(dctcp, 1);

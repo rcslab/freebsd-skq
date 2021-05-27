@@ -39,9 +39,11 @@ __FBSDID("$FreeBSD$");
 #include <sys/consio.h>
 #include <sys/eventhandler.h>
 #include <sys/fbio.h>
+#include <sys/font.h>
 #include <sys/kbio.h>
 #include <sys/kdb.h>
 #include <sys/kernel.h>
+#include <sys/linker.h>
 #include <sys/lock.h>
 #include <sys/malloc.h>
 #include <sys/mutex.h>
@@ -163,8 +165,15 @@ extern unsigned char vt_logo_image[];
 const unsigned int vt_logo_sprite_height;
 #endif
 
-/* Font. */
+/*
+ * Console font. vt_font_loader will be filled with font data passed
+ * by loader. If there is no font passed by boot loader, we use built in
+ * default.
+ */
 extern struct vt_font vt_font_default;
+static struct vt_font vt_font_loader;
+static struct vt_font *vt_font_assigned = &vt_font_default;
+
 #ifndef SC_NO_CUTPASTE
 extern struct vt_mouse_cursor vt_default_mouse_pointer;
 #endif
@@ -454,7 +463,7 @@ vt_window_postswitch(struct vt_window *vw)
 	return (0);
 }
 
-/* vt_late_window_switch will done VT switching for regular case. */
+/* vt_late_window_switch will do VT switching for regular case. */
 static int
 vt_late_window_switch(struct vt_window *vw)
 {
@@ -725,13 +734,22 @@ vt_scroll(struct vt_window *vw, int offset, int whence)
 }
 
 static int
-vt_machine_kbdevent(int c)
+vt_machine_kbdevent(struct vt_device *vd, int c)
 {
 
 	switch (c) {
 	case SPCLKEY | DBG: /* kbdmap(5) keyword `debug`. */
-		if (vt_kbd_debug)
+		if (vt_kbd_debug) {
 			kdb_enter(KDB_WHY_BREAK, "manual escape to debugger");
+#if VT_ALT_TO_ESC_HACK
+			/*
+			 * There's an unfortunate conflict between SPCLKEY|DBG
+			 * and VT_ALT_TO_ESC_HACK.  Just assume they didn't mean
+			 * it if we got to here.
+			 */
+			vd->vd_kbstate &= ~ALKED;
+#endif
+		}
 		return (1);
 	case SPCLKEY | HALT: /* kbdmap(5) keyword `halt`. */
 		if (vt_kbd_halt)
@@ -864,7 +882,7 @@ vt_processkey(keyboard_t *kbd, struct vt_device *vd, int c)
 		return (0);
 #endif
 
-	if (vt_machine_kbdevent(c))
+	if (vt_machine_kbdevent(vd, c))
 		return (0);
 
 	if (vw->vw_flags & VWF_SCROLL) {
@@ -1422,7 +1440,6 @@ vtterm_splash(struct vt_device *vd)
 
 	/* Display a nice boot splash. */
 	if (!(vd->vd_flags & VDF_TEXTMODE) && (boothowto & RB_MUTE)) {
-
 		top = (vd->vd_height - vt_logo_height) / 2;
 		left = (vd->vd_width - vt_logo_width) / 2;
 		switch (vt_logo_depth) {
@@ -1437,6 +1454,129 @@ vtterm_splash(struct vt_device *vd)
 }
 #endif
 
+static struct vt_font *
+parse_font_info_static(struct font_info *fi)
+{
+	struct vt_font *vfp;
+	uintptr_t ptr;
+	uint32_t checksum;
+
+	if (fi == NULL)
+		return (NULL);
+
+	ptr = (uintptr_t)fi;
+	/*
+	 * Compute and verify checksum. The total sum of all the fields
+	 * must be 0.
+	 */
+	checksum = fi->fi_width;
+	checksum += fi->fi_height;
+	checksum += fi->fi_bitmap_size;
+	for (unsigned i = 0; i < VFNT_MAPS; i++)
+		checksum += fi->fi_map_count[i];
+
+	if (checksum + fi->fi_checksum != 0)
+		return (NULL);
+
+	ptr += sizeof(struct font_info);
+	ptr = roundup2(ptr, 8);
+
+	vfp = &vt_font_loader;
+	vfp->vf_height = fi->fi_height;
+	vfp->vf_width = fi->fi_width;
+	for (unsigned i = 0; i < VFNT_MAPS; i++) {
+		if (fi->fi_map_count[i] == 0)
+			continue;
+		vfp->vf_map_count[i] = fi->fi_map_count[i];
+		vfp->vf_map[i] = (vfnt_map_t *)ptr;
+		ptr += (fi->fi_map_count[i] * sizeof(vfnt_map_t));
+		ptr = roundup2(ptr, 8);
+	}
+	vfp->vf_bytes = (uint8_t *)ptr;
+	return (vfp);
+}
+
+static struct vt_font *
+parse_font_info(struct font_info *fi)
+{
+	struct vt_font *vfp;
+	uintptr_t ptr;
+	uint32_t checksum;
+	size_t size;
+
+	if (fi == NULL)
+		return (NULL);
+
+	ptr = (uintptr_t)fi;
+	/*
+	 * Compute and verify checksum. The total sum of all the fields
+	 * must be 0.
+	 */
+	checksum = fi->fi_width;
+	checksum += fi->fi_height;
+	checksum += fi->fi_bitmap_size;
+	for (unsigned i = 0; i < VFNT_MAPS; i++)
+		checksum += fi->fi_map_count[i];
+
+	if (checksum + fi->fi_checksum != 0)
+		return (NULL);
+
+	ptr += sizeof(struct font_info);
+	ptr = roundup2(ptr, 8);
+
+	vfp = &vt_font_loader;
+	vfp->vf_height = fi->fi_height;
+	vfp->vf_width = fi->fi_width;
+	for (unsigned i = 0; i < VFNT_MAPS; i++) {
+		if (fi->fi_map_count[i] == 0)
+			continue;
+		vfp->vf_map_count[i] = fi->fi_map_count[i];
+		size = fi->fi_map_count[i] * sizeof(vfnt_map_t);
+		vfp->vf_map[i] = malloc(size, M_VT, M_WAITOK | M_ZERO);
+		bcopy((vfnt_map_t *)ptr, vfp->vf_map[i], size);
+		ptr += size;
+		ptr = roundup2(ptr, 8);
+	}
+	vfp->vf_bytes = malloc(fi->fi_bitmap_size, M_VT, M_WAITOK | M_ZERO);
+	bcopy((uint8_t *)ptr, vfp->vf_bytes, fi->fi_bitmap_size);
+	return (vfp);
+}
+
+static void
+vt_init_font(void *arg)
+{
+	caddr_t kmdp;
+	struct font_info *fi;
+	struct vt_font *font;
+
+	kmdp = preload_search_by_type("elf kernel");
+	if (kmdp == NULL)
+		kmdp = preload_search_by_type("elf64 kernel");
+	fi = MD_FETCH(kmdp, MODINFOMD_FONT, struct font_info *);
+
+	font = parse_font_info(fi);
+	if (font != NULL)
+		vt_font_assigned = font;
+}
+
+SYSINIT(vt_init_font, SI_SUB_KMEM, SI_ORDER_ANY, vt_init_font, &vt_consdev);
+
+static void
+vt_init_font_static(void)
+{
+	caddr_t kmdp;
+	struct font_info *fi;
+	struct vt_font *font;
+
+	kmdp = preload_search_by_type("elf kernel");
+	if (kmdp == NULL)
+		kmdp = preload_search_by_type("elf64 kernel");
+	fi = MD_FETCH(kmdp, MODINFOMD_FONT, struct font_info *);
+
+	font = parse_font_info_static(fi);
+	if (font != NULL)
+		vt_font_assigned = font;
+}
 
 static void
 vtterm_cnprobe(struct terminal *tm, struct consdev *cp)
@@ -1484,9 +1624,11 @@ vtterm_cnprobe(struct terminal *tm, struct consdev *cp)
 	vd->vd_windows[VT_CONSWINDOW] = vw;
 	sprintf(cp->cn_name, "ttyv%r", VT_UNIT(vw));
 
+	vt_init_font_static();
+
 	/* Attach default font if not in TEXTMODE. */
 	if ((vd->vd_flags & VDF_TEXTMODE) == 0) {
-		vw->vw_font = vtfont_ref(&vt_font_default);
+		vw->vw_font = vtfont_ref(vt_font_assigned);
 		vt_compute_drawable_area(vw);
 	}
 
@@ -2326,10 +2468,24 @@ skip_thunk:
 	case CONS_HISTORY:
 		if (*(int *)data < 0)
 			return EINVAL;
-		if (*(int *)data != vd->vd_curwindow->vw_buf.vb_history_size)
-			vtbuf_sethistory_size(&vd->vd_curwindow->vw_buf,
-			    *(int *)data);
-		return 0;
+		if (*(int *)data != vw->vw_buf.vb_history_size)
+			vtbuf_sethistory_size(&vw->vw_buf, *(int *)data);
+		return (0);
+	case CONS_CLRHIST:
+		vtbuf_clearhistory(&vw->vw_buf);
+		/*
+		 * Invalidate the entire visible window; it is not guaranteed
+		 * that this operation will be immediately followed by a scroll
+		 * event, so it would otherwise be possible for prior artifacts
+		 * to remain visible.
+		 */
+		VT_LOCK(vd);
+		if (vw == vd->vd_curwindow) {
+			vd->vd_flags |= VDF_INVALID;
+			vt_resume_flush_timer(vw, 0);
+		}
+		VT_UNLOCK(vd);
+		return (0);
 	case CONS_GET:
 		/* XXX */
 		*(int *)data = M_CG640x480;
@@ -2410,7 +2566,7 @@ skip_thunk:
 	}
 	case PIO_VFONT_DEFAULT: {
 		/* Reset to default font. */
-		error = vt_change_font(vw, &vt_font_default);
+		error = vt_change_font(vw, vt_font_assigned);
 		return (error);
 	}
 	case GIO_SCRNMAP: {
@@ -2670,7 +2826,7 @@ vt_allocate_window(struct vt_device *vd, unsigned int window)
 	vw->vw_kbdmode = K_XLATE;
 
 	if ((vd->vd_flags & VDF_TEXTMODE) == 0) {
-		vw->vw_font = vtfont_ref(&vt_font_default);
+		vw->vw_font = vtfont_ref(vt_font_assigned);
 		vt_compute_drawable_area(vw);
 	}
 
@@ -2715,7 +2871,6 @@ vt_upgrade(struct vt_device *vd)
 				    vt_window_switch, vw, SHUTDOWN_PRI_DEFAULT);
 			}
 		}
-
 	}
 	VT_LOCK(vd);
 	if (vd->vd_curwindow == NULL)
@@ -2768,7 +2923,7 @@ vt_resize(struct vt_device *vd)
 		VT_LOCK(vd);
 		/* Assign default font to window, if not textmode. */
 		if (!(vd->vd_flags & VDF_TEXTMODE) && vw->vw_font == NULL)
-			vw->vw_font = vtfont_ref(&vt_font_default);
+			vw->vw_font = vtfont_ref(vt_font_assigned);
 		VT_UNLOCK(vd);
 
 		/* Resize terminal windows */

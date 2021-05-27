@@ -70,6 +70,12 @@ struct pate {
 	u_int64_t proctab;
 };
 
+/* Process table entry */
+struct prte {
+	u_int64_t proctab0;
+	u_int64_t proctab1;
+};
+
 typedef	struct pte pte_t;
 typedef	struct lpte lpte_t;
 #endif	/* LOCORE */
@@ -105,6 +111,7 @@ typedef	struct lpte lpte_t;
 /* High quadword: */
 #define LPTE_VSID_SHIFT		12
 #define LPTE_AVPN_MASK		0xFFFFFFFFFFFFFF80ULL
+#define LPTE_AVA_MASK		0x3FFFFFFFFFFFFF80ULL
 #define LPTE_API		0x0000000000000F80ULL
 #define LPTE_SWBITS		0x0000000000000078ULL
 #define LPTE_WIRED		0x0000000000000010ULL
@@ -114,8 +121,13 @@ typedef	struct lpte lpte_t;
 #define LPTE_VALID		0x0000000000000001ULL
 
 /* Low quadword: */
+#define	LP_4K_16M	0x38	/* 4KB base, 16MB actual page size */
+
 #define EXTEND_PTE(x)	UINT64_C(x)	/* make constants 64-bit */
 #define	LPTE_RPGN	0xfffffffffffff000ULL
+#define	LPTE_LP_MASK	0x00000000000ff000ULL
+#define	LPTE_LP_SHIFT	12
+#define	LPTE_LP_4K_16M	((unsigned long long)(LP_4K_16M) << LPTE_LP_SHIFT)
 #define	LPTE_REF	EXTEND_PTE( PTE_REF )
 #define	LPTE_CHG	EXTEND_PTE( PTE_CHG )
 #define	LPTE_WIMG	EXTEND_PTE( PTE_WIMG )
@@ -133,6 +145,12 @@ typedef	struct lpte lpte_t;
 #define	LPTE_RW		LPTE_BW
 #define	LPTE_RO		LPTE_BR
 
+/* HPT superpage definitions */
+#define	HPT_SP_SHIFT		(VM_LEVEL_0_ORDER + PAGE_SHIFT)
+#define	HPT_SP_SIZE		(1 << HPT_SP_SHIFT)
+#define	HPT_SP_MASK		(HPT_SP_SIZE - 1)
+#define	HPT_SP_PAGES		(1 << VM_LEVEL_0_ORDER)
+
 /* POWER ISA 3.0 Radix Table Definitions */
 #define	RPTE_VALID		0x8000000000000000ULL
 #define	RPTE_LEAF		0x4000000000000000ULL /* is a PTE: always 1 */
@@ -144,6 +162,10 @@ typedef	struct lpte lpte_t;
 #define	RPTE_SW3		0x0000000000000200ULL
 #define	RPTE_R			0x0000000000000100ULL
 #define	RPTE_C			0x0000000000000080ULL
+
+#define	RPTE_MANAGED		RPTE_SW1
+#define	RPTE_WIRED		RPTE_SW2
+#define	RPTE_PROMOTED		RPTE_SW3
 
 #define	RPTE_ATTR_MASK		0x0000000000000030ULL
 #define	RPTE_ATTR_MEM		0x0000000000000000ULL /* PTE M */
@@ -159,10 +181,12 @@ typedef	struct lpte lpte_t;
 
 #define	RPDE_VALID		RPTE_VALID
 #define	RPDE_LEAF		RPTE_LEAF             /* is a PTE: always 0 */
-#define	RPDE_NLB_MASK		0x0FFFFFFFFFFFFF00ULL
+#define	RPDE_NLB_MASK		0x00FFFFFFFFFFFF00ULL
 #define	RPDE_NLB_SHIFT		8
 #define	RPDE_NLS_MASK		0x000000000000001FULL
 
+#define	PG_FRAME		(0x000ffffffffff000ul)
+#define	PG_PS_FRAME		(0x000fffffffe00000ul)
 /*
  * Extract bits from address
  */

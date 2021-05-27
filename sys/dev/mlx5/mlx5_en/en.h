@@ -149,7 +149,7 @@ MALLOC_DECLARE(M_MLX5EN);
 struct mlx5_core_dev;
 struct mlx5e_cq;
 
-typedef void (mlx5e_cq_comp_t)(struct mlx5_core_cq *);
+typedef void (mlx5e_cq_comp_t)(struct mlx5_core_cq *, struct mlx5_eqe *);
 
 #define	mlx5_en_err(_dev, format, ...)				\
 	if_printf(_dev, "ERR: ""%s:%d:(pid %d): " format, \
@@ -791,11 +791,6 @@ enum {
 	MLX5E_SQ_FULL
 };
 
-struct mlx5e_snd_tag {
-	struct m_snd_tag m_snd_tag;	/* send tag */
-	u32	type;	/* tag type */
-};
-
 struct mlx5e_sq {
 	/* persistant fields */
 	struct	mtx lock;
@@ -876,7 +871,7 @@ mlx5e_sq_queue_level(struct mlx5e_sq *sq)
 
 struct mlx5e_channel {
 	struct mlx5e_rq rq;
-	struct mlx5e_snd_tag tag;
+	struct m_snd_tag tag;
 	struct mlx5e_sq sq[MLX5E_MAX_TX_NUM_TC];
 	struct mlx5e_priv *priv;
 	struct completion completion;
@@ -1105,15 +1100,15 @@ struct mlx5e_eeprom {
 #define	MLX5E_FLD_MAX(typ, fld) ((1ULL << __mlx5_bit_sz(typ, fld)) - 1ULL)
 
 bool	mlx5e_do_send_cqe(struct mlx5e_sq *);
-int	mlx5e_get_full_header_size(struct mbuf *, struct tcphdr **);
+int	mlx5e_get_full_header_size(const struct mbuf *, const struct tcphdr **);
 int	mlx5e_xmit(struct ifnet *, struct mbuf *);
 
 int	mlx5e_open_locked(struct ifnet *);
 int	mlx5e_close_locked(struct ifnet *);
 
 void	mlx5e_cq_error_event(struct mlx5_core_cq *mcq, int event);
-void	mlx5e_rx_cq_comp(struct mlx5_core_cq *);
-void	mlx5e_tx_cq_comp(struct mlx5_core_cq *);
+mlx5e_cq_comp_t mlx5e_rx_cq_comp;
+mlx5e_cq_comp_t mlx5e_tx_cq_comp;
 struct mlx5_cqe64 *mlx5e_get_cqe(struct mlx5e_cq *cq);
 
 void	mlx5e_dim_work(struct work_struct *);

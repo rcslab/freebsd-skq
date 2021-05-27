@@ -40,10 +40,6 @@
 #include <machine/cputypes.h>
 #include <machine/md_var.h>
 #include <machine/specialreg.h>
-#endif
-#if defined(__i386__)
-#include <machine/npx.h>
-#elif defined(__amd64__)
 #include <machine/fpu.h>
 #endif
 
@@ -63,7 +59,7 @@ struct aesni_session {
 	int mlen;
 	int hash_len;
 	void (*hash_init)(void *);
-	void (*hash_update)(void *, const void *, unsigned);
+	int (*hash_update)(void *, const void *, u_int);
 	void (*hash_finalize)(void *, void *);
 	bool hmac;
 };

@@ -199,12 +199,14 @@ static struct bool_flags pr_flag_allow[NBBY * NBPW] = {
 	{"allow.read_msgbuf", "allow.noread_msgbuf", PR_ALLOW_READ_MSGBUF},
 	{"allow.unprivileged_proc_debug", "allow.nounprivileged_proc_debug",
 	 PR_ALLOW_UNPRIV_DEBUG},
+	{"allow.suser", "allow.nosuser", PR_ALLOW_SUSER},
 };
 const size_t pr_flag_allow_size = sizeof(pr_flag_allow);
 
 #define	JAIL_DEFAULT_ALLOW		(PR_ALLOW_SET_HOSTNAME | \
 					 PR_ALLOW_RESERVED_PORTS | \
-					 PR_ALLOW_UNPRIV_DEBUG)
+					 PR_ALLOW_UNPRIV_DEBUG | \
+					 PR_ALLOW_SUSER)
 #define	JAIL_DEFAULT_ENFORCE_STATFS	2
 #define	JAIL_DEFAULT_DEVFS_RSNUM	0
 static unsigned jail_default_allow = JAIL_DEFAULT_ALLOW;
@@ -3049,6 +3051,7 @@ prison_priv_check(struct ucred *cred, int priv)
 	 * called for them. See priv_check_cred().
 	 */
 	switch (priv) {
+	case PRIV_VFS_LOOKUP:
 	case PRIV_VFS_GENERATION:
 		KASSERT(0, ("prison_priv_check instead of a custom handler "
 		    "called for %d\n", priv));
@@ -3107,10 +3110,8 @@ prison_priv_check(struct ucred *cred, int priv)
 		/*
 		 * 802.11-related privileges.
 		 */
-	case PRIV_NET80211_GETKEY:
-#ifdef notyet
-	case PRIV_NET80211_MANAGE:		/* XXX-BZ discuss with sam@ */
-#endif
+	case PRIV_NET80211_VAP_GETKEY:
+	case PRIV_NET80211_VAP_MANAGE:
 
 #ifdef notyet
 		/*
@@ -3174,7 +3175,6 @@ prison_priv_check(struct ucred *cred, int priv)
 #endif /* VIMAGE */
 
 	switch (priv) {
-
 		/*
 		 * Allow ktrace privileges for root in jail.
 		 */
@@ -3279,7 +3279,6 @@ prison_priv_check(struct ucred *cred, int priv)
 	case PRIV_VFS_WRITE:
 	case PRIV_VFS_ADMIN:
 	case PRIV_VFS_EXEC:
-	case PRIV_VFS_LOOKUP:
 	case PRIV_VFS_BLOCKRESERVE:	/* XXXRW: Slightly surprising. */
 	case PRIV_VFS_CHFLAGS_DEV:
 	case PRIV_VFS_CHOWN:
@@ -3322,6 +3321,14 @@ prison_priv_check(struct ucred *cred, int priv)
 			return (0);
 		else
 			return (EPERM);
+
+		/*
+		 * Jails should hold no disposition on the PRIV_VFS_READ_DIR
+		 * policy.  priv_check_cred will not specifically allow it, and
+		 * we may want a MAC policy to allow it.
+		 */
+	case PRIV_VFS_READ_DIR:
+		return (0);
 
 		/*
 		 * Conditionnaly allow locking (unlocking) physical pages
@@ -3734,9 +3741,9 @@ SYSCTL_JAIL_PARAM_STRING(, name, CTLFLAG_RW, MAXHOSTNAMELEN, "Jail name");
 SYSCTL_JAIL_PARAM_STRING(, path, CTLFLAG_RDTUN, MAXPATHLEN, "Jail root path");
 SYSCTL_JAIL_PARAM(, securelevel, CTLTYPE_INT | CTLFLAG_RW,
     "I", "Jail secure level");
-SYSCTL_JAIL_PARAM(, osreldate, CTLTYPE_INT | CTLFLAG_RDTUN, "I", 
+SYSCTL_JAIL_PARAM(, osreldate, CTLTYPE_INT | CTLFLAG_RDTUN, "I",
     "Jail value for kern.osreldate and uname -K");
-SYSCTL_JAIL_PARAM_STRING(, osrelease, CTLFLAG_RDTUN, OSRELEASELEN, 
+SYSCTL_JAIL_PARAM_STRING(, osrelease, CTLFLAG_RDTUN, OSRELEASELEN,
     "Jail value for kern.osrelease and uname -r");
 SYSCTL_JAIL_PARAM(, enforce_statfs, CTLTYPE_INT | CTLFLAG_RW,
     "I", "Jail cannot see all mounted file systems");
@@ -3810,6 +3817,8 @@ SYSCTL_JAIL_PARAM(_allow, read_msgbuf, CTLTYPE_INT | CTLFLAG_RW,
     "B", "Jail may read the kernel message buffer");
 SYSCTL_JAIL_PARAM(_allow, unprivileged_proc_debug, CTLTYPE_INT | CTLFLAG_RW,
     "B", "Unprivileged processes may use process debugging facilities");
+SYSCTL_JAIL_PARAM(_allow, suser, CTLTYPE_INT | CTLFLAG_RW,
+    "B", "Processes in jail with uid 0 have privilege");
 
 SYSCTL_JAIL_PARAM_SUBNODE(allow, mount, "Jail mount/unmount permission flags");
 SYSCTL_JAIL_PARAM(_allow_mount, , CTLTYPE_INT | CTLFLAG_RW,

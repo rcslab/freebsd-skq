@@ -140,7 +140,7 @@ void	 audit_arg_argv(char *argv, int argc, int length);
 void	 audit_arg_envv(char *envv, int envc, int length);
 void	 audit_arg_rights(cap_rights_t *rightsp);
 void	 audit_arg_fcntl_rights(uint32_t fcntlrights);
-void	 audit_sysclose(struct thread *td, int fd);
+void	 audit_sysclose(struct thread *td, int fd, struct file *fp);
 void	 audit_cred_copy(struct ucred *src, struct ucred *dest);
 void	 audit_cred_destroy(struct ucred *cred);
 void	 audit_cred_init(struct ucred *cred);
@@ -467,6 +467,8 @@ void	 audit_thread_free(struct thread *td);
 #define	AUDIT_ARG_VALUE(value)
 #define	AUDIT_ARG_VNODE1(vp)
 #define	AUDIT_ARG_VNODE2(vp)
+
+#define	AUDITING_TD(td)		0
 
 #define	AUDIT_SYSCALL_ENTER(code, td)	0
 #define	AUDIT_SYSCALL_EXIT(error, td)

@@ -1546,7 +1546,7 @@ hifn_write_command(struct hifn_command *cmd, u_int8_t *buf)
 	hifn_base_command_t *base_cmd;
 	hifn_mac_command_t *mac_cmd;
 	hifn_crypt_command_t *cry_cmd;
-	int using_mac, using_crypt, len, ivlen;
+	int using_mac, using_crypt, ivlen;
 	u_int32_t dlen, slen;
 
 	crp = cmd->crp;
@@ -1604,27 +1604,6 @@ hifn_write_command(struct hifn_command *cmd, u_int8_t *buf)
 
 	if (using_crypt && cmd->cry_masks & HIFN_CRYPT_CMD_NEW_KEY) {
 		switch (cmd->cry_masks & HIFN_CRYPT_CMD_ALG_MASK) {
-		case HIFN_CRYPT_CMD_ALG_3DES:
-			bcopy(cmd->ck, buf_pos, HIFN_3DES_KEY_LENGTH);
-			buf_pos += HIFN_3DES_KEY_LENGTH;
-			break;
-		case HIFN_CRYPT_CMD_ALG_DES:
-			bcopy(cmd->ck, buf_pos, HIFN_DES_KEY_LENGTH);
-			buf_pos += HIFN_DES_KEY_LENGTH;
-			break;
-		case HIFN_CRYPT_CMD_ALG_RC4:
-			len = 256;
-			do {
-				int clen;
-
-				clen = MIN(cmd->cklen, len);
-				bcopy(cmd->ck, buf_pos, clen);
-				len -= clen;
-				buf_pos += clen;
-			} while (len > 0);
-			bzero(buf_pos, 4);
-			buf_pos += 4;
-			break;
 		case HIFN_CRYPT_CMD_ALG_AES:
 			/*
 			 * AES keys are variable 128, 192 and
@@ -1781,22 +1760,6 @@ hifn_dmamap_load_src(struct hifn_softc *sc, struct hifn_command *cmd)
 	return (idx);
 } 
 
-static bus_size_t
-hifn_crp_length(struct cryptop *crp)
-{
-
-	switch (crp->crp_buf_type) {
-	case CRYPTO_BUF_MBUF:
-		return (crp->crp_mbuf->m_pkthdr.len);
-	case CRYPTO_BUF_UIO:
-		return (crp->crp_uio->uio_resid);
-	case CRYPTO_BUF_CONTIG:
-		return (crp->crp_ilen);
-	default:
-		panic("bad crp buffer type");
-	}
-}
-
 static void
 hifn_op_cb(void* arg, bus_dma_segment_t *seg, int nsegs, int error)
 {
@@ -1852,12 +1815,12 @@ hifn_crypto(
 		err = ENOMEM;
 		goto err_srcmap1;
 	}
-	cmd->src_mapsize = hifn_crp_length(crp);
+	cmd->src_mapsize = crypto_buffer_len(&crp->crp_buf);
 
 	if (hifn_dmamap_aligned(&cmd->src)) {
 		cmd->sloplen = cmd->src_mapsize & 3;
 		cmd->dst = cmd->src;
-	} else if (crp->crp_buf_type == CRYPTO_BUF_MBUF) {
+	} else if (crp->crp_buf.cb_type == CRYPTO_BUF_MBUF) {
 		int totlen, len;
 		struct mbuf *m, *m0, *mlast;
 
@@ -1875,10 +1838,11 @@ hifn_crypto(
 		 * have no guarantee that we'll be re-entered.
 		 */
 		totlen = cmd->src_mapsize;
-		if (crp->crp_mbuf->m_flags & M_PKTHDR) {
+		if (crp->crp_buf.cb_mbuf->m_flags & M_PKTHDR) {
 			len = MHLEN;
 			MGETHDR(m0, M_NOWAIT, MT_DATA);
-			if (m0 && !m_dup_pkthdr(m0, crp->crp_mbuf, M_NOWAIT)) {
+			if (m0 && !m_dup_pkthdr(m0, crp->crp_buf.cb_mbuf,
+			    M_NOWAIT)) {
 				m_free(m0);
 				m0 = NULL;
 			}
@@ -2105,7 +2069,7 @@ err_dstmap1:
 	if (cmd->src_map != cmd->dst_map)
 		bus_dmamap_destroy(sc->sc_dmat, cmd->dst_map);
 err_srcmap:
-	if (crp->crp_buf_type == CRYPTO_BUF_MBUF) {
+	if (crp->crp_buf.cb_type == CRYPTO_BUF_MBUF) {
 		if (cmd->dst_m != NULL)
 			m_freem(cmd->dst_m);
 	}
@@ -2315,10 +2279,8 @@ hifn_auth_supported(struct hifn_softc *sc,
 	}
 		
 	switch (csp->csp_auth_alg) {
-	case CRYPTO_MD5:
 	case CRYPTO_SHA1:
 		break;
-	case CRYPTO_MD5_HMAC:
 	case CRYPTO_SHA1_HMAC:
 		if (csp->csp_auth_klen > HIFN_MAC_KEY_LENGTH)
 			return (false);
@@ -2342,9 +2304,6 @@ hifn_cipher_supported(struct hifn_softc *sc,
 	switch (sc->sc_ena) {
 	case HIFN_PUSTAT_ENA_2:
 		switch (csp->csp_cipher_alg) {
-		case CRYPTO_3DES_CBC:
-		case CRYPTO_ARC4:
-			break;
 		case CRYPTO_AES_CBC:
 			if ((sc->sc_flags & HIFN_HAS_AES) == 0)
 				return (false);
@@ -2358,13 +2317,6 @@ hifn_cipher_supported(struct hifn_softc *sc,
 			}
 			return (true);
 		}
-		/*FALLTHROUGH*/
-	case HIFN_PUSTAT_ENA_1:
-		switch (csp->csp_cipher_alg) {
-		case CRYPTO_DES_CBC:
-			return (true);
-		}
-		break;
 	}
 	return (false);
 }
@@ -2463,19 +2415,6 @@ hifn_process(device_t dev, struct cryptop *crp, int hint)
 			cmd->base_masks |= HIFN_BASE_CMD_DECODE;
 		cmd->base_masks |= HIFN_BASE_CMD_CRYPT;
 		switch (csp->csp_cipher_alg) {
-		case CRYPTO_ARC4:
-			cmd->cry_masks |= HIFN_CRYPT_CMD_ALG_RC4;
-			break;
-		case CRYPTO_DES_CBC:
-			cmd->cry_masks |= HIFN_CRYPT_CMD_ALG_DES |
-			    HIFN_CRYPT_CMD_MODE_CBC |
-			    HIFN_CRYPT_CMD_NEW_IV;
-			break;
-		case CRYPTO_3DES_CBC:
-			cmd->cry_masks |= HIFN_CRYPT_CMD_ALG_3DES |
-			    HIFN_CRYPT_CMD_MODE_CBC |
-			    HIFN_CRYPT_CMD_NEW_IV;
-			break;
 		case CRYPTO_AES_CBC:
 			cmd->cry_masks |= HIFN_CRYPT_CMD_ALG_AES |
 			    HIFN_CRYPT_CMD_MODE_CBC |
@@ -2485,8 +2424,7 @@ hifn_process(device_t dev, struct cryptop *crp, int hint)
 			err = EINVAL;
 			goto errout;
 		}
-		if (csp->csp_cipher_alg != CRYPTO_ARC4)
-			crypto_read_iv(crp, cmd->iv);
+		crypto_read_iv(crp, cmd->iv);
 
 		if (crp->crp_cipher_key != NULL)
 			cmd->ck = crp->crp_cipher_key;
@@ -2524,16 +2462,6 @@ hifn_process(device_t dev, struct cryptop *crp, int hint)
 		cmd->base_masks |= HIFN_BASE_CMD_MAC;
 
 		switch (csp->csp_auth_alg) {
-		case CRYPTO_MD5:
-			cmd->mac_masks |= HIFN_MAC_CMD_ALG_MD5 |
-			    HIFN_MAC_CMD_RESULT | HIFN_MAC_CMD_MODE_HASH |
-			    HIFN_MAC_CMD_POS_IPSEC;
-                       break;
-		case CRYPTO_MD5_HMAC:
-			cmd->mac_masks |= HIFN_MAC_CMD_ALG_MD5 |
-			    HIFN_MAC_CMD_RESULT | HIFN_MAC_CMD_MODE_HMAC |
-			    HIFN_MAC_CMD_POS_IPSEC | HIFN_MAC_CMD_TRUNC;
-			break;
 		case CRYPTO_SHA1:
 			cmd->mac_masks |= HIFN_MAC_CMD_ALG_SHA1 |
 			    HIFN_MAC_CMD_RESULT | HIFN_MAC_CMD_MODE_HASH |
@@ -2546,8 +2474,7 @@ hifn_process(device_t dev, struct cryptop *crp, int hint)
 			break;
 		}
 
-		if (csp->csp_auth_alg == CRYPTO_SHA1_HMAC ||
-		    csp->csp_auth_alg == CRYPTO_MD5_HMAC) {
+		if (csp->csp_auth_alg == CRYPTO_SHA1_HMAC) {
 			cmd->mac_masks |= HIFN_MAC_CMD_NEW_KEY;
 			if (crp->crp_auth_key != NULL)
 				mackey = crp->crp_auth_key;
@@ -2590,7 +2517,7 @@ errout:
 		hifnstats.hst_nomem++;
 	crp->crp_etype = err;
 	crypto_done(crp);
-	return (err);
+	return (0);
 }
 
 static void
@@ -2684,7 +2611,7 @@ hifn_callback(struct hifn_softc *sc, struct hifn_command *cmd, u_int8_t *macbuf)
 		    BUS_DMASYNC_POSTREAD);
 	}
 
-	if (crp->crp_buf_type == CRYPTO_BUF_MBUF) {
+	if (crp->crp_buf.cb_type == CRYPTO_BUF_MBUF) {
 		if (cmd->dst_m != NULL) {
 			totlen = cmd->src_mapsize;
 			for (m = cmd->dst_m; m != NULL; m = m->m_next) {
@@ -2694,9 +2621,10 @@ hifn_callback(struct hifn_softc *sc, struct hifn_command *cmd, u_int8_t *macbuf)
 				} else
 					totlen -= m->m_len;
 			}
-			cmd->dst_m->m_pkthdr.len = crp->crp_mbuf->m_pkthdr.len;
-			m_freem(crp->crp_mbuf);
-			crp->crp_mbuf = cmd->dst_m;
+			cmd->dst_m->m_pkthdr.len =
+			    crp->crp_buf.cb_mbuf->m_pkthdr.len;
+			m_freem(crp->crp_buf.cb_mbuf);
+			crp->crp_buf.cb_mbuf = cmd->dst_m;
 		}
 	}
 

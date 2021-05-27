@@ -36,6 +36,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/select.h>
 #include <sys/uio.h>
 #include <sys/ioctl.h>
+#include <machine/vmm_snapshot.h>
 #include <net/ethernet.h>
 #include <net/if.h> /* IFNAMSIZ */
 
@@ -110,6 +111,8 @@ struct pci_vtnet_softc {
 
 	net_backend_t	*vsc_be;
 
+	bool    features_negotiated;	/* protected by rx_mtx */
+
 	int		resetting;	/* protected by tx_mtx */
 
 	uint64_t	vsc_features;	/* negotiated features */
@@ -134,6 +137,11 @@ static void pci_vtnet_reset(void *);
 static int pci_vtnet_cfgread(void *, int, int, uint32_t *);
 static int pci_vtnet_cfgwrite(void *, int, int, uint32_t);
 static void pci_vtnet_neg_features(void *, uint64_t);
+#ifdef BHYVE_SNAPSHOT
+static void pci_vtnet_pause(void *);
+static void pci_vtnet_resume(void *);
+static int pci_vtnet_snapshot(void *, struct vm_snapshot_meta *);
+#endif
 
 static struct virtio_consts vtnet_vi_consts = {
 	"vtnet",		/* our name */
@@ -145,6 +153,11 @@ static struct virtio_consts vtnet_vi_consts = {
 	pci_vtnet_cfgwrite,	/* write PCI config */
 	pci_vtnet_neg_features,	/* apply negotiated features */
 	VTNET_S_HOSTCAPS,	/* our capabilities */
+#ifdef BHYVE_SNAPSHOT
+	pci_vtnet_pause,	/* pause rx/tx threads */
+	pci_vtnet_resume,	/* resume rx/tx threads */
+	pci_vtnet_snapshot,	/* save / restore device state */
+#endif
 };
 
 static void
@@ -165,6 +178,7 @@ pci_vtnet_reset(void *vsc)
 	 * Receive operation will be enabled again once the guest adds
 	 * the first receive buffers and kicks us.
 	 */
+	sc->features_negotiated = false;
 	netbe_rx_disable(sc->vsc_be);
 
 	/* Set sc->resetting and give a chance to the TX thread to stop. */
@@ -235,6 +249,12 @@ pci_vtnet_rx(struct pci_vtnet_softc *sc)
 	struct vqueue_info *vq;
 
 	vq = &sc->vsc_queues[VTNET_RXQ];
+
+	/* Features must be negotiated */
+	if (!sc->features_negotiated) {
+		return;
+	}
+
 	for (;;) {
 		struct virtio_net_rxhdr *hdr;
 		uint32_t riov_bytes;
@@ -395,8 +415,14 @@ pci_vtnet_ping_rxq(void *vsc, struct vqueue_info *vq)
 
 	/*
 	 * A qnotify means that the rx process can now begin.
+	 * Enable RX only if features are negotiated.
 	 */
 	pthread_mutex_lock(&sc->rx_mtx);
+	if (!sc->features_negotiated) {
+		pthread_mutex_unlock(&sc->rx_mtx);
+		return;
+	}
+
 	vq_kick_disable(vq);
 	netbe_rx_enable(sc->vsc_be);
 	pthread_mutex_unlock(&sc->rx_mtx);
@@ -566,12 +592,12 @@ pci_vtnet_init(struct vmctx *ctx, struct pci_devinst *pi, char *opts)
 	mac_provided = 0;
 	mtu_provided = 0;
 	if (opts != NULL) {
-		char *devname;
+		char *optscopy;
 		char *vtopts;
 		int err = 0;
 
 		/* Get the device name. */
-		devname = vtopts = strdup(opts);
+		optscopy = vtopts = strdup(opts);
 		(void) strsep(&vtopts, ",");
 
 		/*
@@ -607,15 +633,16 @@ pci_vtnet_init(struct vmctx *ctx, struct pci_devinst *pi, char *opts)
 			}
 		}
 
+		free(optscopy);
+
 		if (err) {
-			free(devname);
 			free(sc);
 			return (err);
 		}
 
-		err = netbe_init(&sc->vsc_be, devname, pci_vtnet_rx_callback,
+		err = netbe_init(&sc->vsc_be, opts, pci_vtnet_rx_callback,
 		          sc);
-		free(devname);
+
 		if (err) {
 			free(sc);
 			return (err);
@@ -738,12 +765,86 @@ pci_vtnet_neg_features(void *vsc, uint64_t negotiated_features)
 	netbe_set_cap(sc->vsc_be, negotiated_features, sc->vhdrlen);
 	sc->be_vhdrlen = netbe_get_vnet_hdr_len(sc->vsc_be);
 	assert(sc->be_vhdrlen == 0 || sc->be_vhdrlen == sc->vhdrlen);
+
+	pthread_mutex_lock(&sc->rx_mtx);
+	sc->features_negotiated = true;
+	pthread_mutex_unlock(&sc->rx_mtx);
 }
+
+#ifdef BHYVE_SNAPSHOT
+static void
+pci_vtnet_pause(void *vsc)
+{
+	struct pci_vtnet_softc *sc = vsc;
+
+	DPRINTF(("vtnet: device pause requested !\n"));
+
+	/* Acquire the RX lock to block RX processing. */
+	pthread_mutex_lock(&sc->rx_mtx);
+
+	/* Wait for the transmit thread to finish its processing. */
+	pthread_mutex_lock(&sc->tx_mtx);
+	while (sc->tx_in_progress) {
+		pthread_mutex_unlock(&sc->tx_mtx);
+		usleep(10000);
+		pthread_mutex_lock(&sc->tx_mtx);
+	}
+}
+
+static void
+pci_vtnet_resume(void *vsc)
+{
+	struct pci_vtnet_softc *sc = vsc;
+
+	DPRINTF(("vtnet: device resume requested !\n"));
+
+	pthread_mutex_unlock(&sc->tx_mtx);
+	/* The RX lock should have been acquired in vtnet_pause. */
+	pthread_mutex_unlock(&sc->rx_mtx);
+}
+
+static int
+pci_vtnet_snapshot(void *vsc, struct vm_snapshot_meta *meta)
+{
+	int ret;
+	struct pci_vtnet_softc *sc = vsc;
+
+	DPRINTF(("vtnet: device snapshot requested !\n"));
+
+	/*
+	 * Queues and consts should have been saved by the more generic
+	 * vi_pci_snapshot function. We need to save only our features and
+	 * config.
+	 */
+
+	SNAPSHOT_VAR_OR_LEAVE(sc->vsc_features, meta, ret, done);
+
+	/* Force reapply negociated features at restore time */
+	if (meta->op == VM_SNAPSHOT_RESTORE) {
+		pci_vtnet_neg_features(sc, sc->vsc_features);
+		netbe_rx_enable(sc->vsc_be);
+	}
+
+	SNAPSHOT_VAR_OR_LEAVE(sc->vsc_config, meta, ret, done);
+	SNAPSHOT_VAR_OR_LEAVE(sc->rx_merge, meta, ret, done);
+
+	SNAPSHOT_VAR_OR_LEAVE(sc->vhdrlen, meta, ret, done);
+	SNAPSHOT_VAR_OR_LEAVE(sc->be_vhdrlen, meta, ret, done);
+
+done:
+	return (ret);
+}
+#endif
 
 static struct pci_devemu pci_de_vnet = {
 	.pe_emu = 	"virtio-net",
 	.pe_init =	pci_vtnet_init,
 	.pe_barwrite =	vi_pci_write,
-	.pe_barread =	vi_pci_read
+	.pe_barread =	vi_pci_read,
+#ifdef BHYVE_SNAPSHOT
+	.pe_snapshot =	vi_pci_snapshot,
+	.pe_pause =	vi_pci_pause,
+	.pe_resume =	vi_pci_resume,
+#endif
 };
 PCI_EMUL_SET(pci_de_vnet);

@@ -8,15 +8,12 @@ CELL
 
 POWERPC
 POWERPC64
+POWERPC64LE
 POWERPCSPE
 
 FPU_EMU
 
 COMPAT_FREEBSD32	opt_global.h
-
-GFB_DEBUG		opt_gfb.h
-GFB_NO_FONT_LOADING	opt_gfb.h
-GFB_NO_MODE_CHANGE	opt_gfb.h
 
 MOEA64_STATS		opt_pmap.h
 AMIGAONE		opt_platform.h
@@ -28,6 +25,7 @@ MAMBO
 POWERNV			opt_platform.h
 PSERIES
 PSIM
+QEMU			opt_platform.h
 
 SC_OFWFB		opt_ofwfb.h
 

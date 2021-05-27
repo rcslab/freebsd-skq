@@ -115,6 +115,7 @@ __FBSDID("$FreeBSD$");
 
 #include <vm/vm.h>
 #include <vm/pmap.h>
+#include <vm/vm_extern.h>
 #include <vm/vm_page.h>
 #include <vm/vm_object.h>
 #include <vm/vm_pager.h>
@@ -359,7 +360,7 @@ booke_init(u_long arg1, u_long arg2)
 	 *      string 0x45504150 ('EPAP') in r6 (which has been lost by now).
 	 *      r4 (arg2) is supposed to be set to zero, but is not always.
 	 */
-	
+
 	if (arg1 == 0)				/* Juniper loader */
 		mdp = (void *)arg2;
 	else if (booke_check_for_fdt(arg1, &dtbp) == 0) { /* ePAPR */
@@ -470,4 +471,3 @@ kdb_cpu_set_singlestep(void)
 	mtspr(SPR_DBCR0, r | DBCR0_IC | DBCR0_IDM);
 	kdb_frame->srr1 |= PSL_DE;
 }
-

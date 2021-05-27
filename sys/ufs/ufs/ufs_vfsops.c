@@ -108,7 +108,6 @@ ufs_quotactl(mp, cmds, id, arg)
 	type = cmds & SUBCMDMASK;
 	if (id == -1) {
 		switch (type) {
-
 		case USRQUOTA:
 			id = td->td_ucred->cr_ruid;
 			break;
@@ -241,6 +240,8 @@ ufs_fhtovp(mp, ufhp, flags, vpp)
 	ip = VTOI(nvp);
 	if (ip->i_mode == 0 || ip->i_gen != ufhp->ufid_gen ||
 	    ip->i_effnlink <= 0) {
+		if (ip->i_mode == 0)
+			vgone(nvp);
 		vput(nvp);
 		*vpp = NULLVP;
 		return (ESTALE);

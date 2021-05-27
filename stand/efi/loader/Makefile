@@ -27,12 +27,10 @@ SRCS=	autoload.c \
 CFLAGS+=	-I${.CURDIR}/../loader
 .if ${MK_LOADER_ZFS} != "no"
 CFLAGS+=	-I${ZFSSRC}
+CFLAGS+=        -I${SYSDIR}/contrib/openzfs/include
+CFLAGS+=        -I${SYSDIR}/contrib/openzfs/include/os/freebsd/zfs
 CFLAGS+=	-DEFI_ZFS_BOOT
 HAVE_ZFS=	yes
-.endif
-
-.if ${COMPILER_TYPE} == "gcc" && ${COMPILER_VERSION} > 40201
-CWARNFLAGS.self_reloc.c+=	-Wno-error=maybe-uninitialized
 .endif
 
 # We implement a slightly non-standard %S in that it always takes a
@@ -84,7 +82,7 @@ LINKS+=		${BINDIR}/${LOADER}.efi ${BINDIR}/loader.efi
 .endif
 
 LDSCRIPT=	${.CURDIR}/../loader/arch/${MACHINE}/ldscript.${MACHINE}
-LDFLAGS+=	-Wl,-T${LDSCRIPT},-Bsymbolic,-znotext -shared
+LDFLAGS+=	-Wl,-T${LDSCRIPT},-Bsymbolic,-znotext -pie
 
 CLEANFILES+=	loader.efi
 

@@ -40,6 +40,7 @@ __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
 #include <sys/systm.h>
+#include <sys/boot.h>
 #include <sys/buf.h>
 #include <sys/bus.h>
 #include <sys/cons.h>
@@ -122,10 +123,14 @@ int64_t dcache_line_size;	/* The minimum D cache line size */
 int64_t icache_line_size;	/* The minimum I cache line size */
 int64_t idcache_line_size;	/* The minimum cache line size */
 
-uint32_t boot_hart;	/* The hart we booted on. */
+#define BOOT_HART_INVALID	0xffffffff
+uint32_t boot_hart = BOOT_HART_INVALID;	/* The hart we booted on. */
+
 cpuset_t all_harts;
 
 extern int *end;
+
+static char static_kenv[PAGE_SIZE];
 
 static void
 cpu_startup(void *dummy)
@@ -416,7 +421,7 @@ get_fpcontext(struct thread *td, mcontext_t *mcp)
 		KASSERT((curpcb->pcb_fpflags & ~PCB_FP_USERMASK) == 0,
 		    ("Non-userspace FPE flags set in get_fpcontext"));
 		memcpy(mcp->mc_fpregs.fp_x, curpcb->pcb_x,
-		    sizeof(mcp->mc_fpregs));
+		    sizeof(mcp->mc_fpregs.fp_x));
 		mcp->mc_fpregs.fp_fcsr = curpcb->pcb_fcsr;
 		mcp->mc_fpregs.fp_flags = curpcb->pcb_fpflags;
 		mcp->mc_flags |= _MC_FP_VALID;
@@ -443,7 +448,7 @@ set_fpcontext(struct thread *td, mcontext_t *mcp)
 		curpcb = curthread->td_pcb;
 		/* FPE usage is enabled, override registers. */
 		memcpy(curpcb->pcb_x, mcp->mc_fpregs.fp_x,
-		    sizeof(mcp->mc_fpregs));
+		    sizeof(mcp->mc_fpregs.fp_x));
 		curpcb->pcb_fcsr = mcp->mc_fpregs.fp_fcsr;
 		curpcb->pcb_fpflags = mcp->mc_fpregs.fp_flags & PCB_FP_USERMASK;
 		td->td_frame->tf_sstatus |= SSTATUS_FS_CLEAN;
@@ -473,9 +478,16 @@ void
 cpu_halt(void)
 {
 
+	/*
+	 * Try to power down using the HSM SBI extension and fall back to a
+	 * simple wfi loop.
+	 */
 	intr_disable();
+	if (sbi_probe_extension(SBI_EXT_ID_HSM) != 0)
+		sbi_hsm_hart_stop();
 	for (;;)
 		__asm __volatile("wfi");
+	/* NOTREACHED */
 }
 
 /*
@@ -716,74 +728,128 @@ cache_setup(void)
 
 /*
  * Fake up a boot descriptor table.
- * RISCVTODO: This needs to be done via loader (when it's available).
  */
-vm_offset_t
+static void
 fake_preload_metadata(struct riscv_bootparams *rvbp)
 {
-	static uint32_t fake_preload[35];
-#ifdef DDB
-	vm_offset_t zstart = 0, zend = 0;
-#endif
+	static uint32_t fake_preload[48];
 	vm_offset_t lastaddr;
-	size_t dtb_size;
-	int i;
+	size_t fake_size, dtb_size;
 
-	i = 0;
+#define PRELOAD_PUSH_VALUE(type, value) do {			\
+	*(type *)((char *)fake_preload + fake_size) = (value);	\
+	fake_size += sizeof(type);				\
+} while (0)
 
-	fake_preload[i++] = MODINFO_NAME;
-	fake_preload[i++] = strlen("kernel") + 1;
-	strcpy((char*)&fake_preload[i++], "kernel");
-	i += 1;
-	fake_preload[i++] = MODINFO_TYPE;
-	fake_preload[i++] = strlen("elf64 kernel") + 1;
-	strcpy((char*)&fake_preload[i++], "elf64 kernel");
-	i += 3;
-	fake_preload[i++] = MODINFO_ADDR;
-	fake_preload[i++] = sizeof(vm_offset_t);
-	*(vm_offset_t *)&fake_preload[i++] =
-	    (vm_offset_t)(KERNBASE + KERNENTRY);
-	i += 1;
-	fake_preload[i++] = MODINFO_SIZE;
-	fake_preload[i++] = sizeof(vm_offset_t);
-	fake_preload[i++] = (vm_offset_t)&end -
-	    (vm_offset_t)(KERNBASE + KERNENTRY);
-	i += 1;
-#ifdef DDB
-#if 0
-	/* RISCVTODO */
-	if (*(uint32_t *)KERNVIRTADDR == MAGIC_TRAMP_NUMBER) {
-		fake_preload[i++] = MODINFO_METADATA|MODINFOMD_SSYM;
-		fake_preload[i++] = sizeof(vm_offset_t);
-		fake_preload[i++] = *(uint32_t *)(KERNVIRTADDR + 4);
-		fake_preload[i++] = MODINFO_METADATA|MODINFOMD_ESYM;
-		fake_preload[i++] = sizeof(vm_offset_t);
-		fake_preload[i++] = *(uint32_t *)(KERNVIRTADDR + 8);
-		lastaddr = *(uint32_t *)(KERNVIRTADDR + 8);
-		zend = lastaddr;
-		zstart = *(uint32_t *)(KERNVIRTADDR + 4);
-		db_fetch_ksymtab(zstart, zend);
-	} else
-#endif
-#endif
-		lastaddr = (vm_offset_t)&end;
+#define PRELOAD_PUSH_STRING(str) do {				\
+	uint32_t ssize;						\
+	ssize = strlen(str) + 1;				\
+	PRELOAD_PUSH_VALUE(uint32_t, ssize);			\
+	strcpy(((char *)fake_preload + fake_size), str);	\
+	fake_size += ssize;					\
+	fake_size = roundup(fake_size, sizeof(u_long));		\
+} while (0)
+
+	fake_size = 0;
+	lastaddr = (vm_offset_t)&end;
+
+	PRELOAD_PUSH_VALUE(uint32_t, MODINFO_NAME);
+	PRELOAD_PUSH_STRING("kernel");
+	PRELOAD_PUSH_VALUE(uint32_t, MODINFO_TYPE);
+	PRELOAD_PUSH_STRING("elf kernel");
+
+	PRELOAD_PUSH_VALUE(uint32_t, MODINFO_ADDR);
+	PRELOAD_PUSH_VALUE(uint32_t, sizeof(vm_offset_t));
+	PRELOAD_PUSH_VALUE(uint64_t, KERNBASE);
+
+	PRELOAD_PUSH_VALUE(uint32_t, MODINFO_SIZE);
+	PRELOAD_PUSH_VALUE(uint32_t, sizeof(size_t));
+	PRELOAD_PUSH_VALUE(uint64_t, (size_t)((vm_offset_t)&end - KERNBASE));
 
 	/* Copy the DTB to KVA space. */
 	lastaddr = roundup(lastaddr, sizeof(int));
-	fake_preload[i++] = MODINFO_METADATA | MODINFOMD_DTBP;
-	fake_preload[i++] = sizeof(vm_offset_t);
-	*(vm_offset_t *)&fake_preload[i] = (vm_offset_t)lastaddr;
-	i += sizeof(vm_offset_t) / sizeof(uint32_t);
+	PRELOAD_PUSH_VALUE(uint32_t, MODINFO_METADATA | MODINFOMD_DTBP);
+	PRELOAD_PUSH_VALUE(uint32_t, sizeof(vm_offset_t));
+	PRELOAD_PUSH_VALUE(vm_offset_t, lastaddr);
 	dtb_size = fdt_totalsize(rvbp->dtbp_virt);
 	memmove((void *)lastaddr, (const void *)rvbp->dtbp_virt, dtb_size);
 	lastaddr = roundup(lastaddr + dtb_size, sizeof(int));
 
-	fake_preload[i++] = 0;
-	fake_preload[i] = 0;
-	preload_metadata = (void *)fake_preload;
+	PRELOAD_PUSH_VALUE(uint32_t, MODINFO_METADATA | MODINFOMD_KERNEND);
+	PRELOAD_PUSH_VALUE(uint32_t, sizeof(vm_offset_t));
+	PRELOAD_PUSH_VALUE(vm_offset_t, lastaddr);
 
-	KASSERT(i < nitems(fake_preload), ("Too many fake_preload items"));
+	PRELOAD_PUSH_VALUE(uint32_t, MODINFO_METADATA | MODINFOMD_HOWTO);
+	PRELOAD_PUSH_VALUE(uint32_t, sizeof(int));
+	PRELOAD_PUSH_VALUE(int, RB_VERBOSE);
 
+	/* End marker */
+	PRELOAD_PUSH_VALUE(uint32_t, 0);
+	PRELOAD_PUSH_VALUE(uint32_t, 0);
+	preload_metadata = (caddr_t)fake_preload;
+
+	/* Check if bootloader clobbered part of the kernel with the DTB. */
+	KASSERT(rvbp->dtbp_phys + dtb_size <= rvbp->kern_phys ||
+		rvbp->dtbp_phys >= rvbp->kern_phys + (lastaddr - KERNBASE),
+	    ("FDT (%lx-%lx) and kernel (%lx-%lx) overlap", rvbp->dtbp_phys,
+		rvbp->dtbp_phys + dtb_size, rvbp->kern_phys,
+		rvbp->kern_phys + (lastaddr - KERNBASE)));
+	KASSERT(fake_size < sizeof(fake_preload),
+	    ("Too many fake_preload items"));
+
+	if (boothowto & RB_VERBOSE)
+		printf("FDT phys (%lx-%lx), kernel phys (%lx-%lx)\n",
+		    rvbp->dtbp_phys, rvbp->dtbp_phys + dtb_size,
+		    rvbp->kern_phys, rvbp->kern_phys + (lastaddr - KERNBASE));
+}
+
+#ifdef FDT
+static void
+parse_fdt_bootargs(void)
+{
+	char bootargs[512];
+
+	bootargs[sizeof(bootargs) - 1] = '\0';
+	if (fdt_get_chosen_bootargs(bootargs, sizeof(bootargs) - 1) == 0) {
+		boothowto |= boot_parse_cmdline(bootargs);
+	}
+}
+#endif
+
+static vm_offset_t
+parse_metadata(void)
+{
+	caddr_t kmdp;
+	vm_offset_t lastaddr;
+#ifdef DDB
+	vm_offset_t ksym_start, ksym_end;
+#endif
+	char *kern_envp;
+
+	/* Find the kernel address */
+	kmdp = preload_search_by_type("elf kernel");
+	if (kmdp == NULL)
+		kmdp = preload_search_by_type("elf64 kernel");
+	KASSERT(kmdp != NULL, ("No preload metadata found!"));
+
+	/* Read the boot metadata */
+	boothowto = MD_FETCH(kmdp, MODINFOMD_HOWTO, int);
+	lastaddr = MD_FETCH(kmdp, MODINFOMD_KERNEND, vm_offset_t);
+	kern_envp = MD_FETCH(kmdp, MODINFOMD_ENVP, char *);
+	if (kern_envp != NULL)
+		init_static_kenv(kern_envp, 0);
+	else
+		init_static_kenv(static_kenv, sizeof(static_kenv));
+#ifdef DDB
+	ksym_start = MD_FETCH(kmdp, MODINFOMD_SSYM, uintptr_t);
+	ksym_end = MD_FETCH(kmdp, MODINFOMD_ESYM, uintptr_t);
+	db_fetch_ksymtab(ksym_start, ksym_end);
+#endif
+#ifdef FDT
+	try_load_dtb(kmdp);
+	if (kern_envp == NULL)
+		parse_fdt_bootargs();
+#endif
 	return (lastaddr);
 }
 
@@ -795,14 +861,17 @@ initriscv(struct riscv_bootparams *rvbp)
 	int mem_regions_sz;
 	vm_offset_t lastaddr;
 	vm_size_t kernlen;
-	caddr_t kmdp;
+#ifdef FDT
+	phandle_t chosen;
+	uint32_t hart;
+#endif
+	char *env;
 
 	TSRAW(&thread0, TS_ENTER, __func__, NULL);
 
 	/* Set the pcpu data, this is needed by pmap_bootstrap */
 	pcpup = &__pcpu[0];
 	pcpu_init(pcpup, 0, sizeof(struct pcpu));
-	pcpup->pc_hart = boot_hart;
 
 	/* Set the pcpu pointer */
 	__asm __volatile("mv tp, %0" :: "r"(pcpup));
@@ -812,22 +881,31 @@ initriscv(struct riscv_bootparams *rvbp)
 	/* Initialize SBI interface. */
 	sbi_init();
 
-	/* Set the module data location */
-	lastaddr = fake_preload_metadata(rvbp);
-
-	/* Find the kernel address */
-	kmdp = preload_search_by_type("elf kernel");
-	if (kmdp == NULL)
-		kmdp = preload_search_by_type("elf64 kernel");
-
-	boothowto = RB_VERBOSE | RB_SINGLE;
-	boothowto = RB_VERBOSE;
-
-	kern_envp = NULL;
+	/* Parse the boot metadata. */
+	if (rvbp->modulep != 0) {
+		preload_metadata = (caddr_t)rvbp->modulep;
+	} else {
+		fake_preload_metadata(rvbp);
+	}
+	lastaddr = parse_metadata();
 
 #ifdef FDT
-	try_load_dtb(kmdp);
+	/*
+	 * Look for the boot hart ID. This was either passed in directly from
+	 * the SBI firmware and handled by locore, or was stored in the device
+	 * tree by an earlier boot stage.
+	 */
+	chosen = OF_finddevice("/chosen");
+	if (OF_getencprop(chosen, "boot-hartid", &hart, sizeof(hart)) != -1) {
+		boot_hart = hart;
+	}
+#endif
+	if (boot_hart == BOOT_HART_INVALID) {
+		panic("Boot hart ID was not properly set");
+	}
+	pcpup->pc_hart = boot_hart;
 
+#ifdef FDT
 	/*
 	 * Exclude reserved memory specified by the device tree. Typically,
 	 * this contains an entry for memory used by the runtime SBI firmware.
@@ -875,12 +953,24 @@ initriscv(struct riscv_bootparams *rvbp)
 
 	cninit();
 
+	/*
+	 * Dump the boot metadata. We have to wait for cninit() since console
+	 * output is required. If it's grossly incorrect the kernel will never
+	 * make it this far.
+	 */
+	if (getenv_is_true("debug.dump_modinfo_at_boot"))
+		preload_dump();
+
 	init_proc0(rvbp->kern_stack);
 
 	msgbufinit(msgbufp, msgbufsize);
 	mutex_init();
 	init_param2(physmem);
 	kdb_init();
+
+	env = kern_getenv("kernelname");
+	if (env != NULL)
+		strlcpy(kernelname, env, sizeof(kernelname));
 
 	if (boothowto & RB_VERBOSE)
 		physmem_print_tables();

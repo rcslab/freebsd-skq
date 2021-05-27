@@ -112,6 +112,12 @@ extern struct pagerops mgtdevicepagerops;
 extern struct pagerops *pagertab[];
 extern struct mtx_padalign pbuf_mtx;
 
+/*
+ * Number of pages that pbuf buffer can store in b_pages.
+ * It is +1 to allow for unaligned data buffer of maxphys size.
+ */
+#define	PBUF_PAGES	(atop(maxphys) + 1)
+
 vm_object_t vm_pager_allocate(objtype_t, void *, vm_ooffset_t, vm_prot_t,
     vm_ooffset_t, struct ucred *);
 void vm_pager_bufferinit(void);
@@ -130,7 +136,6 @@ vm_pager_put_pages(
 	int flags,
 	int *rtvals
 ) {
-
 	VM_OBJECT_ASSERT_WLOCKED(object);
 	(*pagertab[object->type]->pgo_putpages)
 	    (object, m, count, flags, rtvals);
@@ -172,7 +177,6 @@ vm_pager_populate(vm_object_t object, vm_pindex_t pidx, int fault_type,
 	return ((*pagertab[object->type]->pgo_populate)(object, pidx,
 	    fault_type, max_prot, first, last));
 }
-
 
 /* 
  *      vm_pager_page_unswapped
@@ -228,6 +232,23 @@ vm_object_t cdev_pager_allocate(void *handle, enum obj_type tp,
     vm_ooffset_t foff, struct ucred *cred);
 vm_object_t cdev_pager_lookup(void *handle);
 void cdev_pager_free_page(vm_object_t object, vm_page_t m);
+
+struct phys_pager_ops {
+	int (*phys_pg_getpages)(vm_object_t vm_obj, vm_page_t *m, int count,
+	    int *rbehind, int *rahead);
+	int (*phys_pg_populate)(vm_object_t vm_obj, vm_pindex_t pidx,
+	    int fault_type, vm_prot_t max_prot, vm_pindex_t *first,
+	    vm_pindex_t *last);
+	boolean_t (*phys_pg_haspage)(vm_object_t obj,  vm_pindex_t pindex,
+	    int *before, int *after);
+	void (*phys_pg_ctor)(vm_object_t vm_obj, vm_prot_t prot,
+	    vm_ooffset_t foff, struct ucred *cred);
+	void (*phys_pg_dtor)(vm_object_t vm_obj);
+};
+extern struct phys_pager_ops default_phys_pg_ops;
+vm_object_t phys_pager_allocate(void *handle, struct phys_pager_ops *ops,
+    void *data, vm_ooffset_t size, vm_prot_t prot, vm_ooffset_t foff,
+    struct ucred *cred);
 
 #endif				/* _KERNEL */
 #endif				/* _VM_PAGER_ */

@@ -158,6 +158,7 @@ fuse_internal_get_cached_vnode(struct mount* mp, ino_t ino, int flags,
 	return 0;
 }
 
+SDT_PROBE_DEFINE0(fusefs, , internal, access_vadmin);
 /* Synchronously send a FUSE_ACCESS operation */
 int
 fuse_internal_access(struct vnode *vp,
@@ -207,13 +208,21 @@ fuse_internal_access(struct vnode *vp,
 
 		fuse_internal_getattr(vp, &va, cred, td);
 		return vaccess(vp->v_type, va.va_mode, va.va_uid,
-		    va.va_gid, mode, cred, NULL);
+		    va.va_gid, mode, cred);
+	}
+
+	if (mode & VADMIN) {
+		/*
+		 * The FUSE protocol doesn't have an equivalent of VADMIN, so
+		 * it's a bug if we ever reach this point with that bit set.
+		 */
+		SDT_PROBE0(fusefs, , internal, access_vadmin);
 	}
 
 	if (!fsess_isimpl(mp, FUSE_ACCESS))
 		return 0;
 
-	if ((mode & (VWRITE | VAPPEND | VADMIN)) != 0)
+	if ((mode & (VWRITE | VAPPEND)) != 0)
 		mask |= W_OK;
 	if ((mode & VREAD) != 0)
 		mask |= R_OK;
@@ -303,7 +312,6 @@ fuse_internal_cache_attrs(struct vnode *vp, struct fuse_attr *attr,
 		memcpy(vap, vp_cache_at, sizeof(*vap));
 }
 
-
 /* fsync */
 
 int
@@ -377,8 +385,8 @@ fuse_internal_fsync(struct vnode *vp,
 }
 
 /* Asynchronous invalidation */
-SDT_PROBE_DEFINE2(fusefs, , internal, invalidate_cache_hit,
-	"struct vnode*", "struct vnode*");
+SDT_PROBE_DEFINE3(fusefs, , internal, invalidate_entry,
+	"struct vnode*", "struct fuse_notify_inval_entry_out*", "char*");
 int
 fuse_internal_invalidate_entry(struct mount *mp, struct uio *uio)
 {
@@ -407,6 +415,7 @@ fuse_internal_invalidate_entry(struct mount *mp, struct uio *uio)
 	else
 		err = fuse_internal_get_cached_vnode( mp, fnieo.parent,
 			LK_SHARED, &dvp);
+	SDT_PROBE3(fusefs, , internal, invalidate_entry, dvp, &fnieo, name);
 	/* 
 	 * If dvp is not in the cache, then it must've been reclaimed.  And
 	 * since fuse_vnop_reclaim does a cache_purge, name's entry must've
@@ -435,6 +444,8 @@ fuse_internal_invalidate_entry(struct mount *mp, struct uio *uio)
 	return (0);
 }
 
+SDT_PROBE_DEFINE2(fusefs, , internal, invalidate_inode,
+	"struct vnode*", "struct fuse_notify_inval_inode_out *");
 int
 fuse_internal_invalidate_inode(struct mount *mp, struct uio *uio)
 {
@@ -450,6 +461,7 @@ fuse_internal_invalidate_inode(struct mount *mp, struct uio *uio)
 	else
 		err = fuse_internal_get_cached_vnode(mp, fniio.ino, LK_SHARED,
 			&vp);
+	SDT_PROBE2(fusefs, , internal, invalidate_inode, vp, &fniio);
 	if (err != 0 || vp == NULL)
 		return (err);
 	/*
@@ -485,7 +497,7 @@ fuse_internal_mknod(struct vnode *dvp, struct vnode **vpp,
 	fmni.rdev = vap->va_rdev;
 	if (fuse_libabi_geq(data, 7, 12)) {
 		insize = sizeof(fmni);
-		fmni.umask = curthread->td_proc->p_fd->fd_cmask;
+		fmni.umask = curthread->td_proc->p_pd->pd_cmask;
 	} else {
 		insize = FUSE_COMPAT_MKNOD_IN_SIZE;
 	}

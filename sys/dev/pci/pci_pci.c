@@ -1073,14 +1073,6 @@ pcib_hotplug_present(struct pcib_softc *sc)
 	if (!pcib_hotplug_inserted(sc))
 		return (0);
 
-	/*
-	 * Require the Electromechanical Interlock to be engaged if
-	 * present.
-	 */
-	if (sc->pcie_slot_cap & PCIEM_SLOT_CAP_EIP &&
-	    (sc->pcie_slot_sta & PCIEM_SLOT_STA_EIS) == 0)
-		return (0);
-
 	/* Require the Data Link Layer to be active. */
 	if (!(sc->pcie_link_sta & PCIEM_LINK_STA_DL_ACTIVE))
 		return (0);
@@ -1338,7 +1330,7 @@ pcib_alloc_pcie_irq(struct pcib_softc *sc)
 		rid = 0;
 
 	sc->pcie_irq = bus_alloc_resource_any(dev, SYS_RES_IRQ, &rid,
-	    RF_ACTIVE);
+	    RF_ACTIVE | RF_SHAREABLE);
 	if (sc->pcie_irq == NULL) {
 		device_printf(dev,
 		    "Failed to allocate interrupt for PCI-e events\n");
@@ -1453,7 +1445,7 @@ pcib_detach_hotplug(struct pcib_softc *sc)
 	}
 
 	pcib_pcie_hotplug_update(sc, val, mask, false);
-	
+
 	error = pcib_release_pcie_irq(sc);
 	if (error)
 		return (error);
@@ -1792,6 +1784,12 @@ pcib_resume(device_t dev)
 {
 
 	pcib_cfg_restore(device_get_softc(dev));
+
+	/*
+	 * Restore the Command register only after restoring the windows.
+	 * The bridge should not be claiming random windows.
+	 */
+	pci_write_config(dev, PCIR_COMMAND, pci_get_cmdreg(dev), 2);
 	return (bus_generic_resume(dev));
 }
 
@@ -2534,7 +2532,6 @@ pcib_xlate_ari(device_t pcib, int bus, int *slot, int *func)
 		*func = PCIE_ARI_FUNC(ari_func);
 	}
 }
-
 
 static void
 pcib_enable_ari(struct pcib_softc *sc, uint32_t pcie_pos)

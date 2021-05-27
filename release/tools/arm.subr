@@ -27,7 +27,7 @@
 # OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 # SUCH DAMAGE.
 #
-# Common subroutines used to build arm SD card images.
+# Common subroutines used to build arm, arm64, or RISC-V SD card images.
 #
 # $FreeBSD$
 #
@@ -194,7 +194,7 @@ arm_install_base() {
 	if [ "${PART_SCHEME}" == "GPT" ]; then
 		echo "/dev/ufs/rootfs   /       ufs     rw      1       1" \
 			>> ${CHROOTDIR}/${DESTDIR}/etc/fstab
-		echo "/dev/msdosfs/efi /boot/efi msdosfs rw,noatime 0 0" \
+		echo "/dev/msdosfs/EFI /boot/efi msdosfs rw,noatime 0 0" \
 			>> ${CHROOTDIR}/${DESTDIR}/etc/fstab
 	fi
 	if [ "${PART_SCHEME}" == "MBR" ]; then
@@ -265,11 +265,11 @@ arm_install_boot() {
 }
 
 arm_install_uboot() {
-	# Override in the arm/KERNEL.conf file.
+	# Override in the ${EMBEDDED_TARGET}/${BOARDNAME}.conf file.
 
 	return 0
 }
 
 arm_do_quirk() {
-	# Override in the arm{,64}/BOARD.conf file.
+	# Override in the ${EMBEDDED_TARGET}/${BOARDNAME}.conf file.
 }

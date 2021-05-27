@@ -2,7 +2,6 @@
  * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
  *
  * Copyright (c) 2014 The FreeBSD Foundation
- * All rights reserved.
  *
  * This software was developed by Edward Tomasz Napierala under sponsorship
  * from the FreeBSD Foundation.
@@ -67,8 +66,7 @@ automounted_find(fsid_t fsid)
 	struct automounted_fs *af;
 
 	TAILQ_FOREACH(af, &automounted, af_next) {
-		if (af->af_fsid.val[0] == fsid.val[0] &&
-		    af->af_fsid.val[1] == fsid.val[1])
+		if (fsidcmp(&af->af_fsid, &fsid) == 0)
 			return (af);
 	}
 

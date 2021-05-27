@@ -64,8 +64,6 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
-#include "opt_mpath.h"
-
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/kernel.h>
@@ -81,9 +79,9 @@ __FBSDID("$FreeBSD$");
 #include <net/if.h>
 #include <net/if_var.h>
 #include <net/route.h>
+#include <net/route/route_ctl.h>
 #include <net/route/route_var.h>
 #include <net/route/nhop.h>
-#include <net/route/shared.h>
 
 #include <netinet/in.h>
 #include <netinet/ip_var.h>
@@ -99,11 +97,6 @@ __FBSDID("$FreeBSD$");
 #include <netinet/tcp_seq.h>
 #include <netinet/tcp_timer.h>
 #include <netinet/tcp_var.h>
-
-extern int	in6_inithead(void **head, int off, u_int fibnum);
-#ifdef VIMAGE
-extern int	in6_detachhead(void **head, int off);
-#endif
 
 static int
 rib6_preadd(u_int fibnum, const struct sockaddr *addr, const struct sockaddr *mask,
@@ -143,99 +136,34 @@ rib6_preadd(u_int fibnum, const struct sockaddr *addr, const struct sockaddr *ma
 }
 
 /*
- * Do what we need to do when inserting a route.
- */
-static struct radix_node *
-in6_addroute(void *v_arg, void *n_arg, struct radix_head *head,
-    struct radix_node *treenodes)
-{
-	struct rtentry *rt = (struct rtentry *)treenodes;
-	struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)rt_key(rt);
-
-	if (IN6_IS_ADDR_MULTICAST(&sin6->sin6_addr))
-		rt->rt_flags |= RTF_MULTICAST;
-
-	/*
-	 * A little bit of help for both IPv6 output and input:
-	 *   For local addresses, we make sure that RTF_LOCAL is set,
-	 *   with the thought that this might one day be used to speed up
-	 *   ip_input().
-	 *
-	 * We also mark routes to multicast addresses as such, because
-	 * it's easy to do and might be useful (but this is much more
-	 * dubious since it's so easy to inspect the address).  (This
-	 * is done above.)
-	 *
-	 * XXX
-	 * should elaborate the code.
-	 */
-	if (rt->rt_flags & RTF_HOST) {
-		if (IN6_ARE_ADDR_EQUAL(&satosin6(rt->rt_ifa->ifa_addr)
-					->sin6_addr,
-				       &sin6->sin6_addr)) {
-			rt->rt_flags |= RTF_LOCAL;
-		}
-	}
-
-	if (rt->rt_ifp != NULL) {
-
-		/*
-		 * Check route MTU:
-		 * inherit interface MTU if not set or
-		 * check if MTU is too large.
-		 */
-		if (rt->rt_mtu == 0) {
-			rt->rt_mtu = IN6_LINKMTU(rt->rt_ifp);
-		} else if (rt->rt_mtu > IN6_LINKMTU(rt->rt_ifp))
-			rt->rt_mtu = IN6_LINKMTU(rt->rt_ifp);
-	}
-
-	return (rn_addroute(v_arg, n_arg, head, treenodes));
-}
-
-/*
  * Initialize our routing tree.
  */
 
-int
-in6_inithead(void **head, int off, u_int fibnum)
+struct rib_head *
+in6_inithead(uint32_t fibnum)
 {
 	struct rib_head *rh;
+	struct rib_subscription *rs;
 
 	rh = rt_table_init(offsetof(struct sockaddr_in6, sin6_addr) << 3,
 	    AF_INET6, fibnum);
 	if (rh == NULL)
-		return (0);
+		return (NULL);
 
-	rh->rnh_addaddr = in6_addroute;
 	rh->rnh_preadd = rib6_preadd;
-#ifdef	RADIX_MPATH
-	rt_mpath_init_rnh(rh);
-#endif
-	*head = (void *)rh;
 
-	return (1);
+	rs = rib_subscribe_internal(rh, nd6_subscription_cb, NULL,
+	    RIB_NOTIFY_IMMEDIATE, true);
+	KASSERT(rs != NULL, ("Unable to subscribe to fib %u\n", fibnum));
+
+	return (rh);
 }
 
 #ifdef VIMAGE
-int
-in6_detachhead(void **head, int off)
+void
+in6_detachhead(struct rib_head *rh)
 {
 
-	rt_table_destroy((struct rib_head *)(*head));
-
-	return (1);
+	rt_table_destroy(rh);
 }
 #endif
-
-/*
- * Extended API for IPv6 FIB support.
- */
-int
-in6_rtrequest(int req, struct sockaddr *dst, struct sockaddr *gw,
-    struct sockaddr *mask, int flags, struct rtentry **ret_nrt, u_int fibnum)
-{
-
-	return (rtrequest_fib(req, dst, gw, mask, flags, ret_nrt, fibnum));
-}
-

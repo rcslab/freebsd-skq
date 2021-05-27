@@ -1,11 +1,14 @@
 # $FreeBSD$
 
 .PATH: ${SRCTOP}/sys/compat/linux ${SRCTOP}/sys/${MACHINE}/linux
+.if ${MACHINE_CPUARCH} == "i386" || ${MACHINE_CPUARCH} == "amd64"
+.PATH: ${SRCTOP}/sys/x86/linux
+.endif
 
 VDSO=	linux_vdso
 
 KMOD=	linux64
-SRCS=	linux_fork.c linux_dummy.c linux_file.c linux_event.c \
+SRCS=	linux_fork.c linux_dummy_machdep.c linux_file.c linux_event.c \
 	linux_futex.c linux_getcwd.c linux_ioctl.c linux_ipc.c \
 	linux_machdep.c linux_misc.c linux_ptrace.c linux_signal.c \
 	linux_socket.c linux_stats.c linux_sysctl.c linux_sysent.c \
@@ -13,6 +16,9 @@ SRCS=	linux_fork.c linux_dummy.c linux_file.c linux_event.c \
 	opt_compat.h opt_inet6.h opt_posix.h opt_usb.h \
 	vnode_if.h device_if.h bus_if.h \
 	linux_support.s
+.if ${MACHINE_CPUARCH} == "i386" || ${MACHINE_CPUARCH} == "amd64"
+SRCS+=	linux_dummy_x86.c
+.endif
 DPSRCS=	assym.inc linux_genassym.c
 
 # XXX: for assym.inc
@@ -30,7 +36,7 @@ linux_assym.h: linux_genassym.o
 	sh ${SYSDIR}/kern/genassym.sh linux_genassym.o > ${.TARGET}
 
 linux_locore.o: linux_locore.asm linux_assym.h
-	${CC} -x assembler-with-cpp -DLOCORE -shared -mcmodel=small	\
+	${CC} ${CCLDFLAGS} -x assembler-with-cpp -DLOCORE -shared -mcmodel=small	\
 	-pipe -I. -I${SYSDIR} ${WERROR} -Wall -fno-common -fPIC -nostdinc	\
 	-Wl,-T${SRCTOP}/sys/${MACHINE}/linux/${VDSO}.lds.s	\
 	-Wl,-soname=${VDSO}.so.1,-warn-common -nostdlib			\
@@ -46,7 +52,7 @@ OBJCOPY_TARGET=--output-target elf64-x86-64 --binary-architecture i386:x86-64
 ${VDSO}.so: linux_locore.o
 	${OBJCOPY} --input-target binary ${OBJCOPY_TARGET} -S -g \
 	    linux_locore.o ${.TARGET}
-	strip -N _binary_linux_locore_o_size ${.TARGET}
+	${STRIPBIN} -N _binary_linux_locore_o_size ${.TARGET}
 
 linux_support.o: assym.inc linux_assym.h
 	${CC} -c -x assembler-with-cpp -DLOCORE ${CFLAGS} \

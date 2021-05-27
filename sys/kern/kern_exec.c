@@ -67,6 +67,8 @@ __FBSDID("$FreeBSD$");
 #include <sys/sysctl.h>
 #include <sys/sysent.h>
 #include <sys/sysproto.h>
+#include <sys/timers.h>
+#include <sys/umtx.h>
 #include <sys/vnode.h>
 #include <sys/wait.h>
 #ifdef KTRACE
@@ -118,7 +120,7 @@ static int sysctl_kern_ps_strings(SYSCTL_HANDLER_ARGS);
 static int sysctl_kern_usrstack(SYSCTL_HANDLER_ARGS);
 static int sysctl_kern_stackprot(SYSCTL_HANDLER_ARGS);
 static int do_execve(struct thread *td, struct image_args *args,
-    struct mac *mac_p);
+    struct mac *mac_p, struct vmspace *oldvmspace);
 
 /* XXX This should be vm_size_t. */
 SYSCTL_PROC(_kern, KERN_PS_STRINGS, ps_strings, CTLTYPE_ULONG|CTLFLAG_RD|
@@ -223,8 +225,9 @@ sys_execve(struct thread *td, struct execve_args *uap)
 	error = exec_copyin_args(&args, uap->fname, UIO_USERSPACE,
 	    uap->argv, uap->envv);
 	if (error == 0)
-		error = kern_execve(td, &args, NULL);
+		error = kern_execve(td, &args, NULL, oldvmspace);
 	post_execve(td, error, oldvmspace);
+	AUDIT_SYSCALL_EXIT(error == EJUSTRETURN ? 0 : error, td);
 	return (error);
 }
 
@@ -233,7 +236,7 @@ struct fexecve_args {
 	int	fd;
 	char	**argv;
 	char	**envv;
-}
+};
 #endif
 int
 sys_fexecve(struct thread *td, struct fexecve_args *uap)
@@ -249,9 +252,10 @@ sys_fexecve(struct thread *td, struct fexecve_args *uap)
 	    uap->argv, uap->envv);
 	if (error == 0) {
 		args.fd = uap->fd;
-		error = kern_execve(td, &args, NULL);
+		error = kern_execve(td, &args, NULL, oldvmspace);
 	}
 	post_execve(td, error, oldvmspace);
+	AUDIT_SYSCALL_EXIT(error == EJUSTRETURN ? 0 : error, td);
 	return (error);
 }
 
@@ -278,8 +282,9 @@ sys___mac_execve(struct thread *td, struct __mac_execve_args *uap)
 	error = exec_copyin_args(&args, uap->fname, UIO_USERSPACE,
 	    uap->argv, uap->envv);
 	if (error == 0)
-		error = kern_execve(td, &args, uap->mac_p);
+		error = kern_execve(td, &args, uap->mac_p, oldvmspace);
 	post_execve(td, error, oldvmspace);
+	AUDIT_SYSCALL_EXIT(error == EJUSTRETURN ? 0 : error, td);
 	return (error);
 #else
 	return (ENOSYS);
@@ -326,30 +331,26 @@ post_execve(struct thread *td, int error, struct vmspace *oldvmspace)
 			thread_single_end(p, SINGLE_BOUNDARY);
 		PROC_UNLOCK(p);
 	}
-	if ((td->td_pflags & TDP_EXECVMSPC) != 0) {
-		KASSERT(p->p_vmspace != oldvmspace,
-		    ("oldvmspace still used"));
-		vmspace_free(oldvmspace);
-		td->td_pflags &= ~TDP_EXECVMSPC;
-	}
+	exec_cleanup(td, oldvmspace);
 }
 
 /*
- * XXX: kern_execve has the astonishing property of not always returning to
+ * kern_execve() has the astonishing property of not always returning to
  * the caller.  If sufficiently bad things happen during the call to
  * do_execve(), it can end up calling exit1(); as a result, callers must
  * avoid doing anything which they might need to undo (e.g., allocating
  * memory).
  */
 int
-kern_execve(struct thread *td, struct image_args *args, struct mac *mac_p)
+kern_execve(struct thread *td, struct image_args *args, struct mac *mac_p,
+    struct vmspace *oldvmspace)
 {
 
 	AUDIT_ARG_ARGV(args->begin_argv, args->argc,
 	    exec_args_get_begin_envv(args) - args->begin_argv);
 	AUDIT_ARG_ENVV(exec_args_get_begin_envv(args), args->envc,
 	    args->endp - exec_args_get_begin_envv(args));
-	return (do_execve(td, args, mac_p));
+	return (do_execve(td, args, mac_p, oldvmspace));
 }
 
 /*
@@ -357,7 +358,8 @@ kern_execve(struct thread *td, struct image_args *args, struct mac *mac_p)
  * userspace pointers from the passed thread.
  */
 static int
-do_execve(struct thread *td, struct image_args *args, struct mac *mac_p)
+do_execve(struct thread *td, struct image_args *args, struct mac *mac_p,
+    struct vmspace *oldvmspace)
 {
 	struct proc *p = td->td_proc;
 	struct nameidata nd;
@@ -575,8 +577,7 @@ interpret:
 		imgp->execpath = args->fname;
 	else {
 		VOP_UNLOCK(imgp->vp);
-		if (vn_fullpath(td, imgp->vp, &imgp->execpath,
-		    &imgp->freepath) != 0)
+		if (vn_fullpath(imgp->vp, &imgp->execpath, &imgp->freepath) != 0)
 			imgp->execpath = args->fname;
 		vn_lock(imgp->vp, LK_SHARED | LK_RETRY);
 	}
@@ -701,6 +702,7 @@ interpret:
 		 * cannot be shared after an exec.
 		 */
 		fdunshare(td);
+		pdunshare(td);
 		/* close files on exec */
 		fdcloseexec(td);
 	}
@@ -950,6 +952,7 @@ exec_fail:
 
 	if (error && imgp->vmspace_destroyed) {
 		/* sorry, no more process anymore. exit gracefully */
+		exec_cleanup(td, oldvmspace);
 		exit1(td, 0, SIGABRT);
 		/* NOT REACHED */
 	}
@@ -966,6 +969,17 @@ exec_fail:
 	 * registers unmodified when returning EJUSTRETURN.
 	 */
 	return (error == 0 ? EJUSTRETURN : error);
+}
+
+void
+exec_cleanup(struct thread *td, struct vmspace *oldvmspace)
+{
+	if ((td->td_pflags & TDP_EXECVMSPC) != 0) {
+		KASSERT(td->td_proc->p_vmspace != oldvmspace,
+		    ("oldvmspace still used"));
+		vmspace_free(oldvmspace);
+		td->td_pflags &= ~TDP_EXECVMSPC;
+	}
 }
 
 int
@@ -1035,8 +1049,11 @@ exec_new_vmspace(struct image_params *imgp, struct sysentvec *sv)
 	imgp->sysent = sv;
 
 	sigfastblock_clear(td);
+	umtx_exec(p);
+	itimers_exec(p);
+	if (sv->sv_onexec != NULL)
+		sv->sv_onexec(p, imgp);
 
-	/* May be called with Giant held */
 	EVENTHANDLER_DIRECT_INVOKE(process_exec, p, imgp);
 
 	/*
@@ -1049,7 +1066,8 @@ exec_new_vmspace(struct image_params *imgp, struct sysentvec *sv)
 		sv_minuser = sv->sv_minuser;
 	else
 		sv_minuser = MAX(sv->sv_minuser, PAGE_SIZE);
-	if (vmspace->vm_refcnt == 1 && vm_map_min(map) == sv_minuser &&
+	if (refcount_load(&vmspace->vm_refcnt) == 1 &&
+	    vm_map_min(map) == sv_minuser &&
 	    vm_map_max(map) == sv->sv_maxuser &&
 	    cpu_exec_vmspace_reuse(p, map)) {
 		shmexit(vmspace);
@@ -1208,7 +1226,7 @@ exec_copyin_data_fds(struct thread *td, struct image_args *args,
 
 	memset(args, '\0', sizeof(*args));
 	ofdp = td->td_proc->p_fd;
-	if (datalen >= ARG_MAX || fdslen > ofdp->fd_lastfile + 1)
+	if (datalen >= ARG_MAX || fdslen >= ofdp->fd_nfiles)
 		return (E2BIG);
 	error = exec_alloc_args(args);
 	if (error != 0)
@@ -1516,6 +1534,17 @@ exec_args_get_begin_envv(struct image_args *args)
 	return (args->endp);
 }
 
+void
+exec_stackgap(struct image_params *imgp, uintptr_t *dp)
+{
+	if (imgp->sysent->sv_stackgap == NULL ||
+	    (imgp->proc->p_fctl0 & (NT_FREEBSD_FCTL_ASLR_DISABLE |
+	    NT_FREEBSD_FCTL_ASG_DISABLE)) != 0 ||
+	    (imgp->map_flags & MAP_ASLR) == 0)
+		return;
+	imgp->sysent->sv_stackgap(imgp, dp);
+}
+
 /*
  * Copy strings out to the new process address space, constructing new arg
  * and env vector tables. Return a pointer to the base so that it can be used
@@ -1606,8 +1635,7 @@ exec_copyout_strings(struct image_params *imgp, uintptr_t *stack_base)
 	destp = rounddown2(destp, sizeof(void *));
 	ustringp = destp;
 
-	if (imgp->sysent->sv_stackgap != NULL)
-		imgp->sysent->sv_stackgap(imgp, &destp);
+	exec_stackgap(imgp, &destp);
 
 	if (imgp->auxargs) {
 		/*

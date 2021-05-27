@@ -173,7 +173,7 @@ cluster_read(struct vnode *vp, u_quad_t filesize, daddr_t lblkno, long size,
 					LK_EXCLUSIVE | LK_NOWAIT, NULL))) {
 					rbp->b_flags |= B_RAM;
 					BUF_UNLOCK(rbp);
-				}			
+				}
 			}
 			BO_RUNLOCK(bo);
 			if (i >= maxra) {
@@ -386,6 +386,7 @@ cluster_rbuild(struct vnode *vp, u_quad_t filesize, daddr_t lbn,
 	bp = uma_zalloc(cluster_pbuf_zone, M_NOWAIT);
 	if (bp == NULL)
 		return tbp;
+	MPASS((bp->b_flags & B_MAXPHYS) != 0);
 
 	/*
 	 * We are synthesizing a buffer out of vm_page_t's, but
@@ -871,6 +872,7 @@ cluster_wbuild(struct vnode *vp, long size, daddr_t start_lbn, int len,
 			--len;
 			continue;
 		}
+		MPASS((bp->b_flags & B_MAXPHYS) != 0);
 
 		/*
 		 * We got a pbuf to make the cluster in.

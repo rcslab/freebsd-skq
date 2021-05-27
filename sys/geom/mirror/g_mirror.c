@@ -110,7 +110,6 @@ struct g_class g_mirror_class = {
 	.resize = g_mirror_resize
 };
 
-
 static void g_mirror_destroy_provider(struct g_mirror_softc *sc);
 static int g_mirror_update_disk(struct g_mirror_disk *disk, u_int state);
 static void g_mirror_update_device(struct g_mirror_softc *sc, bool force);
@@ -124,7 +123,6 @@ static void g_mirror_sync_stop(struct g_mirror_disk *disk, int type);
 static void g_mirror_register_request(struct g_mirror_softc *sc,
     struct bio *bp);
 static void g_mirror_sync_release(struct g_mirror_softc *sc);
-
 
 static const char *
 g_mirror_disk_state2str(int state)
@@ -2072,7 +2070,7 @@ g_mirror_sync_reinit(const struct g_mirror_disk *disk, struct bio *bp,
 	bp->bio_to = disk->d_softc->sc_provider;
 	bp->bio_caller1 = (void *)(uintptr_t)idx;
 	bp->bio_offset = offset;
-	bp->bio_length = MIN(MAXPHYS,
+	bp->bio_length = MIN(maxphys,
 	    disk->d_softc->sc_mediasize - bp->bio_offset);
 }
 
@@ -2130,7 +2128,7 @@ g_mirror_sync_start(struct g_mirror_disk *disk)
 		bp = g_alloc_bio();
 		sync->ds_bios[i] = bp;
 
-		bp->bio_data = malloc(MAXPHYS, M_MIRROR, M_WAITOK);
+		bp->bio_data = malloc(maxphys, M_MIRROR, M_WAITOK);
 		bp->bio_caller1 = (void *)(uintptr_t)i;
 		g_mirror_sync_reinit(disk, bp, sync->ds_offset);
 		sync->ds_offset += bp->bio_length;
@@ -3243,9 +3241,11 @@ g_mirror_taste(struct g_class *mp, struct g_provider *pp, int flags __unused)
 	 */
 	gp->orphan = g_mirror_taste_orphan;
 	cp = g_new_consumer(gp);
-	g_attach(cp, pp);
-	error = g_mirror_read_metadata(cp, &md);
-	g_detach(cp);
+	error = g_attach(cp, pp);
+	if (error == 0) {
+		error = g_mirror_read_metadata(cp, &md);
+		g_detach(cp);
+	}
 	g_destroy_consumer(cp);
 	g_destroy_geom(gp);
 	if (error != 0)

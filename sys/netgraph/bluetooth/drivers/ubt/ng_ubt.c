@@ -508,6 +508,7 @@ static const STRUCT_USB_HOST_ID ubt_devs[] =
 	{ USB_VPI(USB_VENDOR_LITEON, 0x2003, 0) },
 	{ USB_VPI(USB_VENDOR_FOXCONN, 0xe042, 0) },
 	{ USB_VPI(USB_VENDOR_DELL, 0x8197, 0) },
+	{ USB_VPI(USB_VENDOR_BELKIN, 0x065a, 0) },
 };
 
 /*
@@ -559,7 +560,6 @@ ubt_do_hci_request(struct usb_device *udev, struct ubt_hci_cmd *cmd,
 	error = usbd_transfer_setup(udev, &iface_index, xfer,
 	    &ubt_probe_config, 1, evt, &mtx);
 	if (error == USB_ERR_NORMAL_COMPLETION) {
-
 		mtx_lock(&mtx);
 		usbd_transfer_start(*xfer);
 
@@ -623,7 +623,7 @@ ubt_attach(device_t dev)
 	struct usb_endpoint_descriptor	*ed;
 	struct usb_interface_descriptor *id;
 	struct usb_interface		*iface;
-	uint16_t			wMaxPacketSize;
+	uint32_t			wMaxPacketSize;
 	uint8_t				alt_index, i, j;
 	uint8_t				iface_index[2] = { 0, 1 };
 
@@ -702,7 +702,6 @@ ubt_attach(device_t dev)
 	while ((ed = (struct usb_endpoint_descriptor *)usb_desc_foreach(
 	    usbd_get_config_descriptor(uaa->device), 
 	    (struct usb_descriptor *)ed))) {
-
 		if ((ed->bDescriptorType == UDESC_INTERFACE) &&
 		    (ed->bLength >= sizeof(*id))) {
 			id = (struct usb_interface_descriptor *)ed;
@@ -713,9 +712,10 @@ ubt_attach(device_t dev)
 		if ((ed->bDescriptorType == UDESC_ENDPOINT) &&
 		    (ed->bLength >= sizeof(*ed)) &&
 		    (i == 1)) {
-			uint16_t temp;
+			uint32_t temp;
 
-			temp = UGETW(ed->wMaxPacketSize);
+			temp = usbd_get_max_frame_length(
+			    ed, NULL, usbd_get_speed(uaa->device));
 			if (temp > wMaxPacketSize) {
 				wMaxPacketSize = temp;
 				alt_index = j;
@@ -1676,7 +1676,7 @@ ng_ubt_disconnect(hook_p hook)
 
 	return (0);
 } /* ng_ubt_disconnect */
-	
+
 /*
  * Process control message.
  * Netgraph context.

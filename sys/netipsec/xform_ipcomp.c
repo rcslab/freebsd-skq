@@ -33,6 +33,7 @@
 /* IP payload compression protocol (IPComp), see RFC 2393 */
 #include "opt_inet.h"
 #include "opt_inet6.h"
+#include "opt_ipsec.h"
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -178,15 +179,14 @@ ipcomp_init(struct secasvar *sav, struct xformsw *xsp)
 }
 
 /*
- * ipcomp_zeroize() used when IPCA is deleted
+ * ipcomp_cleanup() used when IPCA is deleted
  */
-static int
-ipcomp_zeroize(struct secasvar *sav)
+static void
+ipcomp_cleanup(struct secasvar *sav)
 {
 
 	crypto_freesession(sav->tdb_cryptoid);
 	sav->tdb_cryptoid = NULL;
-	return 0;
 }
 
 /*
@@ -249,10 +249,8 @@ ipcomp_input(struct mbuf *m, struct secasvar *sav, int skip, int protoff)
 	crp->crp_payload_length = m->m_pkthdr.len - (skip + hlen);
 
 	/* Crypto operation descriptor */
-	crp->crp_ilen = m->m_pkthdr.len - (skip + hlen);
 	crp->crp_flags = CRYPTO_F_CBIFSYNC;
-	crp->crp_mbuf = m;
-	crp->crp_buf_type = CRYPTO_BUF_MBUF;
+	crypto_use_mbuf(crp, m);
 	crp->crp_callback = ipcomp_input_cb;
 	crp->crp_opaque = xd;
 
@@ -291,7 +289,7 @@ ipcomp_input_cb(struct cryptop *crp)
 	int skip, protoff;
 	uint8_t nproto;
 
-	m = crp->crp_mbuf;
+	m = crp->crp_buf.cb_mbuf;
 	xd = crp->crp_opaque;
 	CURVNET_SET(xd->vnet);
 	sav = xd->sav;
@@ -506,10 +504,8 @@ ipcomp_output(struct mbuf *m, struct secpolicy *sp, struct secasvar *sav,
 	xd->cryptoid = cryptoid;
 
 	/* Crypto operation descriptor */
-	crp->crp_ilen = m->m_pkthdr.len;	/* Total input length */
 	crp->crp_flags = CRYPTO_F_CBIFSYNC;
-	crp->crp_mbuf = m;
-	crp->crp_buf_type = CRYPTO_BUF_MBUF;
+	crypto_use_mbuf(crp, m);
 	crp->crp_callback = ipcomp_output_cb;
 	crp->crp_opaque = xd;
 
@@ -537,7 +533,7 @@ ipcomp_output_cb(struct cryptop *crp)
 	u_int idx;
 	int error, skip, protoff;
 
-	m = crp->crp_mbuf;
+	m = crp->crp_buf.cb_mbuf;
 	xd = crp->crp_opaque;
 	CURVNET_SET(xd->vnet);
 	idx = xd->idx;
@@ -742,7 +738,7 @@ static struct xformsw ipcomp_xformsw = {
 	.xf_type =	XF_IPCOMP,
 	.xf_name =	"IPcomp",
 	.xf_init =	ipcomp_init,
-	.xf_zeroize =	ipcomp_zeroize,
+	.xf_cleanup =	ipcomp_cleanup,
 	.xf_input =	ipcomp_input,
 	.xf_output =	ipcomp_output,
 };

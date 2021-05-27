@@ -83,6 +83,7 @@ enum socket_qstate {
  * (f) not locked since integer reads/writes are atomic.
  * (g) used only as a sleep/wakeup address, no value.
  * (h) locked by global mutex so_global_mtx.
+ * (k) locked by KTLS workqueue mutex
  */
 TAILQ_HEAD(accept_queue, socket);
 struct socket {
@@ -132,6 +133,9 @@ struct socket {
 			/* (b) cached MAC label for peer */
 			struct	label		*so_peerlabel;
 			u_long	so_oobmark;	/* chars to oob mark */
+
+			/* (k) Our place on KTLS RX work queue. */
+			STAILQ_ENTRY(socket)	so_ktls_rx_list;
 		};
 		/*
 		 * Listening socket, where accepts occur, is so_listen in all
@@ -334,6 +338,22 @@ struct accept_filter {
 		(struct socket *so);
 	SLIST_ENTRY(accept_filter) accf_next;
 };
+
+#define	ACCEPT_FILTER_DEFINE(modname, filtname, cb, create, destroy, ver) \
+	static struct accept_filter modname##_filter = {		\
+		.accf_name = filtname,					\
+		.accf_callback = cb,					\
+		.accf_create = create,					\
+		.accf_destroy = destroy,				\
+	};								\
+	static moduledata_t modname##_mod = {				\
+		.name = __XSTRING(modname),				\
+		.evhand = accept_filt_generic_mod_event,		\
+		.priv = &modname##_filter,				\
+	};								\
+	DECLARE_MODULE(modname, modname##_mod, SI_SUB_DRIVERS,		\
+	    SI_ORDER_MIDDLE);						\
+	MODULE_VERSION(modname, ver)
 
 #ifdef MALLOC_DECLARE
 MALLOC_DECLARE(M_ACCF);

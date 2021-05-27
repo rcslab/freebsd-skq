@@ -690,7 +690,8 @@ struct mlx5_ifc_qos_cap_bits {
 	u8         esw_rate_limit[0x1];
 	u8         hll[0x1];
 	u8         packet_pacing_burst_bound[0x1];
-	u8         reserved_at_6[0x1a];
+	u8         packet_pacing_typical_size[0x1];
+	u8         reserved_at_7[0x19];
 
 	u8         reserved_at_20[0x20];
 
@@ -779,10 +780,6 @@ struct mlx5_ifc_flow_table_nic_cap_bits {
 	u8         reserved_1[0x7200];
 };
 
-enum {
-	MLX5_ACCESS_REG_SUMMARY_CTRL_ID_PDDR                   = 0x5031,
-};
-
 struct mlx5_ifc_pddr_module_info_bits {
 	u8         cable_technology[0x8];
 	u8         cable_breakout[0x8];
@@ -869,23 +866,6 @@ struct mlx5_ifc_pddr_module_info_bits {
 	u8         wavelength[0x10];
 
 	u8         reserved_at_4c0[0x300];
-};
-
-union mlx5_ifc_pddr_operation_info_page_pddr_phy_info_page_pddr_troubleshooting_page_pddr_module_info_auto_bits {
-	struct mlx5_ifc_pddr_module_info_bits pddr_module_info;
-	u8         reserved_at_0[0x7c0];
-};
-
-struct mlx5_ifc_pddr_reg_bits {
-	u8         reserved_at_0[0x8];
-	u8         local_port[0x8];
-	u8         pnat[0x2];
-	u8         reserved_at_12[0xe];
-
-	u8         reserved_at_20[0x18];
-	u8         page_select[0x8];
-
-	union mlx5_ifc_pddr_operation_info_page_pddr_phy_info_page_pddr_troubleshooting_page_pddr_module_info_auto_bits page_data;
 };
 
 struct mlx5_ifc_per_protocol_networking_offload_caps_bits {
@@ -1296,14 +1276,15 @@ struct mlx5_ifc_cmd_hca_cap_bits {
 	u8         reserved_at_440[0x8];
 	u8         create_qp_start_hint[0x18];
 
-	u8         tls[0x1];
-	u8         reserved_at_461[0x2];
+	u8         reserved_at_460[0x3];
 	u8         log_max_uctx[0x5];
 	u8         reserved_at_468[0x3];
 	u8         log_max_umem[0x5];
 	u8         max_num_eqs[0x10];
 
-	u8         reserved_63[0x3];
+	u8         reserved_at_480[0x1];
+	u8         tls_tx[0x1];
+	u8         reserved_at_482[0x1];
 	u8         log_max_l2_table[0x5];
 	u8         reserved_64[0x8];
 	u8         log_uar_page_sz[0x10];
@@ -7789,7 +7770,13 @@ struct mlx5_ifc_set_rate_limit_in_bits {
 	u8         reserved_at_60[0x20];
 
 	u8         rate_limit[0x20];
+
 	u8         burst_upper_bound[0x20];
+
+	u8         reserved_at_c0[0x10];
+	u8         typical_packet_size[0x10];
+
+	u8         reserved_at_e0[0x120];
 };
 
 struct mlx5_ifc_access_register_out_bits {
@@ -8747,7 +8734,10 @@ struct mlx5_ifc_pcam_regs_5000_to_507f_bits {
 	u8         port_access_reg_cap_mask_127_to_96[0x20];
 	u8         port_access_reg_cap_mask_95_to_64[0x20];
 
-	u8         port_access_reg_cap_mask_63_to_36[0x1c];
+	u8         reserved_at_40[0xe];
+	u8         pddr[0x1];
+	u8         reserved_at_4f[0xd];
+
 	u8         pplm[0x1];
 	u8         port_access_reg_cap_mask_34_to_32[0x3];
 
@@ -10337,6 +10327,46 @@ struct mlx5_ifc_mpcnt_reg_ext_bits {
 	u8         reserved_at_21[0x1f];
 
 	union mlx5_ifc_mpcnt_reg_counter_set_auto_ext_bits counter_set;
+};
+
+struct mlx5_ifc_monitor_opcodes_layout_bits {
+	u8         reserved_at_0[0x10];
+	u8         monitor_opcode[0x10];
+};
+
+union mlx5_ifc_pddr_status_opcode_bits {
+	struct mlx5_ifc_monitor_opcodes_layout_bits monitor_opcodes;
+	u8         reserved_at_0[0x20];
+};
+
+struct mlx5_ifc_troubleshooting_info_page_layout_bits {
+	u8         reserved_at_0[0x10];
+	u8         group_opcode[0x10];
+
+	union mlx5_ifc_pddr_status_opcode_bits status_opcode;
+
+	u8         user_feedback_data[0x10];
+	u8         user_feedback_index[0x10];
+
+	u8         status_message[0x760];
+};
+
+union mlx5_ifc_pddr_page_data_bits {
+	struct mlx5_ifc_troubleshooting_info_page_layout_bits troubleshooting_info_page;
+	struct mlx5_ifc_pddr_module_info_bits pddr_module_info;
+	u8         reserved_at_0[0x7c0];
+};
+
+struct mlx5_ifc_pddr_reg_bits {
+	u8         reserved_at_0[0x8];
+	u8         local_port[0x8];
+	u8         pnat[0x2];
+	u8         reserved_at_12[0xe];
+
+	u8         reserved_at_20[0x18];
+	u8         page_select[0x8];
+
+	union mlx5_ifc_pddr_page_data_bits page_data;
 };
 
 enum {

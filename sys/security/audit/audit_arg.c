@@ -854,7 +854,7 @@ audit_arg_upath2_canon(char *upath)
  * It is assumed that the caller will hold any vnode locks necessary to
  * perform a VOP_GETATTR() on the passed vnode.
  *
- * XXX: The attr code is very similar to vfs_vnops.c:vn_stat(), but always
+ * XXX: The attr code is very similar to vfs_default.c:vop_stdstat(), but always
  * provides access to the generation number as we need that to construct the
  * BSM file ID.
  *
@@ -995,12 +995,10 @@ audit_arg_fcntl_rights(uint32_t fcntlrights)
  * call itself.
  */
 void
-audit_sysclose(struct thread *td, int fd)
+audit_sysclose(struct thread *td, int fd, struct file *fp)
 {
-	cap_rights_t rights;
 	struct kaudit_record *ar;
 	struct vnode *vp;
-	struct file *fp;
 
 	KASSERT(td != NULL, ("audit_sysclose: td == NULL"));
 
@@ -1010,12 +1008,10 @@ audit_sysclose(struct thread *td, int fd)
 
 	audit_arg_fd(fd);
 
-	if (getvnode(td, fd, cap_rights_init(&rights), &fp) != 0)
-		return;
-
 	vp = fp->f_vnode;
+	if (vp == NULL)
+		return;
 	vn_lock(vp, LK_SHARED | LK_RETRY);
 	audit_arg_vnode1(vp);
 	VOP_UNLOCK(vp);
-	fdrop(fp, td);
 }

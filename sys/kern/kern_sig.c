@@ -47,10 +47,10 @@ __FBSDID("$FreeBSD$");
 #include <sys/signalvar.h>
 #include <sys/vnode.h>
 #include <sys/acct.h>
-#include <sys/bus.h>
 #include <sys/capsicum.h>
 #include <sys/compressor.h>
 #include <sys/condvar.h>
+#include <sys/devctl.h>
 #include <sys/event.h>
 #include <sys/fcntl.h>
 #include <sys/imgact.h>
@@ -2961,7 +2961,6 @@ issignal(struct thread *td)
 		 * to clear it from the pending mask.
 		 */
 		switch ((intptr_t)p->p_sigacts->ps_sigact[_SIG_IDX(sig)]) {
-
 		case (intptr_t)SIG_DFL:
 			/*
 			 * Don't take default actions on system processes.
@@ -3138,6 +3137,92 @@ postsig(int sig)
 		postsig_done(sig, td, ps);
 	}
 	return (1);
+}
+
+int
+sig_ast_checksusp(struct thread *td)
+{
+	struct proc *p;
+	int ret;
+
+	p = td->td_proc;
+	PROC_LOCK_ASSERT(p, MA_OWNED);
+
+	if ((td->td_flags & TDF_NEEDSUSPCHK) == 0)
+		return (0);
+
+	ret = thread_suspend_check(1);
+	MPASS(ret == 0 || ret == EINTR || ret == ERESTART);
+	return (ret);
+}
+
+int
+sig_ast_needsigchk(struct thread *td)
+{
+	struct proc *p;
+	struct sigacts *ps;
+	int ret, sig;
+
+	p = td->td_proc;
+	PROC_LOCK_ASSERT(p, MA_OWNED);
+
+	if ((td->td_flags & TDF_NEEDSIGCHK) == 0)
+		return (0);
+
+	ps = p->p_sigacts;
+	mtx_lock(&ps->ps_mtx);
+	sig = cursig(td);
+	if (sig == -1) {
+		mtx_unlock(&ps->ps_mtx);
+		KASSERT((td->td_flags & TDF_SBDRY) != 0, ("lost TDF_SBDRY"));
+		KASSERT(TD_SBDRY_INTR(td),
+		    ("lost TDF_SERESTART of TDF_SEINTR"));
+		KASSERT((td->td_flags & (TDF_SEINTR | TDF_SERESTART)) !=
+		    (TDF_SEINTR | TDF_SERESTART),
+		    ("both TDF_SEINTR and TDF_SERESTART"));
+		ret = TD_SBDRY_ERRNO(td);
+	} else if (sig != 0) {
+		ret = SIGISMEMBER(ps->ps_sigintr, sig) ? EINTR : ERESTART;
+		mtx_unlock(&ps->ps_mtx);
+	} else {
+		mtx_unlock(&ps->ps_mtx);
+		ret = 0;
+	}
+
+	/*
+	 * Do not go into sleep if this thread was the ptrace(2)
+	 * attach leader.  cursig() consumed SIGSTOP from PT_ATTACH,
+	 * but we usually act on the signal by interrupting sleep, and
+	 * should do that here as well.
+	 */
+	if ((td->td_dbgflags & TDB_FSTP) != 0) {
+		if (ret == 0)
+			ret = EINTR;
+		td->td_dbgflags &= ~TDB_FSTP;
+	}
+
+	return (ret);
+}
+
+int
+sig_intr(void)
+{
+	struct thread *td;
+	struct proc *p;
+	int ret;
+
+	td = curthread;
+	if ((td->td_flags & (TDF_NEEDSIGCHK | TDF_NEEDSUSPCHK)) == 0)
+		return (0);
+
+	p = td->td_proc;
+
+	PROC_LOCK(p);
+	ret = sig_ast_checksusp(td);
+	if (ret == 0)
+		ret = sig_ast_needsigchk(td);
+	PROC_UNLOCK(p);
+	return (ret);
 }
 
 void
@@ -3454,8 +3539,9 @@ corefile_open_last(struct thread *td, char *name, int indexpos,
 		    (lasttime.tv_sec == vattr.va_mtime.tv_sec &&
 		    lasttime.tv_nsec >= vattr.va_mtime.tv_nsec)) {
 			if (oldvp != NULL)
-				vnode_close_locked(td, oldvp);
+				vn_close(oldvp, FWRITE, td->td_ucred, td);
 			oldvp = vp;
+			VOP_UNLOCK(oldvp);
 			lasttime = vattr.va_mtime;
 		} else {
 			vnode_close_locked(td, vp);
@@ -3466,12 +3552,18 @@ corefile_open_last(struct thread *td, char *name, int indexpos,
 		if (nextvp == NULL) {
 			if ((td->td_proc->p_flag & P_SUGID) != 0) {
 				error = EFAULT;
-				vnode_close_locked(td, oldvp);
+				vn_close(oldvp, FWRITE, td->td_ucred, td);
 			} else {
 				nextvp = oldvp;
+				error = vn_lock(nextvp, LK_EXCLUSIVE);
+				if (error != 0) {
+					vn_close(nextvp, FWRITE, td->td_ucred,
+					    td);
+					nextvp = NULL;
+				}
 			}
 		} else {
-			vnode_close_locked(td, oldvp);
+			vn_close(oldvp, FWRITE, td->td_ucred, td);
 		}
 	}
 	if (error != 0) {
@@ -3724,7 +3816,7 @@ coredump(struct thread *td)
 	if (error != 0 || coredump_devctl == 0)
 		goto out;
 	sb = sbuf_new_auto();
-	if (vn_fullpath_global(td, p->p_textvp, &fullpath, &freepath) != 0)
+	if (vn_fullpath_global(p->p_textvp, &fullpath, &freepath) != 0)
 		goto out2;
 	sbuf_printf(sb, "comm=\"");
 	devctl_safe_quote_sb(sb, fullpath);
@@ -3739,7 +3831,7 @@ coredump(struct thread *td)
 	if (name[0] != '/') {
 		fullpathsize = MAXPATHLEN;
 		freepath = malloc(fullpathsize, M_TEMP, M_WAITOK);
-		if (vn_getcwd(td, freepath, &fullpath, &fullpathsize) != 0) {
+		if (vn_getcwd(freepath, &fullpath, &fullpathsize) != 0) {
 			free(freepath, M_TEMP);
 			goto out2;
 		}
@@ -3788,7 +3880,8 @@ nosys(struct thread *td, struct nosys_args *args)
 		uprintf("pid %d comm %s: nosys %d\n", p->p_pid, p->p_comm,
 		    td->td_sa.code);
 	}
-	if (kern_lognosys == 2 || kern_lognosys == 3) {
+	if (kern_lognosys == 2 || kern_lognosys == 3 ||
+	    (p->p_pid == 1 && (kern_lognosys & 3) == 0)) {
 		printf("pid %d comm %s: nosys %d\n", p->p_pid, p->p_comm,
 		    td->td_sa.code);
 	}
@@ -3976,6 +4069,22 @@ sigfastblock_fetch_sig(struct thread *td, bool sendsig, uint32_t *valp)
 	return (true);
 }
 
+static void
+sigfastblock_resched(struct thread *td, bool resched)
+{
+	struct proc *p;
+
+	if (resched) {
+		p = td->td_proc;
+		PROC_LOCK(p);
+		reschedule_signals(p, td->td_sigmask, 0);
+		PROC_UNLOCK(p);
+	}
+	thread_lock(td);
+	td->td_flags |= TDF_ASTPENDING | TDF_NEEDSIGCHK;
+	thread_unlock(td);
+}
+
 int
 sys_sigfastblock(struct thread *td, struct sigfastblock_args *uap)
 {
@@ -4046,11 +4155,8 @@ sys_sigfastblock(struct thread *td, struct sigfastblock_args *uap)
 		 * signals to current thread.  But notify others about
 		 * fake unblock.
 		 */
-		if (error == 0 && p->p_numthreads != 1) {
-			PROC_LOCK(p);
-			reschedule_signals(p, td->td_sigmask, 0);
-			PROC_UNLOCK(p);
-		}
+		sigfastblock_resched(td, error == 0 && p->p_numthreads != 1);
+
 		break;
 
 	case SIGFASTBLOCK_UNSETPTR:
@@ -4079,7 +4185,6 @@ sys_sigfastblock(struct thread *td, struct sigfastblock_args *uap)
 void
 sigfastblock_clear(struct thread *td)
 {
-	struct proc *p;
 	bool resched;
 
 	if ((td->td_pflags & TDP_SIGFASTBLOCK) == 0)
@@ -4088,12 +4193,7 @@ sigfastblock_clear(struct thread *td)
 	resched = (td->td_pflags & TDP_SIGFASTPENDING) != 0 ||
 	    SIGPENDING(td);
 	td->td_pflags &= ~(TDP_SIGFASTBLOCK | TDP_SIGFASTPENDING);
-	if (resched) {
-		p = td->td_proc;
-		PROC_LOCK(p);
-		reschedule_signals(p, td->td_sigmask, 0);
-		PROC_UNLOCK(p);
-	}
+	sigfastblock_resched(td, resched);
 }
 
 void

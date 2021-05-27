@@ -106,12 +106,6 @@ static int	sec_aesu_make_desc(struct sec_softc *sc,
     const struct crypto_session_params *csp, struct sec_desc *desc,
     struct cryptop *crp);
 
-/* DEU */
-static bool	sec_deu_newsession(const struct crypto_session_params *csp);
-static int	sec_deu_make_desc(struct sec_softc *sc,
-    const struct crypto_session_params *csp, struct sec_desc *desc,
-    struct cryptop *crp);
-
 /* MDEU */
 static bool	sec_mdeu_can_handle(u_int alg);
 static int	sec_mdeu_config(const struct crypto_session_params *csp,
@@ -152,10 +146,6 @@ static struct sec_eu_methods sec_eus[] = {
 	{
 		sec_aesu_newsession,
 		sec_aesu_make_desc,
-	},
-	{
-		sec_deu_newsession,
-		sec_deu_make_desc,
 	},
 	{
 		sec_mdeu_newsession,
@@ -275,7 +265,6 @@ sec_attach(device_t dev)
 
 	if (error)
 		goto fail2;
-
 
 	if (sc->sc_version == 3) {
 		sc->sc_sec_irid = 1;
@@ -852,14 +841,17 @@ sec_desc_map_dma(struct sec_softc *sc, struct sec_dma_mem *dma_mem,
 	if (dma_mem->dma_vaddr != NULL)
 		return (EBUSY);
 
-	switch (crp->crp_buf_type) {
+	switch (crp->crp_buf.cb_type) {
 	case CRYPTO_BUF_CONTIG:
 		break;
 	case CRYPTO_BUF_UIO:
 		size = SEC_FREE_LT_CNT(sc) * SEC_MAX_DMA_BLOCK_SIZE;
 		break;
 	case CRYPTO_BUF_MBUF:
-		size = m_length(crp->crp_mbuf, NULL);
+		size = m_length(crp->crp_buf.cb_mbuf, NULL);
+		break;
+	case CRYPTO_BUF_VMPAGE:
+		size = PAGE_SIZE - crp->crp_buf.cb_vm_page_offset;
 		break;
 	default:
 		return (EINVAL);
@@ -1147,12 +1139,6 @@ sec_cipher_supported(const struct crypto_session_params *csp)
 		if (csp->csp_ivlen != AES_BLOCK_LEN)
 			return (false);
 		break;
-	case CRYPTO_DES_CBC:
-	case CRYPTO_3DES_CBC:
-		/* DEU */
-		if (csp->csp_ivlen != DES_BLOCK_LEN)
-			return (false);
-		break;
 	default:
 		return (false);
 	}
@@ -1174,13 +1160,11 @@ sec_auth_supported(struct sec_softc *sc,
 		if (sc->sc_version < 3)
 			return (false);
 		/* FALLTHROUGH */
-	case CRYPTO_MD5_HMAC:
 	case CRYPTO_SHA1_HMAC:
 	case CRYPTO_SHA2_256_HMAC:
 		if (csp->csp_auth_klen > SEC_MAX_KEY_LEN)
 			return (false);
 		break;
-	case CRYPTO_MD5:
 	case CRYPTO_SHA1:
 		break;
 	default:
@@ -1263,7 +1247,7 @@ sec_process(device_t dev, struct cryptop *crp, int hint)
 	csp = crypto_get_params(crp->crp_session);
 
 	/* Check for input length */
-	if (crp->crp_ilen > SEC_MAX_DMA_BLOCK_SIZE) {
+	if (crypto_buffer_len(&crp->crp_buf) > SEC_MAX_DMA_BLOCK_SIZE) {
 		crp->crp_etype = E2BIG;
 		crypto_done(crp);
 		return (0);
@@ -1475,64 +1459,13 @@ sec_aesu_make_desc(struct sec_softc *sc,
 	return (error);
 }
 
-/* DEU */
-
-static bool
-sec_deu_newsession(const struct crypto_session_params *csp)
-{
-
-	switch (csp->csp_cipher_alg) {
-	case CRYPTO_DES_CBC:
-	case CRYPTO_3DES_CBC:
-		return (true);
-	default:
-		return (false);
-	}
-}
-
-static int
-sec_deu_make_desc(struct sec_softc *sc, const struct crypto_session_params *csp,
-    struct sec_desc *desc, struct cryptop *crp)
-{
-	struct sec_hw_desc *hd = desc->sd_desc;
-	int error;
-
-	hd->shd_eu_sel0 = SEC_EU_DEU;
-	hd->shd_mode0 = SEC_DEU_MODE_CBC;
-
-	switch (csp->csp_cipher_alg) {
-	case CRYPTO_3DES_CBC:
-		hd->shd_mode0 |= SEC_DEU_MODE_TS;
-		break;
-	case CRYPTO_DES_CBC:
-		break;
-	default:
-		return (EINVAL);
-	}
-
-	if (CRYPTO_OP_IS_ENCRYPT(crp->crp_op)) {
-		hd->shd_mode0 |= SEC_DEU_MODE_ED;
-		hd->shd_dir = 0;
-	} else
-		hd->shd_dir = 1;
-
-	if (csp->csp_mode == CSP_MODE_ETA)
-		error = sec_build_common_s_desc(sc, desc, csp, crp);
-	else
-		error = sec_build_common_ns_desc(sc, desc, csp, crp);
-
-	return (error);
-}
-
 /* MDEU */
 
 static bool
 sec_mdeu_can_handle(u_int alg)
 {
 	switch (alg) {
-	case CRYPTO_MD5:
 	case CRYPTO_SHA1:
-	case CRYPTO_MD5_HMAC:
 	case CRYPTO_SHA1_HMAC:
 	case CRYPTO_SHA2_256_HMAC:
 	case CRYPTO_SHA2_384_HMAC:
@@ -1552,14 +1485,6 @@ sec_mdeu_config(const struct crypto_session_params *csp, u_int *eu, u_int *mode,
 	*eu = SEC_EU_NONE;
 
 	switch (csp->csp_auth_alg) {
-	case CRYPTO_MD5_HMAC:
-		*mode |= SEC_MDEU_MODE_HMAC;
-		/* FALLTHROUGH */
-	case CRYPTO_MD5:
-		*eu = SEC_EU_MDEU_A;
-		*mode |= SEC_MDEU_MODE_MD5;
-		*hashlen = MD5_HASH_LEN;
-		break;
 	case CRYPTO_SHA1_HMAC:
 		*mode |= SEC_MDEU_MODE_HMAC;
 		/* FALLTHROUGH */

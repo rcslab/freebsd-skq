@@ -475,7 +475,7 @@ static struct line {
 	int count;
 	int skip;
 }  failed_lines[10000];
-const char *failed_filename;
+static const char *failed_filename;
 
 /* Count this failure, setup up log destination and handle initial report. */
 static void __LA_PRINTFLIKE(3, 4)
@@ -592,6 +592,19 @@ assertion_chdir(const char *file, int line, const char *pathname)
 	if (chdir(pathname) == 0)
 		return (1);
 	failure_start(file, line, "chdir(\"%s\")", pathname);
+	failure_finish(NULL);
+	return (0);
+
+}
+
+/* change file/directory permissions and errors if it fails */
+int
+assertion_chmod(const char *file, int line, const char *pathname, int mode)
+{
+	assertion_count(file, line);
+	if (chmod(pathname, mode) == 0)
+		return (1);
+	failure_start(file, line, "chmod(\"%s\", %4.o)", pathname, mode);
 	failure_finish(NULL);
 	return (0);
 
@@ -3458,7 +3471,7 @@ assertion_entry_compare_acls(const char *file, int line,
 /* Use "list.h" to create a list of all tests (functions and names). */
 #undef DEFINE_TEST
 #define	DEFINE_TEST(n) { n, #n, 0 },
-struct test_list_t tests[] = {
+static struct test_list_t tests[] = {
 	#include "list.h"
 };
 

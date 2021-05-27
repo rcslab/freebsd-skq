@@ -46,12 +46,14 @@
  * not include the padding.
  */
 
+#ifndef LOCORE
 typedef struct {
 	u_int32_t	n_namesz;	/* Length of name. */
 	u_int32_t	n_descsz;	/* Length of descriptor. */
 	u_int32_t	n_type;		/* Type of this note. */
 } Elf_Note;
 typedef Elf_Note Elf_Nhdr;
+#endif
 
 /*
  * Option kinds.
@@ -112,12 +114,14 @@ typedef Elf_Note Elf_Nhdr;
  * The header for GNU-style hash sections.
  */
 
+#ifndef LOCORE
 typedef struct {
 	u_int32_t	gh_nbuckets;	/* Number of hash buckets. */
 	u_int32_t	gh_symndx;	/* First visible symbol in .dynsym. */
 	u_int32_t	gh_maskwords;	/* #maskwords used in bloom filter. */
 	u_int32_t	gh_shift2;	/* Bloom filter shift count. */
 } Elf_GNU_Hash_Header;
+#endif
 
 /* Indexes into the e_ident array.  Keep synced with
    http://www.sco.com/developers/gabi/latest/ch4.eheader.html */
@@ -764,6 +768,7 @@ typedef struct {
 #define	DF_1_ORIGIN	0x00000080	/* Process $ORIGIN */
 #define	DF_1_INTERPOSE	0x00000400	/* Interpose all objects but main */
 #define	DF_1_NODEFLIB	0x00000800	/* Do not search default paths */
+#define	DF_1_PIE	0x08000000	/* Is position-independent executable */
 
 /* Values for l_flags. */
 #define	LL_NONE			0x0	/* no flags */
@@ -791,6 +796,8 @@ typedef struct {
 #define	NT_FREEBSD_FCTL_PROTMAX_DISABLE	0x00000002
 #define	NT_FREEBSD_FCTL_STKGAP_DISABLE	0x00000004
 #define	NT_FREEBSD_FCTL_WXNEEDED	0x00000008
+#define	NT_FREEBSD_FCTL_LA48		0x00000010
+#define	NT_FREEBSD_FCTL_ASG_DISABLE	0x00000020 /* ASLR STACK GAP Disable */
 
 /* Values for n_type.  Used in core files. */
 #define	NT_PRSTATUS	1	/* Process status. */
@@ -961,8 +968,9 @@ typedef struct {
 #define	AT_ENVC		30	/* Environment count */
 #define	AT_ENVV		31	/* Environment vector */
 #define	AT_PS_STRINGS	32	/* struct ps_strings */
+#define	AT_FXRNG	33	/* Pointer to root RNG seed version. */
 
-#define	AT_COUNT	33	/* Count of defined aux entry types. */
+#define	AT_COUNT	34	/* Count of defined aux entry types. */
 
 /*
  * Relocation types.
@@ -1342,6 +1350,8 @@ typedef struct {
 #define	R_RISCV_SET8		54
 #define	R_RISCV_SET16		55
 #define	R_RISCV_SET32		56
+#define	R_RISCV_32_PCREL	57
+#define	R_RISCV_IRELATIVE	58
 
 #define	R_SPARC_NONE		0
 #define	R_SPARC_8		1

@@ -46,6 +46,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/systm.h>
 #include <sys/bus.h>
 #include <sys/cpu.h>
+#include <sys/cpuset.h>
 #include <sys/kernel.h>
 #include <sys/ktr.h>
 #include <sys/malloc.h>
@@ -97,6 +98,7 @@ static uint32_t cpu_reg[MAXCPU][2];
 #endif
 static device_t cpu_list[MAXCPU];
 
+void mpentry(u_long hartid);
 void init_secondary(uint64_t);
 
 static struct mtx ap_boot_mtx;
@@ -265,6 +267,9 @@ init_secondary(uint64_t hart)
 	/* Enable external (PLIC) interrupts */
 	csr_set(sie, SIE_SEIE);
 
+	/* Activate this hart in the kernel pmap. */
+	CPU_SET_ATOMIC(hart, &kernel_pmap->pm_active);
+
 	/* Activate process 0's pmap. */
 	pmap_activate_boot(vmspace_pmap(proc0.p_vmspace));
 
@@ -297,7 +302,7 @@ smp_after_idle_runnable(void *arg __unused)
 	struct pcpu *pc;
 	int cpu;
 
-	for (cpu = 1; cpu < mp_ncpus; cpu++) {
+	for (cpu = 1; cpu <= mp_maxid; cpu++) {
 		if (bootstacks[cpu] != NULL) {
 			pc = pcpu_find(cpu);
 			while (atomic_load_ptr(&pc->pc_curpcb) == NULL)
@@ -316,7 +321,7 @@ ipi_handler(void *arg)
 	u_int cpu, ipi;
 	int bit;
 
-	sbi_clear_ipi();
+	csr_clear(sip, SIP_SSIP);
 
 	cpu = PCPU_GET(cpuid);
 
@@ -399,9 +404,11 @@ static boolean_t
 cpu_init_fdt(u_int id, phandle_t node, u_int addr_size, pcell_t *reg)
 {
 	struct pcpu *pcpup;
+	vm_paddr_t start_addr;
 	uint64_t hart;
 	u_int cpuid;
 	int naps;
+	int error;
 
 	/* Check if this hart supports MMU. */
 	if (OF_getproplen(node, "mmu-type") < 0)
@@ -440,6 +447,23 @@ cpu_init_fdt(u_int id, phandle_t node, u_int addr_size, pcell_t *reg)
 	/* Check if we are able to start this cpu */
 	if (cpuid > mp_maxid)
 		return (0);
+
+	/*
+	 * Depending on the SBI implementation, APs are waiting either in
+	 * locore.S or to be activated explicitly, via SBI call.
+	 */
+	if (sbi_probe_extension(SBI_EXT_ID_HSM) != 0) {
+		start_addr = pmap_kextract((vm_offset_t)mpentry);
+		error = sbi_hsm_hart_start(hart, start_addr, 0);
+		if (error != 0) {
+			mp_ncpus--;
+
+			/* Send a warning to the user and continue. */
+			printf("AP %u (hart %lu) failed to start, error %d\n",
+			    cpuid, hart, error);
+			return (0);
+		}
+	}
 
 	pcpup = &__pcpu[cpuid];
 	pcpu_init(pcpup, cpuid, sizeof(struct pcpu));

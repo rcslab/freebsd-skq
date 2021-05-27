@@ -50,6 +50,7 @@ __FBSDID("$FreeBSD$");
 #include <dev/pci/pcivar.h>
 #include <dev/pci/pci_private.h>
 #include <dev/pci/pci_iov.h>
+#include <dev/backlight/backlight.h>
 
 #include <linux/kobject.h>
 #include <linux/device.h>
@@ -64,6 +65,10 @@ __FBSDID("$FreeBSD$");
 #include <linux/pci.h>
 #include <linux/compat.h>
 
+#include <linux/backlight.h>
+
+#include "backlight_if.h"
+
 static device_probe_t linux_pci_probe;
 static device_attach_t linux_pci_attach;
 static device_detach_t linux_pci_detach;
@@ -73,6 +78,9 @@ static device_shutdown_t linux_pci_shutdown;
 static pci_iov_init_t linux_pci_iov_init;
 static pci_iov_uninit_t linux_pci_iov_uninit;
 static pci_iov_add_vf_t linux_pci_iov_add_vf;
+static int linux_backlight_get_status(device_t dev, struct backlight_props *props);
+static int linux_backlight_update_status(device_t dev, struct backlight_props *props);
+static int linux_backlight_get_info(device_t dev, struct backlight_info *info);
 
 static device_method_t pci_methods[] = {
 	DEVMETHOD(device_probe, linux_pci_probe),
@@ -84,6 +92,11 @@ static device_method_t pci_methods[] = {
 	DEVMETHOD(pci_iov_init, linux_pci_iov_init),
 	DEVMETHOD(pci_iov_uninit, linux_pci_iov_uninit),
 	DEVMETHOD(pci_iov_add_vf, linux_pci_iov_add_vf),
+
+	/* backlight interface */
+	DEVMETHOD(backlight_update_status, linux_backlight_update_status),
+	DEVMETHOD(backlight_get_status, linux_backlight_get_status),
+	DEVMETHOD(backlight_get_info, linux_backlight_get_info),
 	DEVMETHOD_END
 };
 
@@ -271,6 +284,7 @@ linux_pci_attach_device(device_t dev, struct pci_driver *pdrv,
 	if (error)
 		goto out_dma_init;
 
+	TAILQ_INIT(&pdev->mmio);
 	pbus = malloc(sizeof(*pbus), M_DEVBUF, M_WAITOK | M_ZERO);
 	pbus->self = pdev;
 	pbus->number = pci_get_bus(dev);
@@ -587,7 +601,6 @@ linux_dma_trie_free(struct pctrie *ptree, void *node)
 	uma_zfree(linux_dma_trie_zone, node);
 }
 
-
 PCTRIE_DEFINE(LINUX_DMA, linux_dma_obj, dma_addr, linux_dma_trie_alloc,
     linux_dma_trie_free);
 
@@ -612,8 +625,8 @@ linux_dma_alloc_coherent(struct device *dev, size_t size,
 	else
 		high = BUS_SPACE_MAXADDR;
 	align = PAGE_SIZE << get_order(size);
-	mem = (void *)kmem_alloc_contig(size, flag, 0, high, align, 0,
-	    VM_MEMATTR_DEFAULT);
+	mem = (void *)kmem_alloc_contig(size, flag & GFP_NATIVE_MASK, 0, high,
+	    align, 0, VM_MEMATTR_DEFAULT);
 	if (mem != NULL) {
 		*dma_handle = linux_dma_map_phys(dev, vtophys(mem), size);
 		if (*dma_handle == 0) {
@@ -919,7 +932,7 @@ linux_dma_pool_alloc(struct dma_pool *pool, gfp_t mem_flags,
 {
 	struct linux_dma_obj *obj;
 
-	obj = uma_zalloc_arg(pool->pool_zone, pool, mem_flags);
+	obj = uma_zalloc_arg(pool->pool_zone, pool, mem_flags & GFP_NATIVE_MASK);
 	if (obj == NULL)
 		return (NULL);
 
@@ -950,4 +963,74 @@ linux_dma_pool_free(struct dma_pool *pool, void *vaddr, dma_addr_t dma_addr)
 	DMA_POOL_UNLOCK(pool);
 
 	uma_zfree_arg(pool->pool_zone, obj, pool);
+}
+
+static int
+linux_backlight_get_status(device_t dev, struct backlight_props *props)
+{
+	struct pci_dev *pdev;
+
+	linux_set_current(curthread);
+	pdev = device_get_softc(dev);
+
+	props->brightness = pdev->dev.bd->props.brightness;
+	props->brightness = props->brightness * 100 / pdev->dev.bd->props.max_brightness;
+	props->nlevels = 0;
+
+	return (0);
+}
+
+static int
+linux_backlight_get_info(device_t dev, struct backlight_info *info)
+{
+	struct pci_dev *pdev;
+
+	linux_set_current(curthread);
+	pdev = device_get_softc(dev);
+
+	info->type = BACKLIGHT_TYPE_PANEL;
+	strlcpy(info->name, pdev->dev.bd->name, BACKLIGHTMAXNAMELENGTH);
+	return (0);
+}
+
+static int
+linux_backlight_update_status(device_t dev, struct backlight_props *props)
+{
+	struct pci_dev *pdev;
+
+	linux_set_current(curthread);
+	pdev = device_get_softc(dev);
+
+	pdev->dev.bd->props.brightness = pdev->dev.bd->props.max_brightness *
+		props->brightness / 100;
+	return (pdev->dev.bd->ops->update_status(pdev->dev.bd));
+}
+
+struct backlight_device *
+linux_backlight_device_register(const char *name, struct device *dev,
+    void *data, const struct backlight_ops *ops, struct backlight_properties *props)
+{
+
+	dev->bd = malloc(sizeof(*dev->bd), M_DEVBUF, M_WAITOK | M_ZERO);
+	dev->bd->ops = ops;
+	dev->bd->props.type = props->type;
+	dev->bd->props.max_brightness = props->max_brightness;
+	dev->bd->props.brightness = props->brightness;
+	dev->bd->props.power = props->power;
+	dev->bd->data = data;
+	dev->bd->dev = dev;
+	dev->bd->name = strdup(name, M_DEVBUF);
+
+	dev->backlight_dev = backlight_register(name, dev->bsddev);
+
+	return (dev->bd);
+}
+
+void
+linux_backlight_device_unregister(struct backlight_device *bd)
+{
+
+	backlight_destroy(bd->dev->backlight_dev);
+	free(bd->name, M_DEVBUF);
+	free(bd, M_DEVBUF);
 }

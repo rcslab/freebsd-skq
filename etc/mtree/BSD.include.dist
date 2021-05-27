@@ -193,6 +193,8 @@
     ..
     lib80211
     ..
+    lib9p
+    ..
     libipt
     ..
     libmilter
@@ -227,6 +229,8 @@
         cc
         ..
         netdump
+        ..
+        tcp_stacks
         ..
     ..
     netinet6

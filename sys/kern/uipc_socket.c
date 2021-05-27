@@ -165,12 +165,10 @@ static int	soreceive_rcvoob(struct socket *so, struct uio *uio,
 		    int flags);
 static void	so_rdknl_lock(void *);
 static void	so_rdknl_unlock(void *);
-static void	so_rdknl_assert_locked(void *);
-static void	so_rdknl_assert_unlocked(void *);
+static void	so_rdknl_assert_lock(void *, int);
 static void	so_wrknl_lock(void *);
 static void	so_wrknl_unlock(void *);
-static void	so_wrknl_assert_locked(void *);
-static void	so_wrknl_assert_unlocked(void *);
+static void	so_wrknl_assert_lock(void *, int);
 
 static void	filt_sordetach(struct knote *kn);
 static int	filt_soread(struct knote *kn, long hint);
@@ -290,7 +288,7 @@ socket_zone_change(void *tag)
 static void
 socket_hhook_register(int subtype)
 {
-	
+
 	if (hhook_head_register(HHOOK_TYPE_SOCKET, subtype,
 	    &V_socket_hhh[subtype],
 	    HHOOK_NOWAIT|HHOOK_HEADISINVNET) != 0)
@@ -300,7 +298,7 @@ socket_hhook_register(int subtype)
 static void
 socket_hhook_deregister(int subtype)
 {
-	
+
 	if (hhook_head_deregister(V_socket_hhh[subtype]) != 0)
 		printf("%s: WARNING: unable to deregister hook\n", __func__);
 }
@@ -550,9 +548,9 @@ socreate(int dom, struct socket **aso, int type, int proto,
 	mac_socket_create(cred, so);
 #endif
 	knlist_init(&so->so_rdsel.si_note, so, so_rdknl_lock, so_rdknl_unlock,
-	    so_rdknl_assert_locked, so_rdknl_assert_unlocked);
+	    so_rdknl_assert_lock);
 	knlist_init(&so->so_wrsel.si_note, so, so_wrknl_lock, so_wrknl_unlock,
-	    so_wrknl_assert_locked, so_wrknl_assert_unlocked);
+	    so_wrknl_assert_lock);
 	/*
 	 * Auto-sizing of socket buffers is managed by the protocols and
 	 * the appropriate flags must be set in the pru_attach function.
@@ -729,9 +727,9 @@ sonewconn(struct socket *head, int connstatus)
 	mac_socket_newconn(head, so);
 #endif
 	knlist_init(&so->so_rdsel.si_note, so, so_rdknl_lock, so_rdknl_unlock,
-	    so_rdknl_assert_locked, so_rdknl_assert_unlocked);
+	    so_rdknl_assert_lock);
 	knlist_init(&so->so_wrsel.si_note, so, so_wrknl_lock, so_wrknl_unlock,
-	    so_wrknl_assert_locked, so_wrknl_assert_unlocked);
+	    so_wrknl_assert_lock);
 	VNET_SO_ASSERT(head);
 	if (soreserve(so, head->sol_sbsnd_hiwat, head->sol_sbrcv_hiwat)) {
 		sodealloc(so);
@@ -793,7 +791,7 @@ sonewconn(struct socket *head, int connstatus)
 	return (so);
 }
 
-#ifdef SCTP
+#if defined(SCTP) || defined(SCTP_SUPPORT)
 /*
  * Socket part of sctp_peeloff().  Detach a new socket from an
  * association.  The new socket is returned with a reference.
@@ -823,9 +821,9 @@ sopeeloff(struct socket *head)
 	mac_socket_newconn(head, so);
 #endif
 	knlist_init(&so->so_rdsel.si_note, so, so_rdknl_lock, so_rdknl_unlock,
-	    so_rdknl_assert_locked, so_rdknl_assert_unlocked);
+	    so_rdknl_assert_lock);
 	knlist_init(&so->so_wrsel.si_note, so, so_wrknl_lock, so_wrknl_unlock,
-	    so_wrknl_assert_locked, so_wrknl_assert_unlocked);
+	    so_wrknl_assert_lock);
 	VNET_SO_ASSERT(head);
 	if (soreserve(so, head->so_snd.sb_hiwat, head->so_rcv.sb_hiwat)) {
 		sodealloc(so);
@@ -1194,7 +1192,8 @@ soclose(struct socket *so)
 				goto drop;
 			}
 		}
-		if (so->so_options & SO_LINGER) {
+
+		if ((so->so_options & SO_LINGER) != 0 && so->so_linger != 0) {
 			if ((so->so_state & SS_ISDISCONNECTING) &&
 			    (so->so_state & SS_NBIO))
 				goto drop;
@@ -1678,6 +1677,13 @@ restart:
 				resid = 0;
 				if (flags & MSG_EOR)
 					top->m_flags |= M_EOR;
+#ifdef KERN_TLS
+				if (tls != NULL) {
+					ktls_frame(top, tls, &tls_enq_cnt,
+					    tls_rtype);
+					tls_rtype = TLS_RLTYPE_APP;
+				}
+#endif
 			} else {
 				/*
 				 * Copy the data from userland into a mbuf
@@ -1691,7 +1697,7 @@ restart:
 				if (tls != NULL) {
 					top = m_uiotombuf(uio, M_WAITOK, space,
 					    tls->params.max_frame_len,
-					    M_NOMAP |
+					    M_EXTPG |
 					    ((flags & MSG_EOR) ? M_EOR : 0));
 					if (top != NULL) {
 						ktls_frame(top, tls,
@@ -1958,19 +1964,26 @@ restart:
 		}
 		SOCKBUF_LOCK_ASSERT(&so->so_rcv);
 		if (so->so_rcv.sb_state & SBS_CANTRCVMORE) {
-			if (m == NULL) {
+			if (m != NULL)
+				goto dontblock;
+#ifdef KERN_TLS
+			else if (so->so_rcv.sb_tlsdcc == 0 &&
+			    so->so_rcv.sb_tlscc == 0) {
+#else
+			else {
+#endif
 				SOCKBUF_UNLOCK(&so->so_rcv);
 				goto release;
-			} else
-				goto dontblock;
+			}
 		}
 		for (; m != NULL; m = m->m_next)
 			if (m->m_type == MT_OOBDATA  || (m->m_flags & M_EOR)) {
 				m = so->so_rcv.sb_mb;
 				goto dontblock;
 			}
-		if ((so->so_state & (SS_ISCONNECTED|SS_ISCONNECTING)) == 0 &&
-		    (so->so_proto->pr_flags & PR_CONNREQUIRED)) {
+		if ((so->so_state & (SS_ISCONNECTING | SS_ISCONNECTED |
+		    SS_ISDISCONNECTING | SS_ISDISCONNECTED)) == 0 &&
+		    (so->so_proto->pr_flags & PR_CONNREQUIRED) != 0) {
 			SOCKBUF_UNLOCK(&so->so_rcv);
 			error = ENOTCONN;
 			goto release;
@@ -2042,6 +2055,32 @@ dontblock:
 	if (m != NULL && m->m_type == MT_CONTROL) {
 		struct mbuf *cm = NULL, *cmn;
 		struct mbuf **cme = &cm;
+#ifdef KERN_TLS
+		struct cmsghdr *cmsg;
+		struct tls_get_record tgr;
+
+		/*
+		 * For MSG_TLSAPPDATA, check for a non-application data
+		 * record.  If found, return ENXIO without removing
+		 * it from the receive queue.  This allows a subsequent
+		 * call without MSG_TLSAPPDATA to receive it.
+		 * Note that, for TLS, there should only be a single
+		 * control mbuf with the TLS_GET_RECORD message in it.
+		 */
+		if (flags & MSG_TLSAPPDATA) {
+			cmsg = mtod(m, struct cmsghdr *);
+			if (cmsg->cmsg_type == TLS_GET_RECORD &&
+			    cmsg->cmsg_len == CMSG_LEN(sizeof(tgr))) {
+				memcpy(&tgr, CMSG_DATA(cmsg), sizeof(tgr));
+				/* This will need to change for TLS 1.3. */
+				if (tgr.tls_type != TLS_RLTYPE_APP) {
+					SOCKBUF_UNLOCK(&so->so_rcv);
+					error = ENXIO;
+					goto release;
+				}
+			}
+		}
+#endif
 
 		do {
 			if (flags & MSG_PEEK) {
@@ -2159,7 +2198,7 @@ dontblock:
 			SBLASTRECORDCHK(&so->so_rcv);
 			SBLASTMBUFCHK(&so->so_rcv);
 			SOCKBUF_UNLOCK(&so->so_rcv);
-			if ((m->m_flags & M_NOMAP) != 0)
+			if ((m->m_flags & M_EXTPG) != 0)
 				error = m_unmappedtouio(m, moff, uio, (int)len);
 			else
 				error = uiomove(mtod(m, char *) + moff,
@@ -3223,6 +3262,8 @@ sogetopt(struct socket *so, struct sockopt *sopt)
 		case SO_TIMESTAMP:
 		case SO_BINTIME:
 		case SO_NOSIGPIPE:
+		case SO_NO_DDP:
+		case SO_NO_OFFLOAD:
 			optval = so->so_options & sopt->sopt_name;
 integer:
 			error = sooptcopyout(sopt, &optval, sizeof optval);
@@ -4015,8 +4056,17 @@ soisdisconnected(struct socket *so)
 {
 
 	SOCK_LOCK(so);
-	so->so_state &= ~(SS_ISCONNECTING|SS_ISCONNECTED|SS_ISDISCONNECTING);
+
+	/*
+	 * There is at least one reader of so_state that does not
+	 * acquire socket lock, namely soreceive_generic().  Ensure
+	 * that it never sees all flags that track connection status
+	 * cleared, by ordering the update with a barrier semantic of
+	 * our release thread fence.
+	 */
 	so->so_state |= SS_ISDISCONNECTED;
+	atomic_thread_fence_rel();
+	so->so_state &= ~(SS_ISCONNECTING|SS_ISCONNECTED|SS_ISDISCONNECTING);
 
 	if (!SOLISTENING(so)) {
 		SOCK_UNLOCK(so);
@@ -4138,25 +4188,21 @@ so_rdknl_unlock(void *arg)
 }
 
 static void
-so_rdknl_assert_locked(void *arg)
+so_rdknl_assert_lock(void *arg, int what)
 {
 	struct socket *so = arg;
 
-	if (SOLISTENING(so))
-		SOCK_LOCK_ASSERT(so);
-	else
-		SOCKBUF_LOCK_ASSERT(&so->so_rcv);
-}
-
-static void
-so_rdknl_assert_unlocked(void *arg)
-{
-	struct socket *so = arg;
-
-	if (SOLISTENING(so))
-		SOCK_UNLOCK_ASSERT(so);
-	else
-		SOCKBUF_UNLOCK_ASSERT(&so->so_rcv);
+	if (what == LA_LOCKED) {
+		if (SOLISTENING(so))
+			SOCK_LOCK_ASSERT(so);
+		else
+			SOCKBUF_LOCK_ASSERT(&so->so_rcv);
+	} else {
+		if (SOLISTENING(so))
+			SOCK_UNLOCK_ASSERT(so);
+		else
+			SOCKBUF_UNLOCK_ASSERT(&so->so_rcv);
+	}
 }
 
 static void
@@ -4182,25 +4228,21 @@ so_wrknl_unlock(void *arg)
 }
 
 static void
-so_wrknl_assert_locked(void *arg)
+so_wrknl_assert_lock(void *arg, int what)
 {
 	struct socket *so = arg;
 
-	if (SOLISTENING(so))
-		SOCK_LOCK_ASSERT(so);
-	else
-		SOCKBUF_LOCK_ASSERT(&so->so_snd);
-}
-
-static void
-so_wrknl_assert_unlocked(void *arg)
-{
-	struct socket *so = arg;
-
-	if (SOLISTENING(so))
-		SOCK_UNLOCK_ASSERT(so);
-	else
-		SOCKBUF_UNLOCK_ASSERT(&so->so_snd);
+	if (what == LA_LOCKED) {
+		if (SOLISTENING(so))
+			SOCK_LOCK_ASSERT(so);
+		else
+			SOCKBUF_LOCK_ASSERT(&so->so_snd);
+	} else {
+		if (SOLISTENING(so))
+			SOCK_UNLOCK_ASSERT(so);
+		else
+			SOCKBUF_UNLOCK_ASSERT(&so->so_snd);
+	}
 }
 
 /*

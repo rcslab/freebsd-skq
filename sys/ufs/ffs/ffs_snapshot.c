@@ -301,6 +301,8 @@ restart:
 		NDFREE(&nd, NDF_ONLY_PNBUF);
 		vn_finished_write(wrtmp);
 		vrele(nd.ni_dvp);
+		if (error == ERELOOKUP)
+			goto restart;
 		return (error);
 	}
 	vp = nd.ni_vp;
@@ -319,7 +321,7 @@ restart:
 		goto out;
 	ip->i_size = lblktosize(fs, (off_t)numblks);
 	DIP_SET(ip, i_size, ip->i_size);
-	UFS_INODE_SET_FLAG(ip, IN_CHANGE | IN_UPDATE);
+	UFS_INODE_SET_FLAG(ip, IN_SIZEMOD | IN_CHANGE | IN_UPDATE);
 	error = readblock(vp, bp, numblks - 1);
 	bawrite(bp);
 	if (error != 0)
@@ -368,8 +370,12 @@ restart:
 		if (error)
 			goto out;
 		bawrite(nbp);
-		if (cg % 10 == 0)
-			ffs_syncvnode(vp, MNT_WAIT, 0);
+		if (cg % 10 == 0) {
+			error = ffs_syncvnode(vp, MNT_WAIT, 0);
+			/* vp possibly reclaimed if unlocked */
+			if (error != 0)
+				goto out;
+		}
 	}
 	/*
 	 * Copy all the cylinder group maps. Although the
@@ -391,8 +397,8 @@ restart:
 			goto out;
 		error = cgaccount(cg, vp, nbp, 1);
 		bawrite(nbp);
-		if (cg % 10 == 0)
-			ffs_syncvnode(vp, MNT_WAIT, 0);
+		if (cg % 10 == 0 && error == 0)
+			error = ffs_syncvnode(vp, MNT_WAIT, 0);
 		if (error)
 			goto out;
 	}
@@ -480,6 +486,8 @@ restart:
 	 */
 	copy_fs = malloc((u_long)fs->fs_bsize, M_UFSMNT, M_WAITOK);
 	bcopy(fs, copy_fs, fs->fs_sbsize);
+	copy_fs->fs_si = malloc(sizeof(struct fs_summary_info), M_UFSMNT,
+	    M_ZERO | M_WAITOK);
 	if ((fs->fs_flags & (FS_UNCLEAN | FS_NEEDSFSCK)) == 0)
 		copy_fs->fs_clean = 1;
 	size = fs->fs_bsize < SBLOCKSIZE ? fs->fs_bsize : SBLOCKSIZE;
@@ -501,6 +509,7 @@ restart:
 		    len, KERNCRED, &bp)) != 0) {
 			brelse(bp);
 			free(copy_fs->fs_csp, M_UFSMNT);
+			free(copy_fs->fs_si, M_UFSMNT);
 			free(copy_fs, M_UFSMNT);
 			copy_fs = NULL;
 			goto out1;
@@ -611,6 +620,7 @@ loop:
 		vdrop(xvp);
 		if (error) {
 			free(copy_fs->fs_csp, M_UFSMNT);
+			free(copy_fs->fs_si, M_UFSMNT);
 			free(copy_fs, M_UFSMNT);
 			copy_fs = NULL;
 			MNT_VNODE_FOREACH_ALL_ABORT(mp, mvp);
@@ -624,6 +634,7 @@ loop:
 		error = softdep_journal_lookup(mp, &xvp);
 		if (error) {
 			free(copy_fs->fs_csp, M_UFSMNT);
+			free(copy_fs->fs_si, M_UFSMNT);
 			free(copy_fs, M_UFSMNT);
 			copy_fs = NULL;
 			goto out1;
@@ -842,6 +853,7 @@ out1:
 	}
 done:
 	free(copy_fs->fs_csp, M_UFSMNT);
+	free(copy_fs->fs_si, M_UFSMNT);
 	free(copy_fs, M_UFSMNT);
 	copy_fs = NULL;
 out:

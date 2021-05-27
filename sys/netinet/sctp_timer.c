@@ -55,7 +55,6 @@ __FBSDID("$FreeBSD$");
 #include <netinet/udp.h>
 #endif
 
-
 void
 sctp_audit_retranmission_queue(struct sctp_association *asoc)
 {
@@ -497,7 +496,6 @@ sctp_mark_all_for_resend(struct sctp_tcb *stcb,
 	uint32_t tsnlast, tsnfirst;
 	int recovery_cnt = 0;
 
-
 	/* none in flight now */
 	audit_tf = 0;
 	fir = 0;
@@ -801,7 +799,6 @@ start_again:
 	return (0);
 }
 
-
 int
 sctp_t3rxt_timer(struct sctp_inpcb *inp,
     struct sctp_tcb *stcb,
@@ -974,7 +971,12 @@ sctp_t3rxt_timer(struct sctp_inpcb *inp,
 		/* C3. See if we need to send a Fwd-TSN */
 		if (SCTP_TSN_GT(stcb->asoc.advanced_peer_ack_point, stcb->asoc.last_acked_seq)) {
 			send_forward_tsn(stcb, &stcb->asoc);
-			if (lchk) {
+			for (; lchk != NULL; lchk = TAILQ_NEXT(lchk, sctp_next)) {
+				if (lchk->whoTo != NULL) {
+					break;
+				}
+			}
+			if (lchk != NULL) {
 				/* Assure a timer is up */
 				sctp_timer_start(SCTP_TIMER_TYPE_SEND, stcb->sctp_ep, stcb, lchk->whoTo);
 			}

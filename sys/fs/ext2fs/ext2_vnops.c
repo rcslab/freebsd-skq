@@ -209,12 +209,12 @@ VFS_VOP_VECTOR_REGISTER(ext2_fifoops);
  * endianness problems.
  */
 static struct dirtemplate mastertemplate = {
-	0, 12, 1, EXT2_FT_DIR, ".",
-	0, DIRBLKSIZ - 12, 2, EXT2_FT_DIR, ".."
+	0, htole16(12), 1, EXT2_FT_DIR, ".",
+	0, htole16(DIRBLKSIZ - 12), 2, EXT2_FT_DIR, ".."
 };
 static struct dirtemplate omastertemplate = {
-	0, 12, 1, EXT2_FT_UNKNOWN, ".",
-	0, DIRBLKSIZ - 12, 2, EXT2_FT_UNKNOWN, ".."
+	0, htole16(12), 1, EXT2_FT_UNKNOWN, ".",
+	0, htole16(DIRBLKSIZ - 12), 2, EXT2_FT_UNKNOWN, ".."
 };
 
 static void
@@ -348,7 +348,7 @@ ext2_access(struct vop_access_args *ap)
 		return (EPERM);
 
 	error = vaccess(vp->v_type, ip->i_mode, ip->i_uid, ip->i_gid,
-	    ap->a_accmode, ap->a_cred, NULL);
+	    ap->a_accmode, ap->a_cred);
 	return (error);
 }
 
@@ -1018,10 +1018,11 @@ abortit:
 		 */
 		ext2_dec_nlink(xp);
 		if (doingdirectory) {
-			if (--xp->i_nlink != 0)
+			if (xp->i_nlink > 2)
 				panic("ext2_rename: linked directory");
 			error = ext2_truncate(tvp, (off_t)0, IO_SYNC,
 			    tcnp->cn_cred, tcnp->cn_thread);
+			xp->i_nlink = 0;
 		}
 		xp->i_flag |= IN_CHANGE;
 		vput(tvp);
@@ -1076,10 +1077,6 @@ abortit:
 			ext2_dec_nlink(dp);
 			dp->i_flag |= IN_CHANGE;
 			dirbuf = malloc(dp->i_e2fs->e2fs_bsize, M_TEMP, M_WAITOK | M_ZERO);
-			if (!dirbuf) {
-				error = ENOMEM;
-				goto bad;
-			}
 			error = vn_rdwr(UIO_READ, fvp, (caddr_t)dirbuf,
 			    ip->i_e2fs->e2fs_bsize, (off_t)0,
 			    UIO_SYSSPACE, IO_NODELOCKED | IO_NOMACCHECK,
@@ -1093,7 +1090,7 @@ abortit:
 					ext2_dirbad(xp, (doff_t)12,
 					    "rename: mangled dir");
 				} else {
-					dirbuf->dotdot_ino = newparent;
+					dirbuf->dotdot_ino = htole32(newparent);
 					/*
 					 * dirblock 0 could be htree root,
 					 * try both csum update functions.
@@ -1379,24 +1376,20 @@ ext2_mkdir(struct vop_mkdir_args *ap)
 	else
 		dtp = &omastertemplate;
 	dirtemplate = *dtp;
-	dirtemplate.dot_ino = ip->i_number;
-	dirtemplate.dotdot_ino = dp->i_number;
+	dirtemplate.dot_ino = htole32(ip->i_number);
+	dirtemplate.dotdot_ino = htole32(dp->i_number);
 	/*
 	 * note that in ext2 DIRBLKSIZ == blocksize, not DEV_BSIZE so let's
 	 * just redefine it - for this function only
 	 */
 #undef  DIRBLKSIZ
 #define DIRBLKSIZ  VTOI(dvp)->i_e2fs->e2fs_bsize
-	dirtemplate.dotdot_reclen = DIRBLKSIZ - 12;
+	dirtemplate.dotdot_reclen = htole16(DIRBLKSIZ - 12);
 	buf = malloc(DIRBLKSIZ, M_TEMP, M_WAITOK | M_ZERO);
-	if (!buf) {
-		error = ENOMEM;
-		ext2_dec_nlink(dp);
-		dp->i_flag |= IN_CHANGE;
-		goto bad;
-	}
 	if (EXT2_HAS_RO_COMPAT_FEATURE(fs, EXT2F_ROCOMPAT_METADATA_CKSUM)) {
-		dirtemplate.dotdot_reclen -= sizeof(struct ext2fs_direct_tail);
+		dirtemplate.dotdot_reclen =
+		    htole16(le16toh(dirtemplate.dotdot_reclen) -
+		    sizeof(struct ext2fs_direct_tail));
 		ext2_init_dirent_tail(EXT2_DIRENT_TAIL(buf, DIRBLKSIZ));
 	}
 	memcpy(buf, &dirtemplate, sizeof(dirtemplate));
@@ -1579,7 +1572,6 @@ ext2_strategy(struct vop_strategy_args *ap)
 	if (vp->v_type == VBLK || vp->v_type == VCHR)
 		panic("ext2_strategy: spec");
 	if (bp->b_blkno == bp->b_lblkno) {
-
 		if (VTOI(ap->a_vp)->i_flag & IN_E4EXTENTS)
 			error = ext4_bmapext(vp, bp->b_lblkno, &blkno, NULL, NULL);
 		else

@@ -66,7 +66,6 @@ __FBSDID("$FreeBSD$");
 #include <cam/ctl/ctl_debug.h>
 #include <cam/ctl/ctl_error.h>
 
-
 struct ha_msg_wire {
 	uint32_t	 channel;
 	uint32_t	 length;
@@ -196,9 +195,11 @@ ctl_ha_lclose(struct ha_softc *softc)
 {
 
 	if (softc->ha_lso) {
-		SOCKBUF_LOCK(&softc->ha_lso->so_rcv);
-		soupcall_clear(softc->ha_lso, SO_RCV);
-		SOCKBUF_UNLOCK(&softc->ha_lso->so_rcv);
+		if (SOLISTENING(softc->ha_lso)) {
+			SOLISTEN_LOCK(softc->ha_lso);
+			solisten_upcall_set(softc->ha_lso, NULL, NULL);
+			SOLISTEN_UNLOCK(softc->ha_lso);
+		}
 		soclose(softc->ha_lso);
 		softc->ha_lso = NULL;
 	}
@@ -872,7 +873,6 @@ ctl_dt_event_handler(ctl_ha_channel channel, ctl_ha_event event, int param)
 		printf("%s: Unknown event %d\n", __func__, event);
 	}
 }
-
 
 ctl_ha_status
 ctl_ha_msg_init(struct ctl_softc *ctl_softc)

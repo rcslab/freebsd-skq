@@ -1,6 +1,9 @@
 # $FreeBSD$
+.include <src.opts.mk>
 
 PACKAGE=	tests
+
+WARNS?=		3
 
 _LIBARCHIVEDIR=	${SRCTOP}/contrib/libarchive
 
@@ -15,7 +18,6 @@ PROGS+=	libarchive_test
 CFLAGS+= -I${.CURDIR} -I${.CURDIR:H} -I${.OBJDIR}
 CFLAGS+= -I${_LIBARCHIVEDIR}/libarchive -I${_LIBARCHIVEDIR}/libarchive/test
 CFLAGS+= -I${_LIBARCHIVEDIR}/test_utils
-CFLAGS+= -DHAVE_LIBLZMA=1 -DHAVE_LZMA_H=1
 
 # Uncomment to link against dmalloc
 #LDADD+= -L/usr/local/lib -ldmalloc
@@ -205,7 +207,8 @@ TESTS_SRCS= \
 	test_read_format_zip_with_invalid_traditional_eocd.c	\
 	test_read_format_zip_zip64.c		\
 	test_read_large.c			\
-	test_read_pax_schily_xattr.c		\
+	test_read_pax_xattr_rht_security_selinux.c	\
+	test_read_pax_xattr_schily.c		\
 	test_read_pax_truncated.c		\
 	test_read_position.c			\
 	test_read_set_format.c			\
@@ -297,10 +300,6 @@ TESTS_SRCS= \
 	test_zip_filename_encoding.c
 
 # Deterministic failures:
-# Crashes with SIGBUS
-BROKEN_TESTS+=			test_archive_rmd160
-# Fails with `libarchive/test/test_archive_crypto.c:121: md != actualmd`
-BROKEN_TESTS+=			test_archive_sha384
 # Fails with `test_read_disk_directory_traversals.c:1094: File at has atime 886622, 1443306049 seconds ago`
 BROKEN_TESTS+=			test_read_disk_directory_traversals
 
@@ -383,6 +382,7 @@ ${PACKAGE}FILES+=	test_compat_zip_6.zip.uu
 ${PACKAGE}FILES+=	test_compat_zip_7.xps.uu
 ${PACKAGE}FILES+=	test_compat_zip_8.zip.uu
 ${PACKAGE}FILES+=	test_compat_zstd_1.tar.zst.uu
+${PACKAGE}FILES+=	test_compat_zstd_2.tar.zst.uu
 ${PACKAGE}FILES+=	test_fuzz.cab.uu
 ${PACKAGE}FILES+=	test_fuzz.lzh.uu
 ${PACKAGE}FILES+=	test_fuzz_1.iso.Z.uu
@@ -577,6 +577,7 @@ ${PACKAGE}FILES+=	test_read_format_ustar_filename_koi8r.tar.Z.uu
 ${PACKAGE}FILES+=	test_read_format_warc.warc.uu
 ${PACKAGE}FILES+=	test_read_format_zip.zip.uu
 ${PACKAGE}FILES+=	test_read_format_zip_7075_utf8_paths.zip.uu
+${PACKAGE}FILES+=	test_read_format_zip_7z_lzma.zip.uu
 ${PACKAGE}FILES+=	test_read_format_zip_bz2_hang.zip.uu
 ${PACKAGE}FILES+=	test_read_format_zip_bzip2.zipx.uu
 ${PACKAGE}FILES+=	test_read_format_zip_bzip2_multi.zipx.uu
@@ -628,7 +629,8 @@ ${PACKAGE}FILES+=	test_read_large_splitted_rar_ab.uu
 ${PACKAGE}FILES+=	test_read_large_splitted_rar_ac.uu
 ${PACKAGE}FILES+=	test_read_large_splitted_rar_ad.uu
 ${PACKAGE}FILES+=	test_read_large_splitted_rar_ae.uu
-${PACKAGE}FILES+=	test_read_pax_schily_xattr.tar.uu
+${PACKAGE}FILES+=	test_read_pax_xattr_rht_security_selinux.tar.uu
+${PACKAGE}FILES+=	test_read_pax_xattr_schily.tar.uu
 ${PACKAGE}FILES+=	test_read_splitted_rar_aa.uu
 ${PACKAGE}FILES+=	test_read_splitted_rar_ab.uu
 ${PACKAGE}FILES+=	test_read_splitted_rar_ac.uu

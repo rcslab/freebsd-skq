@@ -1,4 +1,4 @@
-#!/usr/local/bin/python2
+#!/usr/local/bin/python3
 #
 # Copyright (c) 2014 The FreeBSD Foundation
 # All rights reserved.
@@ -30,7 +30,7 @@
 # $FreeBSD$
 #
 
-from __future__ import print_function
+
 
 import binascii
 import errno
@@ -50,9 +50,8 @@ def katg(base, glob):
         raise unittest.SkipTest("Missing %s test vectors" % (base))
     return iglob(os.path.join(katdir, base, glob))
 
-aesmodules = [ 'cryptosoft0', 'aesni0', 'armv8crypto0', 'ccr0', 'ccp0' ]
-desmodules = [ 'cryptosoft0', ]
-shamodules = [ 'cryptosoft0', 'aesni0', 'armv8crypto0', 'ccr0', 'ccp0' ]
+aesmodules = [ 'cryptosoft0', 'aesni0', 'armv8crypto0', 'ccr0', 'ccp0', 'safexcel0', 'qat0' ]
+shamodules = [ 'cryptosoft0', 'aesni0', 'armv8crypto0', 'ccr0', 'ccp0', 'ossl0', 'safexcel0', 'qat0' ]
 
 def GenTestCase(cname):
     try:
@@ -333,46 +332,6 @@ def GenTestCase(cname):
                         " on " + cname)
 
         ###############
-        ##### DES #####
-        ###############
-        @unittest.skipIf(cname not in desmodules, 'skipping DES on %s' % (cname))
-        def test_tdes(self):
-            for i in katg('KAT_TDES', 'TCBC[a-z]*.rsp'):
-                self.runTDES(i)
-
-        def runTDES(self, fname):
-            columns = [ 'COUNT', 'KEYs', 'IV', 'PLAINTEXT', 'CIPHERTEXT', ]
-            with cryptodev.KATParser(fname, columns) as parser:
-                self.runTDESWithParser(parser)
-
-        def runTDESWithParser(self, parser):
-            curfun = None
-            for mode, lines in next(parser):
-                if mode == 'ENCRYPT':
-                    swapptct = False
-                    curfun = Crypto.encrypt
-                elif mode == 'DECRYPT':
-                    swapptct = True
-                    curfun = Crypto.decrypt
-                else:
-                    raise RuntimeError('unknown mode: %r' % repr(mode))
-
-                for data in lines:
-                    curcnt = int(data['COUNT'])
-                    key = data['KEYs'] * 3
-                    cipherkey = binascii.unhexlify(key)
-                    iv = binascii.unhexlify(data['IV'])
-                    pt = binascii.unhexlify(data['PLAINTEXT'])
-                    ct = binascii.unhexlify(data['CIPHERTEXT'])
-
-                    if swapptct:
-                        pt, ct = ct, pt
-                    # run the fun
-                    c = Crypto(cryptodev.CRYPTO_3DES_CBC, cipherkey, crid=crid)
-                    r = curfun(c, pt, iv)
-                    self.assertEqual(r, ct)
-
-        ###############
         ##### SHA #####
         ###############
         @unittest.skipIf(cname not in shamodules, 'skipping SHA on %s' % str(cname))
@@ -497,6 +456,9 @@ aesni = GenTestCase('aesni0')
 armv8crypto = GenTestCase('armv8crypto0')
 ccr = GenTestCase('ccr0')
 ccp = GenTestCase('ccp0')
+ossl = GenTestCase('ossl0')
+safexcel = GenTestCase('safexcel0')
+qat = GenTestCase('qat0')
 
 if __name__ == '__main__':
     unittest.main()

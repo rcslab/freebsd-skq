@@ -86,7 +86,7 @@ typedef enum {
 	NDA_Q_4K   = 0x01,
 	NDA_Q_NONE = 0x00,
 } nda_quirks;
-	
+
 #define NDA_Q_BIT_STRING	\
 	"\020"			\
 	"\001Bit 0"
@@ -185,11 +185,14 @@ static int nda_send_ordered = NDA_DEFAULT_SEND_ORDERED;
 static int nda_default_timeout = NDA_DEFAULT_TIMEOUT;
 static int nda_max_trim_entries = NDA_MAX_TRIM_ENTRIES;
 static int nda_enable_biospeedup = 1;
+static int nda_nvd_compat = 1;
 SYSCTL_INT(_kern_cam_nda, OID_AUTO, max_trim, CTLFLAG_RDTUN,
     &nda_max_trim_entries, NDA_MAX_TRIM_ENTRIES,
     "Maximum number of BIO_DELETE to send down as a DSM TRIM.");
 SYSCTL_INT(_kern_cam_nda, OID_AUTO, enable_biospeedup, CTLFLAG_RDTUN,
-    &nda_enable_biospeedup, 0, "Enable BIO_SPEEDUP processing");
+    &nda_enable_biospeedup, 0, "Enable BIO_SPEEDUP processing.");
+SYSCTL_INT(_kern_cam_nda, OID_AUTO, nvd_compat, CTLFLAG_RDTUN,
+    &nda_nvd_compat, 1, "Enable creation of nvd aliases.");
 
 /*
  * All NVMe media is non-rotational, so all nvme device instances
@@ -332,7 +335,6 @@ ndaclose(struct disk *dp)
 	if ((softc->flags & NDA_FLAG_DIRTY) != 0 &&
 	    (periph->flags & CAM_PERIPH_INVALID) == 0 &&
 	    cam_periph_hold(periph, PRIBIO) == 0) {
-
 		ccb = cam_periph_getccb(periph, CAM_PRIORITY_NORMAL);
 		nda_nvme_flush(softc, &ccb->nvmeio);
 		error = cam_periph_runccb(ccb, ndaerror, /*cam_flags*/0,
@@ -402,7 +404,7 @@ ndaioctl(struct disk *dp, u_long cmd, void *data, int fflag,
 		struct nvme_pt_command *pt;
 		union ccb *ccb;
 		struct cam_periph_map_info mapinfo;
-		u_int maxmap = MAXPHYS;	/* XXX is this right */
+		u_int maxmap = dp->d_maxsize;
 		int error;
 
 		/*
@@ -427,24 +429,25 @@ ndaioctl(struct disk *dp, u_long cmd, void *data, int fflag,
 		memset(&mapinfo, 0, sizeof(mapinfo));
 		error = cam_periph_mapmem(ccb, &mapinfo, maxmap);
 		if (error)
-			return (error);
+			goto out;
 
 		/*
-		 * Lock the periph and run the command. XXX do we need
-		 * to lock the periph?
+		 * Lock the periph and run the command.
 		 */
 		cam_periph_lock(periph);
-		cam_periph_runccb(ccb, NULL, CAM_RETRY_SELTO, SF_RETRY_UA | SF_NO_PRINT,
-		    NULL);
-		cam_periph_unlock(periph);
+		cam_periph_runccb(ccb, NULL, CAM_RETRY_SELTO,
+		    SF_RETRY_UA | SF_NO_PRINT, NULL);
 
 		/*
 		 * Tear down mapping and return status.
 		 */
+		cam_periph_unlock(periph);
 		cam_periph_unmapmem(ccb, &mapinfo);
-		cam_periph_lock(periph);
 		error = (ccb->ccb_h.status == CAM_REQ_CMP) ? 0 : EIO;
+out:
+		cam_periph_lock(periph);
 		xpt_release_ccb(ccb);
+		cam_periph_unlock(periph);
 		return (error);
 	}
 	default:
@@ -463,7 +466,7 @@ ndastrategy(struct bio *bp)
 {
 	struct cam_periph *periph;
 	struct nda_softc *softc;
-	
+
 	periph = (struct cam_periph *)bp->bio_disk->d_drv1;
 	softc = (struct nda_softc *)periph->softc;
 
@@ -479,7 +482,7 @@ ndastrategy(struct bio *bp)
 		biofinish(bp, NULL, ENXIO);
 		return;
 	}
-	
+
 	if (bp->bio_cmd == BIO_DELETE)
 		softc->deletes++;
 
@@ -515,7 +518,7 @@ ndadump(void *arg, void *virtual, vm_offset_t physical, off_t offset, size_t len
 	secsize = softc->disk->d_sectorsize;
 	lba = offset / secsize;
 	count = length / secsize;
-	
+
 	if ((periph->flags & CAM_PERIPH_INVALID) != 0)
 		return (ENXIO);
 
@@ -532,7 +535,7 @@ ndadump(void *arg, void *virtual, vm_offset_t physical, off_t offset, size_t len
 
 		return (error);
 	}
-	
+
 	/* Flush */
 	xpt_setup_ccb(&nvmeio.ccb_h, periph->path, CAM_PRIORITY_NORMAL);
 
@@ -560,7 +563,6 @@ ndainit(void)
 		printf("nda: Failed to attach master async callback "
 		       "due to status 0x%x!\n", status);
 	} else if (nda_send_ordered) {
-
 		/* Register our event handlers */
 		if ((EVENTHANDLER_REGISTER(power_suspend, ndasuspend,
 					   NULL, EVENTHANDLER_PRI_LAST)) == NULL)
@@ -652,7 +654,7 @@ ndaasync(void *callback_arg, u_int32_t code,
 	{
 		struct ccb_getdev *cgd;
 		cam_status status;
- 
+
 		cgd = (struct ccb_getdev *)arg;
 		if (cgd == NULL)
 			break;
@@ -904,8 +906,8 @@ ndaregister(struct cam_periph *periph, void *arg)
 	maxio = cpi.maxio;		/* Honor max I/O size of SIM */
 	if (maxio == 0)
 		maxio = DFLTPHYS;	/* traditional default */
-	else if (maxio > MAXPHYS)
-		maxio = MAXPHYS;	/* for safety */
+	else if (maxio > maxphys)
+		maxio = maxphys;	/* for safety */
 	disk->d_maxsize = maxio;
 	flbas_fmt = (nsd->flbas >> NVME_NS_DATA_FLBAS_FORMAT_SHIFT) &
 		NVME_NS_DATA_FLBAS_FORMAT_MASK;
@@ -939,7 +941,11 @@ ndaregister(struct cam_periph *periph, void *arg)
 	disk->d_hba_subdevice = cpi.hba_subdevice;
 	snprintf(disk->d_attachment, sizeof(disk->d_attachment),
 	    "%s%d", cpi.dev_name, cpi.unit_number);
-	disk->d_stripesize = disk->d_sectorsize;
+	if (((nsd->nsfeat >> NVME_NS_DATA_NSFEAT_NPVALID_SHIFT) &
+	    NVME_NS_DATA_NSFEAT_NPVALID_MASK) != 0 && nsd->npwg != 0)
+		disk->d_stripesize = ((nsd->npwg + 1) * disk->d_sectorsize);
+	else
+		disk->d_stripesize = nsd->noiob * disk->d_sectorsize;
 	disk->d_stripeoffset = 0;
 	disk->d_devstat = devstat_new_entry(periph->periph_name,
 	    periph->unit_number, disk->d_sectorsize,
@@ -949,7 +955,8 @@ ndaregister(struct cam_periph *periph, void *arg)
 	/*
 	 * Add alias for older nvd drives to ease transition.
 	 */
-	/* disk_add_alias(disk, "nvd"); Have reports of this causing problems */
+	if (nda_nvd_compat)
+		disk_add_alias(disk, "nvd");
 
 	/*
 	 * Acquire a reference to the periph before we register with GEOM.
@@ -1081,6 +1088,7 @@ ndastart(struct cam_periph *periph, union ccb *start_ccb)
 			TAILQ_INIT(&trim->bps);
 			bp1 = bp;
 			ents = min(nitems(trim->dsm), nda_max_trim_entries);
+			ents = max(ents, 1);
 			dsm_range = trim->dsm;
 			dsm_end = dsm_range + ents;
 			do {
@@ -1249,6 +1257,7 @@ ndadone(struct cam_periph *periph, union ccb *done_ccb)
 		/* No-op.  We're polling */
 		return;
 	case NDA_CCB_PASS:
+		/* NVME_PASSTHROUGH_CMD runs this CCB and releases it */
 		return;
 	default:
 		break;

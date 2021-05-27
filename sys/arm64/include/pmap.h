@@ -85,6 +85,7 @@ enum pmap_stage {
 struct pmap {
 	struct mtx		pm_mtx;
 	struct pmap_statistics	pm_stats;	/* pmap statistics */
+	uint64_t		pm_ttbr;
 	vm_paddr_t		pm_l0_paddr;
 	pd_entry_t		*pm_l0;
 	TAILQ_HEAD(,pv_chunk)	pm_pvchunk;	/* list of mappings in pmap */
@@ -92,6 +93,7 @@ struct pmap {
 	long			pm_cookie;	/* encodes the pmap's ASID */
 	struct asid_set		*pm_asid_set;	/* The ASID/VMID set to use */
 	enum pmap_stage		pm_stage;
+	int			pm_levels;
 };
 typedef struct pmap *pmap_t;
 
@@ -160,6 +162,7 @@ extern vm_offset_t virtual_end;
 #define	L1_MAPPABLE_P(va, pa, size)					\
 	((((va) | (pa)) & L1_OFFSET) == 0 && (size) >= L1_SIZE)
 
+void	pmap_activate_vm(pmap_t);
 void	pmap_bootstrap(vm_offset_t, vm_offset_t, vm_paddr_t, vm_size_t);
 int	pmap_change_attr(vm_offset_t va, vm_size_t size, int mode);
 void	pmap_kenter(vm_offset_t sva, vm_size_t size, vm_paddr_t pa, int mode);
@@ -169,6 +172,7 @@ void	pmap_kremove(vm_offset_t);
 void	pmap_kremove_device(vm_offset_t, vm_size_t);
 void	*pmap_mapdev_attr(vm_offset_t pa, vm_size_t size, vm_memattr_t ma);
 bool	pmap_page_is_mapped(vm_page_t m);
+int	pmap_pinit_stage(pmap_t, enum pmap_stage, int);
 bool	pmap_ps_enabled(pmap_t pmap);
 uint64_t pmap_to_ttbr0(pmap_t pmap);
 
@@ -185,7 +189,16 @@ bool	pmap_get_tables(pmap_t, vm_offset_t, pd_entry_t **, pd_entry_t **,
 
 int	pmap_fault(pmap_t, uint64_t, uint64_t);
 
+/* System MMU (SMMU). */
+int pmap_senter(pmap_t pmap, vm_offset_t va, vm_paddr_t pa, vm_prot_t prot,
+    u_int flags);
+int pmap_sremove(pmap_t pmap, vm_offset_t va);
+void pmap_sremove_pages(pmap_t pmap);
+
 struct pcb *pmap_switch(struct thread *, struct thread *);
+
+extern void (*pmap_clean_stage2_tlbi)(void);
+extern void (*pmap_invalidate_vpipt_icache)(void);
 
 static inline int
 pmap_vmspace_copy(pmap_t dst_pmap __unused, pmap_t src_pmap __unused)

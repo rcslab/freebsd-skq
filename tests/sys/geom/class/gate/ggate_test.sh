@@ -16,7 +16,8 @@ ggated_head()
 
 ggated_body()
 {
-	if [ "$(atf_config_get ci false)" = "true" ]; then
+	if [ "$(atf_config_get ci false)" = "true" ] && \
+		[ "$(uname -p)" = "i386" ]; then
 		atf_skip "https://bugs.freebsd.org/244737"
 	fi
 
@@ -198,7 +199,11 @@ common_cleanup()
 
 	if [ -f "md.devs" ]; then
 		while read test_md; do
-			mdconfig -d -u $test_md 2>/dev/null
+			# ggatec destroy doesn't release the provider
+			# synchronously, so we may need to retry destroying it.
+			while ! mdconfig -d -u $test_md; do
+				sleep 0.1
+			done
 		done < md.devs
 		rm md.devs
 	fi

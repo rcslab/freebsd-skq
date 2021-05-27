@@ -45,9 +45,12 @@ __FBSDID("$FreeBSD$");
 #include "opt_sctp.h"
 
 #include <sys/param.h>
+#include <sys/domain.h>
+#include <sys/eventhandler.h>
 #include <sys/ktr.h>
 #include <sys/systm.h>
 #include <sys/malloc.h>
+#include <sys/module.h>
 #include <sys/kernel.h>
 #include <sys/sysctl.h>
 #include <sys/mbuf.h>
@@ -85,7 +88,6 @@ __FBSDID("$FreeBSD$");
 #include <netinet/icmp_var.h>
 
 #ifdef INET6
-#include <sys/domain.h>
 #include <netinet/ip6.h>
 #include <netinet6/in6_fib.h>
 #include <netinet6/ip6_var.h>
@@ -189,7 +191,6 @@ MALLOC_DECLARE(SCTP_M_MCORE);
 #define SCTP_LTRACE_ERR_RET(inp, stcb, net, file, err)
 #endif
 
-
 /*
  * Local address and interface list handling
  */
@@ -265,14 +266,18 @@ typedef struct uma_zone *sctp_zone_t;
 #include <sys/callout.h>
 typedef struct callout sctp_os_timer_t;
 
-
 #define SCTP_OS_TIMER_INIT(tmr)	callout_init(tmr, 1)
-#define SCTP_OS_TIMER_START	callout_reset
-#define SCTP_OS_TIMER_STOP	callout_stop
-#define SCTP_OS_TIMER_STOP_DRAIN callout_drain
-#define SCTP_OS_TIMER_PENDING	callout_pending
-#define SCTP_OS_TIMER_ACTIVE	callout_active
-#define SCTP_OS_TIMER_DEACTIVATE callout_deactivate
+/*
+ * NOTE: The next two shouldn't be called directly outside of sctp_timer_start()
+ * and sctp_timer_stop(), since they don't handle incrementing/decrementing
+ * relevant reference counts.
+ */
+#define SCTP_OS_TIMER_START		callout_reset
+#define SCTP_OS_TIMER_STOP		callout_stop
+#define SCTP_OS_TIMER_STOP_DRAIN	callout_drain
+#define SCTP_OS_TIMER_PENDING		callout_pending
+#define SCTP_OS_TIMER_ACTIVE		callout_active
+#define SCTP_OS_TIMER_DEACTIVATE	callout_deactivate
 
 #define sctp_get_tick_count() (ticks)
 
@@ -295,6 +300,8 @@ typedef struct callout sctp_os_timer_t;
 
 #define SCTP_ALIGN_TO_END(m, len) M_ALIGN(m, len)
 
+#define SCTP_SNPRINTF(...) snprintf(__VA_ARGS__)
+
 /* We make it so if you have up to 4 threads
  * writing based on the default size of
  * the packet log 65 k, that would be
@@ -309,13 +316,6 @@ typedef struct callout sctp_os_timer_t;
 #define SCTP_GATHER_MTU_FROM_IFN_INFO(ifn, ifn_index, af) ((struct ifnet *)ifn)->if_mtu
 #define SCTP_GATHER_MTU_FROM_ROUTE(sctp_ifa, sa, nh) ((uint32_t)((nh != NULL) ? nh->nh_mtu : 0))
 #define SCTP_GATHER_MTU_FROM_INTFC(sctp_ifn) ((sctp_ifn->ifn_p != NULL) ? ((struct ifnet *)(sctp_ifn->ifn_p))->if_mtu : 0)
-/* XXX: Setting MTU from the protocol in this way is simply incorrect */
-#define SCTP_SET_MTU_OF_ROUTE(sa, rt, mtu)
-
-/* (de-)register interface event notifications */
-#define SCTP_REGISTER_INTERFACE(ifhandle, af)
-#define SCTP_DEREGISTER_INTERFACE(ifhandle, af)
-
 
 /*************************/
 /* These are for logging */
@@ -347,8 +347,6 @@ typedef struct callout sctp_os_timer_t;
 
 #define SCTP_GET_PKT_VRFID(m, vrf_id)  ((vrf_id = SCTP_DEFAULT_VRFID) != SCTP_DEFAULT_VRFID)
 
-
-
 /* Attach the chain of data into the sendable packet. */
 #define SCTP_ATTACH_CHAIN(pak, m, packet_length) do { \
                                                  pak = m; \
@@ -358,7 +356,6 @@ typedef struct callout sctp_os_timer_t;
 /* Other m_pkthdr type things */
 #define SCTP_IS_IT_BROADCAST(dst, m) ((m->m_flags & M_PKTHDR) ? in_broadcast(dst, m->m_pkthdr.rcvif) : 0)
 #define SCTP_IS_IT_LOOPBACK(m) ((m->m_flags & M_PKTHDR) && ((m->m_pkthdr.rcvif == NULL) || (m->m_pkthdr.rcvif->if_type == IFT_LOOP)))
-
 
 /* This converts any input packet header
  * into the chain of data holders, for BSD
@@ -402,10 +399,7 @@ typedef struct route sctp_route_t;
 #define SCTP_RTALLOC(ro, vrf_id, fibnum) \
 { \
 	if ((ro)->ro_nh == NULL) { \
-	if ((ro)->ro_dst.sa_family == AF_INET) \
-		(ro)->ro_nh = fib4_lookup(fibnum, ((struct sockaddr_in *)&(ro)->ro_dst)->sin_addr, 0, NHR_REF, 0); \
-	if ((ro)->ro_dst.sa_family == AF_INET6) \
-		(ro)->ro_nh = fib6_lookup(fibnum, &((struct sockaddr_in6 *)&(ro)->ro_dst)->sin6_addr, 0, NHR_REF, 0); \
+		(ro)->ro_nh = rib_lookup(fibnum, &(ro)->ro_dst, NHR_REF, 0); \
 	} \
 }
 
@@ -445,7 +439,6 @@ struct mbuf *
 sctp_get_mbuf_for_msg(unsigned int space_needed,
     int want_header, int how, int allonebuf, int type);
 
-
 /*
  * SCTP AUTH
  */
@@ -484,5 +477,8 @@ sctp_get_mbuf_for_msg(unsigned int space_needed,
 #endif
 
 #define SCTP_IS_LISTENING(inp) ((inp->sctp_flags & SCTP_PCB_FLAGS_ACCEPTING) != 0)
+
+int sctp_syscalls_init(void);
+int sctp_syscalls_uninit(void);
 
 #endif

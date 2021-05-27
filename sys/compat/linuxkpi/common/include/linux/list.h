@@ -31,8 +31,9 @@
 #ifndef _LINUX_LIST_H_
 #define _LINUX_LIST_H_
 
+#ifndef _STANDALONE
 /*
- * Since LIST_HEAD conflicts with the linux definition we must include any
+ * Since LIST_HEAD conflicts with the Linux definition we must include any
  * FreeBSD header which requires it here so it is resolved with the correct
  * definition prior to the undef.
  */
@@ -69,6 +70,7 @@
 #include <vm/vm.h>
 #include <vm/vm_object.h>
 #include <vm/pmap.h>
+#endif
 
 #ifndef prefetch
 #define	prefetch(x)
@@ -324,7 +326,6 @@ list_splice_tail_init(struct list_head *list, struct list_head *head)
 #undef LIST_HEAD
 #define LIST_HEAD(name)	struct list_head name = { &(name), &(name) }
 
-
 struct hlist_head {
 	struct hlist_node *first;
 };
@@ -332,7 +333,6 @@ struct hlist_head {
 struct hlist_node {
 	struct hlist_node *next, **pprev;
 };
-
 #define	HLIST_HEAD_INIT { }
 #define	HLIST_HEAD(name) struct hlist_head name = HLIST_HEAD_INIT
 #define	INIT_HLIST_HEAD(head) (head)->first = NULL

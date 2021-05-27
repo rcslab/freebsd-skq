@@ -625,7 +625,6 @@ fsl_pcib_outbound(struct fsl_pcib_softc *sc, int wnd, int res, uint64_t start,
 	bus_space_write_4(sc->sc_bst, sc->sc_bsh, REG_POWAR(wnd), attr);
 }
 
-
 static void
 fsl_pcib_err_init(device_t dev)
 {
@@ -827,7 +826,6 @@ static int fsl_pcib_map_msi(device_t dev, device_t child,
 	return (0);
 }
 
-
 /*
  * Linux device trees put the msi@<x> as children of the SoC, with ranges based
  * on the CCSR.  Since rman doesn't permit overlapping or sub-ranges between
@@ -896,7 +894,7 @@ fsl_msi_attach(device_t dev)
 	sc = device_get_softc(dev);
 
 	if (msi_vmem == NULL)
-		msi_vmem = vmem_create("MPIC MSI", 0, 0, 1, 1, M_BESTFIT | M_WAITOK);
+		msi_vmem = vmem_create("MPIC MSI", 0, 0, 1, 0, M_BESTFIT | M_WAITOK);
 
 	/* Manually play with resource entries. */
 	sc->sc_base = bus_get_resource_start(dev, SYS_RES_MEMORY, 0);

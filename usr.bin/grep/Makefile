@@ -4,7 +4,7 @@
 
 .include <src.opts.mk>
 
-.if ${MK_BSD_GREP} == "yes"
+.if ${MK_BSD_GREP} == "yes" || defined(BOOTSTRAPPING)
 PROG=	grep
 MAN1=	grep.1 zgrep.1
 .else
@@ -50,7 +50,7 @@ MLINKS=		zgrep.1 zfgrep.1 \
 
 CFLAGS.gcc+= --param max-inline-insns-single=500
 
-.if ${MK_BSD_GREP} == "yes"
+.if ${MK_BSD_GREP} == "yes" || defined(BOOTSTRAPPING)
 LINKS+=	${BINDIR}/grep ${BINDIR}/egrep \
 	${BINDIR}/grep ${BINDIR}/fgrep \
 	${BINDIR}/grep ${BINDIR}/rgrep \
@@ -60,9 +60,8 @@ MLINKS+= grep.1 egrep.1 \
 	grep.1 rgrep.1
 .endif
 
-.if ${MK_GNU_GREP_COMPAT} != "no"
-CFLAGS+= -I${SYSROOT:U${DESTDIR}}/usr/include/gnu -DWITH_GNU
-LIBADD+=	gnuregex
+.if !defined(BOOTSTRAPPING)
+LIBADD+=	regex
 .endif
 
 HAS_TESTS=

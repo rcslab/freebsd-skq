@@ -51,24 +51,14 @@ OBJCOPY?=	objcopy
 SIZE?=		size
 
 .if defined(DEBUG)
-_MINUS_O=	-O
 CTFFLAGS+=	-g
-.else
-.if ${MACHINE_CPUARCH} == "powerpc"
-_MINUS_O=	-O	# gcc miscompiles some code at -O2
-.else
-_MINUS_O=	-O2
 .endif
-.endif
-.if ${MACHINE_CPUARCH} == "amd64"
-.if ${COMPILER_TYPE} == "clang"
-COPTFLAGS?=-O2 -pipe
+.if ${MACHINE_CPUARCH} == "amd64" && ${COMPILER_TYPE} != "clang"
+_COPTFLAGS_EXTRA=-frename-registers
 .else
-COPTFLAGS?=-O2 -frename-registers -pipe
+_COPTFLAGS_EXTRA=
 .endif
-.else
-COPTFLAGS?=${_MINUS_O} -pipe
-.endif
+COPTFLAGS?=-O2 -pipe ${_COPTFLAGS_EXTRA}
 .if !empty(COPTFLAGS:M-O[23s]) && empty(COPTFLAGS:M-fno-strict-aliasing)
 COPTFLAGS+= -fno-strict-aliasing
 .endif
@@ -93,11 +83,7 @@ CFLAGS.gcc+= -fms-extensions
 .if defined(CFLAGS_ARCH_PARAMS)
 CFLAGS.gcc+=${CFLAGS_ARCH_PARAMS}
 .endif
-.if ${COMPILER_TYPE} == "gcc" && ${COMPILER_VERSION} < 50000
-WERROR?=	-Wno-error
-.else
 WERROR?=	-Werror
-.endif
 # The following should be removed no earlier than LLVM11 being imported into the
 # tree, to ensure we don't regress the build.  LLVM11 and GCC10 will switch the
 # default over to -fno-common, making this redundant.
@@ -161,18 +147,22 @@ LDFLAGS+=	--build-id=sha1
 .endif
 
 .if (${MACHINE_CPUARCH} == "aarch64" || ${MACHINE_CPUARCH} == "amd64" || \
-    ${MACHINE_CPUARCH} == "i386") && \
+    ${MACHINE_CPUARCH} == "i386" || ${MACHINE} == "powerpc") && \
     defined(LINKER_FEATURES) && ${LINKER_FEATURES:Mifunc} == ""
-.error amd64/arm64/i386 kernel requires linker ifunc support
+.error amd64/arm64/i386/ppc* kernel requires linker ifunc support
 .endif
 .if ${MACHINE_CPUARCH} == "amd64"
 LDFLAGS+=	-z max-page-size=2097152
 .if ${LINKER_TYPE} != "lld"
 LDFLAGS+=	-z common-page-size=4096
 .else
+.if defined(LINKER_FEATURES) && !${LINKER_FEATURES:Mifunc-noplt}
+.warning "Linker ${LD} does not support -z ifunc-noplt -> ifunc calls are unoptimized."
+.else
 LDFLAGS+=	-z notext -z ifunc-noplt
 .endif
 .endif
+.endif  # ${MACHINE_CPUARCH} == "amd64"
 
 .if ${MACHINE_CPUARCH} == "riscv"
 # Hack: Work around undefined weak symbols being out of range when linking with
@@ -194,8 +184,9 @@ NORMAL_M= ${AWK} -f $S/tools/makeobjops.awk ${.IMPSRC} -c ; \
 	  ${CC} -c ${CFLAGS} ${WERROR} ${PROF} ${.PREFIX}.c
 
 NORMAL_FW= uudecode -o ${.TARGET} ${.ALLSRC}
-NORMAL_FWO= ${LD} -b binary --no-warn-mismatch -d -warn-common -r \
-	-m ${LD_EMULATION} -o ${.TARGET} ${.ALLSRC:M*.fw}
+NORMAL_FWO= ${CC:N${CCACHE_BIN}} -c ${ASM_CFLAGS} ${WERROR} -o ${.TARGET} \
+	$S/kern/firmw.S -DFIRMW_FILE="${.ALLSRC:M*.fw}" \
+	-DFIRMW_SYMBOL="${.ALLSRC:M*.fw:C/[-.\/]/_/g}"
 
 # for ZSTD in the kernel (include zstd/lib/freebsd before other CFLAGS)
 ZSTD_C= ${CC} -c -DZSTD_HEAPMODE=1 -I$S/contrib/zstd/lib/freebsd ${CFLAGS} -I$S/contrib/zstd/lib -I$S/contrib/zstd/lib/common ${WERROR} -Wno-inline -Wno-missing-prototypes ${PROF} -U__BMI__ ${.IMPSRC}
@@ -208,34 +199,82 @@ ZSTD_C= ${CC} -c -DZSTD_HEAPMODE=1 -I$S/contrib/zstd/lib/freebsd ${CFLAGS} -I$S/
 ZSTD_DECOMPRESS_BLOCK_FLAGS= -fno-tree-vectorize
 .endif
 
+ZINCDIR=$S/contrib/openzfs/include
 # Common for dtrace / zfs
-CDDL_CFLAGS=	-DFREEBSD_NAMECACHE -nostdinc -I$S/cddl/compat/opensolaris -I$S/cddl/contrib/opensolaris/uts/common -I$S -I$S/cddl/contrib/opensolaris/common ${CFLAGS} -Wno-unknown-pragmas -Wno-missing-prototypes -Wno-undef -Wno-strict-prototypes -Wno-cast-qual -Wno-parentheses -Wno-redundant-decls -Wno-missing-braces -Wno-uninitialized -Wno-unused -Wno-inline -Wno-switch -Wno-pointer-arith -Wno-unknown-pragmas
-CDDL_CFLAGS+=	-include $S/cddl/compat/opensolaris/sys/debug_compat.h
+CDDL_CFLAGS=	\
+	-DFREEBSD_NAMECACHE \
+	-D_SYS_VMEM_H_ \
+	-D__KERNEL \
+	-D__KERNEL__ \
+	-nostdinc \
+	-include $S/modules/zfs/static_ccompile.h \
+	-I${ZINCDIR} \
+	-I${ZINCDIR}/spl \
+	-I${ZINCDIR}/os/freebsd \
+	-I${ZINCDIR}/os/freebsd/spl \
+	-I${ZINCDIR}/os/freebsd/zfs  \
+	-I$S/modules/zfs \
+	-I$S/contrib/openzfs/module/zstd/include \
+	-I$S/contrib/openzfs/module/zstd/lib/freebsd/ \
+	${CFLAGS} \
+	-Wno-unknown-pragmas \
+	-Wno-missing-prototypes \
+	-Wno-undef \
+	-Wno-strict-prototypes \
+	-Wno-cast-qual \
+	-Wno-parentheses \
+	-Wno-redundant-decls \
+	-Wno-missing-braces \
+	-Wno-uninitialized \
+	-Wno-unused \
+	-Wno-inline \
+	-Wno-switch \
+	-Wno-pointer-arith \
+	-Wno-unknown-pragmas \
+	-Wno-duplicate-decl-specifier \
+	-include ${ZINCDIR}/os/freebsd/spl/sys/ccompile.h \
+	-I$S/cddl/contrib/opensolaris/uts/common \
+	-I$S -I$S/cddl/compat/opensolaris
 CDDL_C=		${CC} -c ${CDDL_CFLAGS} ${WERROR} ${PROF} ${.IMPSRC}
 
 # Special flags for managing the compat compiles for ZFS
-ZFS_CFLAGS=	-DBUILDING_ZFS -I$S/cddl/contrib/opensolaris/uts/common/fs/zfs
-ZFS_CFLAGS+=	-I$S/cddl/contrib/opensolaris/uts/common/fs/zfs/lua
-ZFS_CFLAGS+=	-I$S/cddl/contrib/opensolaris/uts/common/zmod
-ZFS_CFLAGS+=	-I$S/cddl/contrib/opensolaris/common/lz4
-ZFS_CFLAGS+=	-I$S/cddl/contrib/opensolaris/common/zfs
-ZFS_CFLAGS+=	${CDDL_CFLAGS}
+ZFS_CFLAGS+=	${CDDL_CFLAGS} -DBUILDING_ZFS -DHAVE_UIO_ZEROCOPY \
+	-DWITH_NETDUMP -D__KERNEL__ -D_SYS_CONDVAR_H_ -DSMP \
+	-DIN_FREEBSD_BASE -DHAVE_KSID
+
+.if ${MACHINE_ARCH} == "amd64"
+ZFS_CFLAGS+= -DHAVE_AVX2 -DHAVE_AVX -D__x86_64 -DHAVE_SSE2 -DHAVE_AVX512F \
+	-DHAVE_SSSE3 -DHAVE_AVX512BW
+.endif
+
+.if ${MACHINE_ARCH} == "i386" || ${MACHINE_ARCH} == "powerpc" || \
+	${MACHINE_ARCH} == "powerpcspe" || ${MACHINE_ARCH} == "arm"
+ZFS_CFLAGS+= -DBITS_PER_LONG=32
+.else
+ZFS_CFLAGS+= -DBITS_PER_LONG=64
+.endif
+
+
 ZFS_ASM_CFLAGS= -x assembler-with-cpp -DLOCORE ${ZFS_CFLAGS}
 ZFS_C=		${CC} -c ${ZFS_CFLAGS} ${WERROR} ${PROF} ${.IMPSRC}
+ZFS_RPC_C=	${CC} -c ${ZFS_CFLAGS} -DHAVE_RPC_TYPES ${WERROR} ${PROF} ${.IMPSRC}
 ZFS_S=		${CC} -c ${ZFS_ASM_CFLAGS} ${WERROR} ${.IMPSRC}
+
+
 
 # Special flags for managing the compat compiles for DTrace
 DTRACE_CFLAGS=	-DBUILDING_DTRACE ${CDDL_CFLAGS} -I$S/cddl/dev/dtrace -I$S/cddl/dev/dtrace/${MACHINE_CPUARCH}
 .if ${MACHINE_CPUARCH} == "amd64" || ${MACHINE_CPUARCH} == "i386"
 DTRACE_CFLAGS+=	-I$S/cddl/contrib/opensolaris/uts/intel -I$S/cddl/dev/dtrace/x86
 .endif
-DTRACE_CFLAGS+=	-I$S/cddl/contrib/opensolaris/common/util -I$S -DDIS_MEM -DSMP
+DTRACE_CFLAGS+=	-I$S/cddl/contrib/opensolaris/common/util -I$S -DDIS_MEM -DSMP -I$S/cddl/compat/opensolaris
+DTRACE_CFLAGS+=	-I$S/cddl/contrib/opensolaris/uts/common
 DTRACE_ASM_CFLAGS=	-x assembler-with-cpp -DLOCORE ${DTRACE_CFLAGS}
 DTRACE_C=	${CC} -c ${DTRACE_CFLAGS}	${WERROR} ${PROF} ${.IMPSRC}
 DTRACE_S=	${CC} -c ${DTRACE_ASM_CFLAGS}	${WERROR} ${.IMPSRC}
 
 # Special flags for managing the compat compiles for DTrace/FBT
-FBT_CFLAGS=	-DBUILDING_DTRACE -nostdinc -I$S/cddl/dev/fbt/${MACHINE_CPUARCH} -I$S/cddl/dev/fbt -I$S/cddl/compat/opensolaris -I$S/cddl/contrib/opensolaris/uts/common -I$S ${CDDL_CFLAGS}
+FBT_CFLAGS=	-DBUILDING_DTRACE -nostdinc -I$S/cddl/dev/fbt/${MACHINE_CPUARCH} -I$S/cddl/dev/fbt ${CDDL_CFLAGS} -I$S/cddl/compat/opensolaris -I$S/cddl/contrib/opensolaris/uts/common  
 .if ${MACHINE_CPUARCH} == "amd64" || ${MACHINE_CPUARCH} == "i386"
 FBT_CFLAGS+=	-I$S/cddl/dev/fbt/x86
 .endif
@@ -318,37 +357,6 @@ MKMODULESENV+=	DEBUG_FLAGS="${DEBUG}"
 .endif
 .if !defined(NO_MODULES)
 MKMODULESENV+=	__MPATH="${__MPATH}"
-.endif
-
-# Architecture and output format arguments for objcopy to convert image to
-# object file
-
-.if ${MFS_IMAGE:Uno} != "no"
-.if empty(MD_ROOT_SIZE_CONFIGURED)
-.if !defined(EMBEDFS_FORMAT.${MACHINE_ARCH})
-EMBEDFS_FORMAT.${MACHINE_ARCH}!= awk -F'"' '/OUTPUT_FORMAT/ {print $$2}' ${LDSCRIPT}
-.if empty(EMBEDFS_FORMAT.${MACHINE_ARCH})
-.undef EMBEDFS_FORMAT.${MACHINE_ARCH}
-.endif
-.endif
-
-.if !defined(EMBEDFS_ARCH.${MACHINE_ARCH})
-EMBEDFS_ARCH.${MACHINE_ARCH}!= sed -n '/OUTPUT_ARCH/s/.*(\(.*\)).*/\1/p' ${LDSCRIPT}
-.if empty(EMBEDFS_ARCH.${MACHINE_ARCH})
-.undef EMBEDFS_ARCH.${MACHINE_ARCH}
-.endif
-.endif
-
-EMBEDFS_FORMAT.arm?=		elf32-littlearm
-EMBEDFS_FORMAT.armv6?=		elf32-littlearm
-EMBEDFS_FORMAT.armv7?=		elf32-littlearm
-EMBEDFS_FORMAT.aarch64?=	elf64-littleaarch64
-EMBEDFS_FORMAT.mips?=		elf32-tradbigmips
-EMBEDFS_FORMAT.mipsel?=		elf32-tradlittlemips
-EMBEDFS_FORMAT.mips64?=		elf64-tradbigmips
-EMBEDFS_FORMAT.mips64el?=	elf64-tradlittlemips
-EMBEDFS_FORMAT.riscv64?=	elf64-littleriscv
-.endif
 .endif
 
 # Detect kernel config options that force stack frames to be turned on.

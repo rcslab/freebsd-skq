@@ -114,22 +114,22 @@ SYSCTL_INT(_machdep, OID_AUTO, trap_debug, CTLFLAG_RW,
 
 #define	lwl_macro(data, addr)						\
 	__asm __volatile ("lwl %0, 0x0(%1)"				\
-			: "=r" (data)	/* outputs */			\
+			: "+r" (data)	/* outputs */			\
 			: "r" (addr));	/* inputs */
 
 #define	lwr_macro(data, addr)						\
 	__asm __volatile ("lwr %0, 0x0(%1)"				\
-			: "=r" (data)	/* outputs */			\
+			: "+r" (data)	/* outputs */			\
 			: "r" (addr));	/* inputs */
 
 #define	ldl_macro(data, addr)						\
 	__asm __volatile ("ldl %0, 0x0(%1)"				\
-			: "=r" (data)	/* outputs */			\
+			: "+r" (data)	/* outputs */			\
 			: "r" (addr));	/* inputs */
 
 #define	ldr_macro(data, addr)						\
 	__asm __volatile ("ldr %0, 0x0(%1)"				\
-			: "=r" (data)	/* outputs */			\
+			: "+r" (data)	/* outputs */			\
 			: "r" (addr));	/* inputs */
 
 #define	sb_macro(data, addr)						\
@@ -345,13 +345,13 @@ cpu_fetch_syscall_args(struct thread *td)
 
 	locr0 = td->td_frame;
 	sa = &td->td_sa;
-	
+
 	bzero(sa->args, sizeof(sa->args));
 
 	/* compute next PC after syscall instruction */
-	td->td_pcb->pcb_tpc = sa->trapframe->pc; /* Remember if restart */
-	if (DELAYBRANCH(sa->trapframe->cause))	 /* Check BD bit */
-		locr0->pc = MipsEmulateBranch(locr0, sa->trapframe->pc, 0, 0);
+	td->td_pcb->pcb_tpc = locr0->pc; /* Remember if restart */
+	if (DELAYBRANCH(locr0->cause))	 /* Check BD bit */
+		locr0->pc = MipsEmulateBranch(locr0, locr0->pc, 0, 0);
 	else
 		locr0->pc += sizeof(int);
 	sa->code = locr0->v0;
@@ -448,9 +448,7 @@ cpu_fetch_syscall_args(struct thread *td)
 	else
 		sa->callp = &se->sv_table[sa->code];
 
-	sa->narg = sa->callp->sy_narg;
-
-	if (sa->narg > nsaved) {
+	if (sa->callp->sy_narg > nsaved) {
 #if defined(__mips_n32) || defined(__mips_n64)
 		/*
 		 * XXX
@@ -462,7 +460,7 @@ cpu_fetch_syscall_args(struct thread *td)
 		if (!SV_PROC_FLAG(td->td_proc, SV_ILP32))
 #endif
 			printf("SYSCALL #%u pid:%u, narg (%u) > nsaved (%u).\n",
-			    sa->code, td->td_proc->p_pid, sa->narg, nsaved);
+			    sa->code, td->td_proc->p_pid, sa->callp->sy_narg, nsaved);
 #endif
 #if (defined(__mips_n32) || defined(__mips_n64)) && defined(COMPAT_FREEBSD32)
 		if (SV_PROC_FLAG(td->td_proc, SV_ILP32)) {
@@ -470,7 +468,7 @@ cpu_fetch_syscall_args(struct thread *td)
 			int32_t arg;
 
 			error = 0; /* XXX GCC is awful.  */
-			for (i = nsaved; i < sa->narg; i++) {
+			for (i = nsaved; i < sa->callp->sy_narg; i++) {
 				error = copyin((caddr_t)(intptr_t)(locr0->sp +
 				    (4 + (i - nsaved)) * sizeof(int32_t)),
 				    (caddr_t)&arg, sizeof arg);
@@ -482,7 +480,7 @@ cpu_fetch_syscall_args(struct thread *td)
 #endif
 		error = copyin((caddr_t)(intptr_t)(locr0->sp +
 		    4 * sizeof(register_t)), (caddr_t)&sa->args[nsaved],
-		   (u_int)(sa->narg - nsaved) * sizeof(register_t));
+		   (u_int)(sa->callp->sy_narg - nsaved) * sizeof(register_t));
 		if (error != 0) {
 			locr0->v0 = error;
 			locr0->a3 = 1;
@@ -740,7 +738,7 @@ dofault:
 				}
 				goto err;
 			}
-			addr = trapframe->pc;
+			addr = trapframe->badvaddr;
 
 			msg = "BAD_PAGE_FAULT";
 			log_bad_page_fault(msg, trapframe, type);
@@ -783,7 +781,6 @@ dofault:
 
 	case T_SYSCALL + T_USER:
 		{
-			td->td_sa.trapframe = trapframe;
 			syscallenter(td);
 
 #if !defined(SMP) && (defined(DDB) || defined(DEBUG))
@@ -824,12 +821,12 @@ dofault:
 
 			i = SIGTRAP;
 			ucode = TRAP_BRKPT;
-			addr = trapframe->pc;
 
 			/* compute address of break instruction */
 			va = trapframe->pc;
 			if (DELAYBRANCH(trapframe->cause))
 				va += sizeof(int);
+			addr = va;
 
 			if (td->td_md.md_ss_addr != va)
 				break;
@@ -902,7 +899,7 @@ dofault:
 					if (inst.RType.rd == 29) {
 						frame_regs = &(trapframe->zero);
 						frame_regs[inst.RType.rt] = (register_t)(intptr_t)td->td_md.md_tls;
-						frame_regs[inst.RType.rt] += td->td_md.md_tls_tcb_offset;
+						frame_regs[inst.RType.rt] += td->td_proc->p_md.md_tls_tcb_offset;
 						trapframe->pc += sizeof(int);
 						goto out;
 					}
@@ -1107,7 +1104,7 @@ err:
 	ksi.ksi_signo = i;
 	ksi.ksi_code = ucode;
 	ksi.ksi_addr = (void *)addr;
-	ksi.ksi_trapno = type;
+	ksi.ksi_trapno = type & ~T_USER;
 	trapsignal(td, &ksi);
 out:
 
@@ -1150,7 +1147,6 @@ trapDump(char *msg)
 }
 #endif
 
-
 /*
  * Return the resulting PC as if the branch was executed.
  */
@@ -1165,7 +1161,6 @@ MipsEmulateBranch(struct trapframe *framePtr, uintptr_t instPC, int fpcCSR,
 
 #define	GetBranchDest(InstPtr, inst) \
 	(InstPtr + 4 + ((short)inst.IType.imm << 2))
-
 
 	if (instptr) {
 		if (instptr < MIPS_KSEG0_START)
@@ -1378,7 +1373,6 @@ trap_frame_dump(struct trapframe *frame)
 
 #endif
 
-
 static void
 get_mapping_info(vm_offset_t va, pd_entry_t **pdepp, pt_entry_t **ptepp)
 {
@@ -1519,7 +1513,6 @@ log_bad_page_fault(char *msg, struct trapframe *frame, int trap_type)
 	    (intmax_t)frame->badvaddr, (void *)(intptr_t)*pdep, (uintmax_t)(ptep ? *ptep : 0));
 }
 
-
 /*
  * Unaligned load/store emulation
  */
@@ -1528,7 +1521,7 @@ mips_unaligned_load_store(struct trapframe *frame, int mode, register_t addr, re
 {
 	register_t *reg = (register_t *) frame;
 	u_int32_t inst = *((u_int32_t *)(intptr_t)pc);
-	register_t value_msb, value;
+	register_t value_msb = 0, value = 0;
 	unsigned size;
 
 	/*
@@ -1639,7 +1632,6 @@ mips_unaligned_load_store(struct trapframe *frame, int mode, register_t addr, re
 	panic("%s: should not be reached.", __func__);
 }
 
-
 /*
  * XXX TODO: SMP?
  */
@@ -1666,7 +1658,6 @@ emulate_unaligned_access(struct trapframe *frame, int mode)
 	 * Fall through if it's instruction fetch exception
 	 */
 	if (!((pc & 3) || (pc == frame->badvaddr))) {
-
 		/*
 		 * Handle unaligned load and store
 		 */

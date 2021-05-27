@@ -743,8 +743,6 @@ ngmn_connect(hook_p hook)
 	if (!(u & 1))
 		printf("%s: init chan %d stat %08x\n", sc->name, chan, u);
 	sc->m32x->stat = 1; 
-	/* probably not at splnet, force outward queueing */
-	NG_HOOK_FORCE_QUEUE(NG_HOOK_PEER(hook));
 
 	return (0);
 }
@@ -1394,6 +1392,7 @@ mn_attach (device_t self)
 	default:
 		printf(" Rev 0x%x\n", sc->f54r->vstr);
 	}
+	gone_in_dev(self, 13, "sync serial (T1/E1) driver");
 
 	if (ng_make_node_common(&mntypestruct, &sc->node) != 0) {
 		printf("ng_make_node_common failed\n");

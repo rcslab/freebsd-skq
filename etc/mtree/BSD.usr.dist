@@ -11,7 +11,7 @@
         private
             bsdstat
             ..
-            event
+            event1
             ..
             gmock
                 internal
@@ -37,7 +37,7 @@
         aout
         ..
         clang
-            10.0.0
+            11.0.0
                 include
                     cuda_wrappers
                     ..
@@ -67,6 +67,8 @@
         dtrace
         ..
         engines
+        ..
+        flua
         ..
         i18n
         ..
@@ -279,6 +281,8 @@
             ..
             find_interface
             ..
+            flua
+            ..
             hast
             ..
             hostapd
@@ -369,6 +373,8 @@
             ..
         ..
         firmware
+        ..
+        flua
         ..
         games
             fortune
@@ -853,6 +859,8 @@
             ..
             man3
             ..
+            man3lua
+            ..
             man4
                 aarch64
                 ..
@@ -863,8 +871,6 @@
                 i386
                 ..
                 powerpc
-                ..
-                sparc64
                 ..
             ..
             man5
@@ -879,8 +885,6 @@
                 i386
                 ..
                 powerpc
-                ..
-                sparc64
                 ..
             ..
             man9

@@ -125,7 +125,7 @@ void expect_getattr(uint64_t ino, mode_t mode, uint64_t attr_valid, int times,
 		out.body.attr.attr.mode = mode;
 		out.body.attr.attr.size = 0;
 		out.body.attr.attr.uid = uid;
-		out.body.attr.attr.uid = gid;
+		out.body.attr.attr.gid = gid;
 		out.body.attr.attr_valid = attr_valid;
 	})));
 }
@@ -490,7 +490,7 @@ TEST_F(Create, ok)
 	expect_create(RELPATH, ino);
 
 	fd = open(FULLPATH, O_CREAT | O_EXCL, 0644);
-	EXPECT_LE(0, fd) << strerror(errno);
+	ASSERT_LE(0, fd) << strerror(errno);
 	leak(fd);
 }
 
@@ -765,7 +765,7 @@ TEST_F(Open, ok)
 	expect_open(ino, 0, 1);
 
 	fd = open(FULLPATH, O_RDONLY);
-	EXPECT_LE(0, fd) << strerror(errno);
+	ASSERT_LE(0, fd) << strerror(errno);
 	leak(fd);
 }
 

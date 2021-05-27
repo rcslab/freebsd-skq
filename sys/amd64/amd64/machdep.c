@@ -95,14 +95,15 @@ __FBSDID("$FreeBSD$");
 #include <sys/vmmeter.h>
 
 #include <vm/vm.h>
+#include <vm/vm_param.h>
 #include <vm/vm_extern.h>
 #include <vm/vm_kern.h>
 #include <vm/vm_page.h>
 #include <vm/vm_map.h>
 #include <vm/vm_object.h>
 #include <vm/vm_pager.h>
-#include <vm/vm_param.h>
 #include <vm/vm_phys.h>
+#include <vm/vm_dumpset.h>
 
 #ifdef DDB
 #ifndef KDB
@@ -319,6 +320,13 @@ cpu_startup(dummy)
 
 	cpu_setregs();
 }
+
+static void
+late_ifunc_resolve(void *dummy __unused)
+{
+	link_elf_late_ireloc();
+}
+SYSINIT(late_ifunc_resolve, SI_SUB_CPU, SI_ORDER_ANY, late_ifunc_resolve, NULL);
 
 /*
  * Send an interrupt to process.
@@ -568,7 +576,7 @@ sys_sigreturn(td, uap)
 int
 freebsd4_sigreturn(struct thread *td, struct freebsd4_sigreturn_args *uap)
 {
- 
+
 	return sys_sigreturn(td, (struct sigreturn_args *)uap);
 }
 #endif
@@ -662,10 +670,10 @@ cpu_setregs(void)
 static struct gate_descriptor idt0[NIDT];
 struct gate_descriptor *idt = &idt0[0];	/* interrupt descriptor table */
 
-static char dblfault_stack[PAGE_SIZE] __aligned(16);
-static char mce0_stack[PAGE_SIZE] __aligned(16);
-static char nmi0_stack[PAGE_SIZE] __aligned(16);
-static char dbg0_stack[PAGE_SIZE] __aligned(16);
+static char dblfault_stack[DBLFAULT_STACK_SIZE] __aligned(16);
+static char mce0_stack[MCE_STACK_SIZE] __aligned(16);
+static char nmi0_stack[NMI_STACK_SIZE] __aligned(16);
+static char dbg0_stack[DBG_STACK_SIZE] __aligned(16);
 CTASSERT(sizeof(struct nmi_pcpu) == 16);
 
 /*
@@ -1223,7 +1231,7 @@ getmemsize(caddr_t kmdp, u_int64_t first)
 	 * Tell the physical memory allocator about pages used to store
 	 * the kernel and preloaded data.  See kmem_bootstrap_free().
 	 */
-	vm_phys_add_seg((vm_paddr_t)kernphys, trunc_page(first));
+	vm_phys_early_add_seg((vm_paddr_t)kernphys, trunc_page(first));
 
 	bzero(physmap, sizeof(physmap));
 	physmap_idx = 0;
@@ -1508,7 +1516,7 @@ native_parse_preload_data(u_int64_t modulep)
 #ifdef DDB
 	ksym_start = MD_FETCH(kmdp, MODINFOMD_SSYM, uintptr_t);
 	ksym_end = MD_FETCH(kmdp, MODINFOMD_ESYM, uintptr_t);
-	db_fetch_ksymtab(ksym_start, ksym_end);
+	db_fetch_ksymtab(ksym_start, ksym_end, 0);
 #endif
 	efi_systbl_phys = MD_FETCH(kmdp, MODINFOMD_FW_HANDLE, vm_paddr_t);
 
@@ -1555,6 +1563,8 @@ amd64_bsp_pcpu_init1(struct pcpu *pc)
 	PCPU_SET(ldt, (struct system_segment_descriptor *)&gdt[GUSERLDT_SEL]);
 	PCPU_SET(fs32p, &gdt[GUFS32_SEL]);
 	PCPU_SET(gs32p, &gdt[GUGS32_SEL]);
+	PCPU_SET(ucr3_load_mask, PMAP_UCR3_NOMASK);
+	PCPU_SET(smp_tlb_gen, 1);
 }
 
 void
@@ -1791,11 +1801,14 @@ hammer_time(u_int64_t modulep, u_int64_t physfree)
 
 	TUNABLE_INT_FETCH("machdep.mitigations.taa.enable", &x86_taa_enable);
 
+	TUNABLE_INT_FETCH("machdep.mitigations.rndgs.enable",
+	    &x86_rngds_mitg_enable);
+
 	finishidentcpu();	/* Final stage of CPU initialization */
 	initializecpu();	/* Initialize CPU registers */
 
 	amd64_bsp_ist_init(pc);
-	
+
 	/* Set the IO permission bitmap (empty due to tss seg limit) */
 	pc->pc_common_tss.tss_iobase = sizeof(struct amd64tss) +
 	    IOPERM_BITMAP_SIZE;
@@ -1841,6 +1854,14 @@ hammer_time(u_int64_t modulep, u_int64_t physfree)
 	if (late_console)
 		cninit();
 
+	/*
+	 * Dump the boot metadata. We have to wait for cninit() since console
+	 * output is required. If it's grossly incorrect the kernel will never
+	 * make it this far.
+	 */
+	if (getenv_is_true("debug.dump_modinfo_at_boot"))
+		preload_dump();
+
 #ifdef DEV_ISA
 #ifdef DEV_ATPIC
 	elcr_probe();
@@ -1857,7 +1878,7 @@ hammer_time(u_int64_t modulep, u_int64_t physfree)
 	setidt(IDT_IO_INTS + 15, IDTVEC(spuriousint), SDT_SYSIGT, SEL_KPL, 0);
 #endif
 #else
-#error "have you forgotten the isa device?";
+#error "have you forgotten the isa device?"
 #endif
 
 	if (late_console)
@@ -1867,12 +1888,13 @@ hammer_time(u_int64_t modulep, u_int64_t physfree)
 	fpuinit();
 
 	/*
-	 * Set up thread0 pcb save area after fpuinit calculated fpu save
-	 * area size.  Zero out the extended state header in fpu save
-	 * area.
+	 * Reinitialize thread0's stack base now that the xsave area size is
+	 * known.  Set up thread0's pcb save area after fpuinit calculated fpu
+	 * save area size.  Zero out the extended state header in fpu save area.
 	 */
+	set_top_of_stack_td(&thread0);
 	thread0.td_pcb->pcb_save = get_pcb_user_save_td(&thread0);
-	bzero(get_pcb_user_save_td(&thread0), cpu_max_ext_state_size);
+	bzero(thread0.td_pcb->pcb_save, cpu_max_ext_state_size);
 	if (use_xsave) {
 		xhdr = (struct xstate_hdr *)(get_pcb_user_save_td(&thread0) +
 		    1);
@@ -1882,7 +1904,7 @@ hammer_time(u_int64_t modulep, u_int64_t physfree)
 	rsp0 = thread0.td_md.md_stack_base;
 	/* Ensure the stack is aligned to 16 bytes */
 	rsp0 &= ~0xFul;
-	__pcpu[0].pc_common_tss.tss_rsp0 = rsp0;
+	PCPU_PTR(common_tss)->tss_rsp0 = rsp0;
 	amd64_bsp_pcpu_init2(rsp0);
 
 	/* transfer to user mode */
@@ -1904,8 +1926,6 @@ hammer_time(u_int64_t modulep, u_int64_t physfree)
         env = kern_getenv("kernelname");
 	if (env != NULL)
 		strlcpy(kernelname, env, sizeof(kernelname));
-
-	cpu_probe_amdc1e();
 
 	kcsan_cpu_init(0);
 

@@ -211,7 +211,6 @@ static struct ada_zone_desc {
 	{ADA_ZONE_FLAG_RWP_SUP, "Reset Write Pointer" },
 };
 
-
 /* Offsets into our private area for storing information */
 #define ccb_state	ppriv_field0
 #define ccb_bp		ppriv_ptr1
@@ -836,7 +835,6 @@ static	void		adaasync(void *callback_arg, u_int32_t code,
 static	int		adabitsysctl(SYSCTL_HANDLER_ARGS);
 static	int		adaflagssysctl(SYSCTL_HANDLER_ARGS);
 static	int		adazonesupsysctl(SYSCTL_HANDLER_ARGS);
-static	int		adazonesupsysctl(SYSCTL_HANDLER_ARGS);
 static	void		adasysctlinit(void *context, int pending);
 static	int		adagetattr(struct bio *bp);
 static	void		adasetflags(struct ada_softc *softc,
@@ -1010,7 +1008,6 @@ adaclose(struct disk *dp)
 	    (softc->flags & ADA_FLAG_CAN_FLUSHCACHE) != 0 &&
 	    (periph->flags & CAM_PERIPH_INVALID) == 0 &&
 	    cam_periph_hold(periph, PRIBIO) == 0) {
-
 		ccb = cam_periph_getccb(periph, CAM_PRIORITY_NORMAL);
 		cam_fill_ataio(&ccb->ataio,
 				    1,
@@ -1199,7 +1196,6 @@ adainit(void)
 		printf("ada: Failed to attach master async callback "
 		       "due to status 0x%x!\n", status);
 	} else if (ada_send_ordered) {
-
 		/* Register our event handlers */
 		if ((EVENTHANDLER_REGISTER(power_suspend, adasuspend,
 					   NULL, EVENTHANDLER_PRI_LAST)) == NULL)
@@ -1462,7 +1458,6 @@ adazonesupsysctl(SYSCTL_HANDLER_ARGS)
 
 	return (error);
 }
-
 
 static void
 adasysctlinit(void *context, int pending)
@@ -2574,7 +2569,6 @@ out:
 			break;
 		}
 
-
 		ata_read_log(ataio,
 		    /*retries*/1,
 		    /*cbfcnp*/adadone,
@@ -2839,7 +2833,6 @@ adazonedone(struct cam_periph *periph, union ccb *ccb)
 		free(ccb->ataio.data_ptr, M_ATADA);
 }
 
-
 static void
 adadone(struct cam_periph *periph, union ccb *done_ccb)
 {
@@ -3083,8 +3076,6 @@ adadone(struct cam_periph *periph, union ccb *done_ccb)
 							 /*getcount_only*/0);
 				}
 			}
-
-
 		}
 
 		free(ataio->data_ptr, M_ATADA);
@@ -3456,8 +3447,8 @@ adasetgeom(struct ada_softc *softc, struct ccb_getdev *cgd)
 	maxio = softc->cpi.maxio;		/* Honor max I/O size of SIM */
 	if (maxio == 0)
 		maxio = DFLTPHYS;	/* traditional default */
-	else if (maxio > MAXPHYS)
-		maxio = MAXPHYS;	/* for safety */
+	else if (maxio > maxphys)
+		maxio = maxphys;	/* for safety */
 	if (softc->flags & ADA_FLAG_CAN_48BIT)
 		maxio = min(maxio, 65536 * softc->params.secsize);
 	else					/* 28bit ATA command limit */

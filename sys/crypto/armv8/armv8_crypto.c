@@ -131,7 +131,7 @@ armv8_crypto_attach(device_t dev)
 	sc->dieing = 0;
 
 	sc->cid = crypto_get_driverid(dev, sizeof(struct armv8_crypto_session),
-	    CRYPTOCAP_F_SOFTWARE | CRYPTOCAP_F_SYNC);
+	    CRYPTOCAP_F_SOFTWARE | CRYPTOCAP_F_SYNC | CRYPTOCAP_F_ACCEL_SOFTWARE);
 	if (sc->cid < 0) {
 		device_printf(dev, "Could not get crypto driver id.\n");
 		return (ENOMEM);
@@ -207,6 +207,7 @@ armv8_crypto_probesession(device_t dev,
 		default:
 			return (EINVAL);
 		}
+		break;
 	default:
 		return (EINVAL);
 	}
@@ -281,7 +282,7 @@ armv8_crypto_process(device_t dev, struct cryptop *crp, int hint __unused)
 out:
 	crp->crp_etype = error;
 	crypto_done(crp);
-	return (error);
+	return (0);
 }
 
 static uint8_t *
@@ -357,10 +358,8 @@ armv8_crypto_cipher_process(struct armv8_crypto_session *ses,
 		fpu_kern_leave(curthread, ctx);
 		RELEASE_CTX(i, ctx);
 	}
-	if (allocated) {
-		bzero(buf, crp->crp_payload_length);
-		free(buf, M_ARMV8_CRYPTO);
-	}
+	if (allocated)
+		zfree(buf, M_ARMV8_CRYPTO);
 	return (0);
 }
 

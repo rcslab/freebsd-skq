@@ -86,7 +86,8 @@ cryptocteon_attach(device_t dev)
 	sc = device_get_softc(dev);
 
 	sc->sc_cid = crypto_get_driverid(dev, sizeof(struct octo_sess),
-	    CRYPTOCAP_F_HARDWARE | CRYPTOCAP_F_SYNC);
+	    CRYPTOCAP_F_SOFTWARE | CRYPTOCAP_F_SYNC |
+	    CRYPTOCAP_F_ACCEL_SOFTWARE);
 	if (sc->sc_cid < 0) {
 		device_printf(dev, "crypto_get_driverid ret %d\n", sc->sc_cid);
 		return (ENXIO);
@@ -101,9 +102,6 @@ cryptocteon_auth_supported(const struct crypto_session_params *csp)
 	u_int hash_len;
 
 	switch (csp->csp_auth_alg) {
-	case CRYPTO_MD5_HMAC:
-		hash_len = MD5_HASH_LEN;
-		break;
 	case CRYPTO_SHA1_HMAC:
 		hash_len = SHA1_HASH_LEN;
 		break;
@@ -121,14 +119,6 @@ cryptocteon_cipher_supported(const struct crypto_session_params *csp)
 {
 
 	switch (csp->csp_cipher_alg) {
-	case CRYPTO_DES_CBC:
-	case CRYPTO_3DES_CBC:
-		if (csp->csp_ivlen != 8)
-			return (false);
-		if (csp->csp_cipher_klen != 8 &&
-		    csp->csp_cipher_klen != 24)
-			return (false);
-		break;
 	case CRYPTO_AES_CBC:
 		if (csp->csp_ivlen != 16)
 			return (false);
@@ -205,9 +195,6 @@ cryptocteon_newsession(device_t dev, crypto_session_t cses,
 	ocd->octo_mlen = csp->csp_auth_mlen;
 	if (csp->csp_auth_mlen == 0) {
 		switch (csp->csp_auth_alg) {
-		case CRYPTO_MD5_HMAC:
-			ocd->octo_mlen = MD5_HASH_LEN;
-			break;
 		case CRYPTO_SHA1_HMAC:
 			ocd->octo_mlen = SHA1_HASH_LEN;
 			break;
@@ -217,10 +204,6 @@ cryptocteon_newsession(device_t dev, crypto_session_t cses,
 	switch (csp->csp_mode) {
 	case CSP_MODE_DIGEST:
 		switch (csp->csp_auth_alg) {
-		case CRYPTO_MD5_HMAC:
-			ocd->octo_encrypt = octo_null_md5_encrypt;
-			ocd->octo_decrypt = octo_null_md5_encrypt;
-			break;
 		case CRYPTO_SHA1_HMAC:
 			ocd->octo_encrypt = octo_null_sha1_encrypt;
 			ocd->octo_decrypt = octo_null_sha1_encrypt;
@@ -229,11 +212,6 @@ cryptocteon_newsession(device_t dev, crypto_session_t cses,
 		break;
 	case CSP_MODE_CIPHER:
 		switch (csp->csp_cipher_alg) {
-		case CRYPTO_DES_CBC:
-		case CRYPTO_3DES_CBC:
-			ocd->octo_encrypt = octo_des_cbc_encrypt;
-			ocd->octo_decrypt = octo_des_cbc_decrypt;
-			break;
 		case CRYPTO_AES_CBC:
 			ocd->octo_encrypt = octo_aes_cbc_encrypt;
 			ocd->octo_decrypt = octo_aes_cbc_decrypt;
@@ -242,25 +220,8 @@ cryptocteon_newsession(device_t dev, crypto_session_t cses,
 		break;
 	case CSP_MODE_ETA:
 		switch (csp->csp_cipher_alg) {
-		case CRYPTO_DES_CBC:
-		case CRYPTO_3DES_CBC:
-			switch (csp->csp_auth_alg) {
-			case CRYPTO_MD5_HMAC:
-				ocd->octo_encrypt = octo_des_cbc_md5_encrypt;
-				ocd->octo_decrypt = octo_des_cbc_md5_decrypt;
-				break;
-			case CRYPTO_SHA1_HMAC:
-				ocd->octo_encrypt = octo_des_cbc_sha1_encrypt;
-				ocd->octo_decrypt = octo_des_cbc_sha1_encrypt;
-				break;
-			}
-			break;
 		case CRYPTO_AES_CBC:
 			switch (csp->csp_auth_alg) {
-			case CRYPTO_MD5_HMAC:
-				ocd->octo_encrypt = octo_aes_cbc_md5_encrypt;
-				ocd->octo_decrypt = octo_aes_cbc_md5_decrypt;
-				break;
 			case CRYPTO_SHA1_HMAC:
 				ocd->octo_encrypt = octo_aes_cbc_sha1_encrypt;
 				ocd->octo_decrypt = octo_aes_cbc_sha1_decrypt;
@@ -335,12 +296,12 @@ cryptocteon_process(device_t dev, struct cryptop *crp, int hint)
 	 * do some error checking outside of the loop for m and IOV processing
 	 * this leaves us with valid m or uiop pointers for later
 	 */
-	switch (crp->crp_buf_type) {
+	switch (crp->crp_buf.cb_type) {
 	case CRYPTO_BUF_MBUF:
 	{
 		unsigned frags;
 
-		m = crp->crp_mbuf;
+		m = crp->crp_buf.cb_mbuf;
 		for (frags = 0; m != NULL; frags++)
 			m = m->m_next;
 
@@ -350,17 +311,19 @@ cryptocteon_process(device_t dev, struct cryptop *crp, int hint)
 			goto done;
 		}
 
-		m = crp->crp_mbuf;
+		m = crp->crp_buf.cb_mbuf;
 		break;
 	}
 	case CRYPTO_BUF_UIO:
-		uiop = crp->crp_uio;
+		uiop = crp->crp_buf.cb_uio;
 		if (uiop->uio_iovcnt > UIO_MAXIOV) {
 			printf("%s,%d: %d uio_iovcnt > UIO_MAXIOV", __FILE__, __LINE__,
 			       uiop->uio_iovcnt);
 			crp->crp_etype = EFBIG;
 			goto done;
 		}
+		break;
+	default:
 		break;
 	}
 
@@ -377,7 +340,7 @@ cryptocteon_process(device_t dev, struct cryptop *crp, int hint)
 	/*
 	 * setup the I/O vector to cover the buffer
 	 */
-	switch (crp->crp_buf_type) {
+	switch (crp->crp_buf.cb_type) {
 	case CRYPTO_BUF_MBUF:
 		iovcnt = 0;
 		iovlen = 0;
@@ -400,15 +363,14 @@ cryptocteon_process(device_t dev, struct cryptop *crp, int hint)
 		}
 		break;
 	case CRYPTO_BUF_CONTIG:
-		iovlen = crp->crp_ilen;
-		od->octo_iov[0].iov_base = crp->crp_buf;
-		od->octo_iov[0].iov_len = crp->crp_ilen;
+		iovlen = crp->crp_buf.cb_buf_len;
+		od->octo_iov[0].iov_base = crp->crp_buf.cb_buf;
+		od->octo_iov[0].iov_len = crp->crp_buf.cb_buf_len;
 		iovcnt = 1;
 		break;
 	default:
 		panic("can't happen");
 	}
-
 
 	/*
 	 * setup a new explicit key
@@ -417,7 +379,6 @@ cryptocteon_process(device_t dev, struct cryptop *crp, int hint)
 		memcpy(od->octo_enckey, crp->crp_cipher_key, od->octo_encklen);
 	if (crp->crp_auth_key != NULL)
 		cryptocteon_calc_hash(csp, crp->crp_auth_key, od);
-
 
 	if (CRYPTO_OP_IS_ENCRYPT(crp->crp_op))
 		(*od->octo_encrypt)(od, od->octo_iov, iovcnt, iovlen,
@@ -451,7 +412,6 @@ static device_method_t cryptocteon_methods[] = {
 	DEVMETHOD(cryptodev_probesession, cryptocteon_probesession),
 	DEVMETHOD(cryptodev_newsession,	cryptocteon_newsession),
 	DEVMETHOD(cryptodev_process,	cryptocteon_process),
-
 	{ 0, 0 }
 };
 

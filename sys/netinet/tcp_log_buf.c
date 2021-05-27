@@ -1192,7 +1192,6 @@ tcp_log_tcpcbinit(struct tcpcb *tp)
 	}
 }
 
-
 /* Remove entries */
 static void
 tcp_log_expire(void *unused __unused)
@@ -1693,6 +1692,9 @@ retry:
 	COPY_STAT(snd_numholes);
 	COPY_STAT(snd_scale);
 	COPY_STAT(rcv_scale);
+	COPY_STAT_T(flags2);
+	COPY_STAT_T(fbyte_in);
+	COPY_STAT_T(fbyte_out);
 #undef COPY_STAT
 #undef COPY_STAT_T
 	log_buf->tlb_flex1 = 0;
@@ -2336,7 +2338,6 @@ tcp_log_dump_node_logbuf(struct tcp_log_id_node *tln, char *reason, int how)
 	return (0);
 }
 
-
 /*
  * Queue the log buffers for all sessions in a bucket for transmissions via
  * the log buffer facility.
@@ -2574,7 +2575,6 @@ done:
 }
 #undef	LOCAL_SAVE
 
-
 /*
  * Queue the log buffers for all sessions in a bucket for transmissions via
  * the log buffer facility.
@@ -2636,4 +2636,3 @@ tcp_log_flowend(struct tcpcb *tp)
 				TCP_LOG_FLOWEND, 0, 0, NULL, false);
 	}
 }
-

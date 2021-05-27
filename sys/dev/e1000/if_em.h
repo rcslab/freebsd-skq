@@ -30,6 +30,7 @@
 #include "opt_ddb.h"
 #include "opt_inet.h"
 #include "opt_inet6.h"
+#include "opt_rss.h"
 
 #ifdef HAVE_KERNEL_OPTION_HEADERS
 #include "opt_device_polling.h"
@@ -69,6 +70,10 @@
 #include <net/if_dl.h>
 #include <net/if_media.h>
 #include <net/iflib.h>
+#ifdef	RSS
+#include <net/rss_config.h>
+#include <netinet/in_rss.h>
+#endif
 
 #include <net/if_types.h>
 #include <net/if_vlan_var.h>
@@ -311,7 +316,6 @@
 #define EM_BAR_MEM_TYPE_MASK	0x00000006
 #define EM_BAR_MEM_TYPE_32BIT	0x00000000
 #define EM_BAR_MEM_TYPE_64BIT	0x00000004
-#define EM_MSIX_BAR		3	/* On 82575 */
 
 /* More backward compatibility */
 #if __FreeBSD_version < 900000

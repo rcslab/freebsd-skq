@@ -382,6 +382,10 @@ t4_pcb_detach(struct toedev *tod __unused, struct tcpcb *tp)
 	}
 #endif
 
+	if (ulp_mode(toep) == ULP_MODE_TLS)
+		tls_detach(toep);
+
+	tp->tod = NULL;
 	tp->t_toe = NULL;
 	tp->t_flags &= ~TF_TOE;
 	toep->flags &= ~TPF_ATTACHED;
@@ -844,6 +848,8 @@ final_cpl_received(struct toepcb *toep)
 
 	if (ulp_mode(toep) == ULP_MODE_TCPDDP)
 		release_ddp_resources(toep);
+	else if (ulp_mode(toep) == ULP_MODE_TLS)
+		tls_detach(toep);
 	toep->inp = NULL;
 	toep->flags &= ~TPF_CPL_PENDING;
 	mbufq_drain(&toep->ulp_pdu_reclaimq);
@@ -970,7 +976,7 @@ calc_options0(struct vi_info *vi, struct conn_params *cp)
 	MPASS(cp->opt0_bufsize >= 0 && cp->opt0_bufsize <= M_RCV_BUFSIZ);
 	opt0 |= V_RCV_BUFSIZ(cp->opt0_bufsize);
 
-	MPASS(cp->l2t_idx >= 0 && cp->l2t_idx < vi->pi->adapter->vres.l2t.size);
+	MPASS(cp->l2t_idx >= 0 && cp->l2t_idx < vi->adapter->vres.l2t.size);
 	opt0 |= V_L2T_IDX(cp->l2t_idx);
 
 	opt0 |= V_SMAC_SEL(vi->smt_idx);
@@ -1036,8 +1042,6 @@ calc_options2(struct vi_info *vi, struct conn_params *cp)
 	if (cp->ulp_mode == ULP_MODE_TCPDDP)
 		opt2 |= F_RX_FC_DDP;
 #endif
-	if (cp->ulp_mode == ULP_MODE_TLS)
-		opt2 |= F_RX_FC_DISABLE;
 
 	return (htobe32(opt2));
 }
@@ -1045,7 +1049,7 @@ calc_options2(struct vi_info *vi, struct conn_params *cp)
 uint64_t
 select_ntuple(struct vi_info *vi, struct l2t_entry *e)
 {
-	struct adapter *sc = vi->pi->adapter;
+	struct adapter *sc = vi->adapter;
 	struct tp_params *tp = &sc->params.tp;
 	uint64_t ntuple = 0;
 

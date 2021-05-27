@@ -90,15 +90,6 @@ EXTRA_PACKAGES+= src.txz
 .endif
 .if !defined(NODOC)
 EXTRA_PACKAGES+= reldoc
-. if !defined(SVN) || empty(SVN)
-.  for S in svn svnlite
-.   for D in /usr/local/bin /usr/bin
-.    if(exists(${D}/${S}))
-SVN?=	${D}/${S}
-.    endif
-.   endfor
-.  endfor
-. endif
 .endif
 
 RELEASE_TARGETS= ftp
@@ -173,7 +164,6 @@ ports.txz:
 reldoc:
 	cd ${DOCDIR}/en_US.ISO8859-1/htdocs/releases/${REVISION}R && \
 	    env MAN4DIR=${WORLDDIR}/share/man/man4 \
-	    SVN=${SVN} \
 	    _BRANCH=${BRANCH} \
 	    ${MAKE} all install clean "FORMATS=html txt" \
 	    INSTALL_COMPRESSED='' URLS_ABSOLUTE=YES DOCDIR=${.OBJDIR}/rdoc \
@@ -327,6 +317,7 @@ release-install:
 	mkdir -p ${DESTDIR}
 .endif
 	cp -a ftp ${DESTDIR}/
+.if !empty(IMAGES)
 .for I in ${IMAGES}
 	cp -p ${I} ${DESTDIR}/${OSRELEASE}-${I}
 . if defined(WITH_COMPRESSED_IMAGES) && !empty(WITH_COMPRESSED_IMAGES)
@@ -335,5 +326,7 @@ release-install:
 .endfor
 	cd ${DESTDIR} && sha512 ${OSRELEASE}* > ${DESTDIR}/CHECKSUM.SHA512
 	cd ${DESTDIR} && sha256 ${OSRELEASE}* > ${DESTDIR}/CHECKSUM.SHA256
+.endif
 
+.include "${.CURDIR}/Makefile.inc1"
 .include "${.CURDIR}/Makefile.vm"

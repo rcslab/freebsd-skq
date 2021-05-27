@@ -87,7 +87,6 @@ MAN=	aac.4 \
 	bwi.4 \
 	bwn.4 \
 	${_bytgpio.4} \
-	${_chvgpio.4} \
 	capsicum.4 \
 	cardbus.4 \
 	carp.4 \
@@ -109,10 +108,12 @@ MAN=	aac.4 \
 	cfumass.4 \
 	ch.4 \
 	chromebook_platform.4 \
+	${_chvgpio.4} \
 	ciss.4 \
 	cloudabi.4 \
 	cmx.4 \
 	${_coretemp.4} \
+	cp2112.4 \
 	${_cpuctl.4} \
 	cpufreq.4 \
 	crypto.4 \
@@ -121,7 +122,6 @@ MAN=	aac.4 \
 	cxgb.4 \
 	cxgbe.4 \
 	cxgbev.4 \
-	cy.4 \
 	cyapa.4 \
 	da.4 \
 	dc.4 \
@@ -130,6 +130,7 @@ MAN=	aac.4 \
 	ddb.4 \
 	devctl.4 \
 	disc.4 \
+	disk.4 \
 	divert.4 \
 	${_dpms.4} \
 	ds1307.4 \
@@ -157,6 +158,7 @@ MAN=	aac.4 \
 	ffclock.4 \
 	filemon.4 \
 	firewire.4 \
+	${_ftwd.4} \
 	full.4 \
 	fwe.4 \
 	fwip.4 \
@@ -172,12 +174,12 @@ MAN=	aac.4 \
 	gif.4 \
 	gpio.4 \
 	gpioiic.4 \
+	gpiokeys.4 \
 	gpioled.4 \
 	gpioths.4 \
 	gre.4 \
 	h_ertt.4 \
 	hifn.4 \
-	hme.4 \
 	hpet.4 \
 	${_hpt27xx.4} \
 	${_hptiop.4} \
@@ -243,10 +245,12 @@ MAN=	aac.4 \
 	jedec_dimm.4 \
 	jme.4 \
 	kbdmux.4 \
+	kcov.4 \
 	keyboard.4 \
 	kld.4 \
 	ksyms.4 \
 	ksz8995ma.4 \
+	ktls.4 \
 	ktr.4 \
 	kue.4 \
 	lagg.4 \
@@ -351,6 +355,7 @@ MAN=	aac.4 \
 	ng_l2cap.4 \
 	ng_l2tp.4 \
 	ng_lmi.4 \
+	ng_macfilter.4 \
 	ng_mppc.4 \
 	ng_nat.4 \
 	ng_netflow.4 \
@@ -396,6 +401,7 @@ MAN=	aac.4 \
 	ocs_fc.4\
 	ohci.4 \
 	orm.4 \
+	${_ossl.4} \
 	ow.4 \
 	ow_temp.4 \
 	owc.4 \
@@ -428,13 +434,13 @@ MAN=	aac.4 \
 	pty.4 \
 	puc.4 \
 	pwmc.4 \
+	${_qat.4} \
 	${_qlxge.4} \
 	${_qlxgb.4} \
 	${_qlxgbe.4} \
 	${_qlnxe.4} \
 	ral.4 \
 	random.4 \
-	rc.4 \
 	rctl.4 \
 	re.4 \
 	rgephy.4 \
@@ -442,13 +448,14 @@ MAN=	aac.4 \
 	rl.4 \
 	rndtest.4 \
 	route.4 \
-	rp.4 \
+	rtsx.4 \
 	rtwn.4 \
 	rtwnfw.4 \
 	rtwn_pci.4 \
 	rue.4 \
 	sa.4 \
 	safe.4 \
+	safexcel.4 \
 	sbp.4 \
 	sbp_targ.4 \
 	scc.4 \
@@ -513,6 +520,7 @@ MAN=	aac.4 \
 	ste.4 \
 	stf.4 \
 	stge.4 \
+	${_sume.4} \
 	${_superio.4} \
 	sym.4 \
 	syncache.4 \
@@ -522,6 +530,7 @@ MAN=	aac.4 \
 	tap.4 \
 	targ.4 \
 	tcp.4 \
+	tcp_bbr.4 \
 	tdfx.4 \
 	terasic_mtl.4 \
 	termios.4 \
@@ -655,7 +664,6 @@ MLINKS+=gpio.4 gpiobus.4
 MLINKS+=gpioths.4 dht11.4
 MLINKS+=gpioths.4 dht22.4
 MLINKS+=gre.4 if_gre.4
-MLINKS+=hme.4 if_hme.4
 MLINKS+=hpet.4 acpi_hpet.4
 MLINKS+=${_hptrr.4} ${_rr232x.4}
 MLINKS+=${_attimer.4} ${_i8254.4}
@@ -777,6 +785,7 @@ _chvgpio.4=	chvgpio.4
 _coretemp.4=	coretemp.4
 _cpuctl.4=	cpuctl.4
 _dpms.4=	dpms.4
+_ftwd.4=	ftwd.4
 _hpt27xx.4=	hpt27xx.4
 _hptiop.4=	hptiop.4
 _hptmv.4=	hptmv.4
@@ -816,8 +825,10 @@ _ntb_transport.4=ntb_transport.4
 _nvd.4=		nvd.4
 _nvme.4=	nvme.4
 _nvram.4=	nvram.4
+_ossl.4=	ossl.4
 _padlock.4=	padlock.4
 _pchtherm.4=	pchtherm.4
+_qat.4=		qat.4
 _rr232x.4=	rr232x.4
 _speaker.4=	speaker.4
 _spkr.4=	spkr.4
@@ -850,6 +861,7 @@ _qlxgbe.4=	qlxgbe.4
 _qlnxe.4=	qlnxe.4
 _sfxge.4=	sfxge.4
 _smartpqi.4=	smartpqi.4
+_sume.4=	sume.4
 _vmd.4=		vmd.4
 
 MLINKS+=qlxge.4 if_qlxge.4
@@ -857,6 +869,7 @@ MLINKS+=qlxgb.4 if_qlxgb.4
 MLINKS+=qlxgbe.4 if_qlxgbe.4
 MLINKS+=qlnxe.4 if_qlnxe.4
 MLINKS+=sfxge.4 if_sfxge.4
+MLINKS+=sume.4 if_sume.4
 
 .if ${MK_BHYVE} != "no"
 _bhyve.4=	bhyve.4
@@ -966,7 +979,6 @@ MAN+=	\
 	uart.4 \
 	uath.4 \
 	ubsa.4 \
-	ubsec.4 \
 	ubser.4 \
 	ubtbcmfw.4 \
 	uchcom.4 \
@@ -976,7 +988,6 @@ MAN+=	\
 	udbp.4 \
 	udl.4 \
 	uep.4 \
-	ufm.4 \
 	ufoma.4 \
 	uftdi.4 \
 	ugen.4 \

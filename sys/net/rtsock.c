@@ -32,7 +32,7 @@
  * $FreeBSD$
  */
 #include "opt_ddb.h"
-#include "opt_mpath.h"
+#include "opt_route.h"
 #include "opt_inet.h"
 #include "opt_inet6.h"
 
@@ -62,10 +62,8 @@
 #include <net/netisr.h>
 #include <net/raw_cb.h>
 #include <net/route.h>
+#include <net/route/route_ctl.h>
 #include <net/route/route_var.h>
-#ifdef RADIX_MPATH
-#include <net/radix_mpath.h>
-#endif
 #include <net/vnet.h>
 
 #include <netinet/in.h>
@@ -76,7 +74,6 @@
 #include <netinet6/scope6_var.h>
 #endif
 #include <net/route/nhop.h>
-#include <net/route/shared.h>
 
 #ifdef COMPAT_FREEBSD32
 #include <sys/mount.h>
@@ -158,14 +155,16 @@ MTX_SYSINIT(rtsock, &rtsock_mtx, "rtsock route_cb lock", MTX_DEF);
 #define	RTSOCK_UNLOCK()	mtx_unlock(&rtsock_mtx)
 #define	RTSOCK_LOCK_ASSERT()	mtx_assert(&rtsock_mtx, MA_OWNED)
 
-static SYSCTL_NODE(_net, OID_AUTO, route, CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
-    "");
+SYSCTL_NODE(_net, OID_AUTO, route, CTLFLAG_RD | CTLFLAG_MPSAFE, 0, "");
 
 struct walkarg {
+	int	family;
 	int	w_tmemsize;
 	int	w_op, w_arg;
 	caddr_t	w_tmem;
 	struct sysctl_req *w_req;
+	struct sockaddr *dst;
+	struct sockaddr *mask;
 };
 
 static void	rts_input(struct mbuf *m);
@@ -174,21 +173,25 @@ static int	rtsock_msg_buffer(int type, struct rt_addrinfo *rtinfo,
 			struct walkarg *w, int *plen);
 static int	rt_xaddrs(caddr_t cp, caddr_t cplim,
 			struct rt_addrinfo *rtinfo);
-static int	sysctl_dumpentry(struct radix_node *rn, void *vw);
+static int	sysctl_dumpentry(struct rtentry *rt, void *vw);
+static int	sysctl_dumpnhop(struct rtentry *rt, struct nhop_object *nh,
+			uint32_t weight, struct walkarg *w);
 static int	sysctl_iflist(int af, struct walkarg *w);
 static int	sysctl_ifmalist(int af, struct walkarg *w);
 static int	route_output(struct mbuf *m, struct socket *so, ...);
-static void	rt_getmetrics(const struct rtentry *rt, struct rt_metrics *out);
+static void	rt_getmetrics(const struct rtentry *rt,
+			const struct nhop_object *nh, struct rt_metrics *out);
 static void	rt_dispatch(struct mbuf *, sa_family_t);
 static int	handle_rtm_get(struct rt_addrinfo *info, u_int fibnum,
-			struct rt_msghdr *rtm, struct rtentry **ret_nrt);
-static int	update_rtm_from_rte(struct rt_addrinfo *info,
+			struct rt_msghdr *rtm, struct rib_cmd_info *rc);
+static int	update_rtm_from_rc(struct rt_addrinfo *info,
 			struct rt_msghdr **prtm, int alloc_len,
-			struct rtentry *rt);
+			struct rib_cmd_info *rc, struct nhop_object *nh);
 static void	send_rtm_reply(struct socket *so, struct rt_msghdr *rtm,
 			struct mbuf *m, sa_family_t saf, u_int fibnum,
 			int rtm_errno);
-static int	can_export_rte(struct ucred *td_ucred, const struct rtentry *rt);
+static bool	can_export_rte(struct ucred *td_ucred, bool rt_is_host,
+			const struct sockaddr *rt_dst);
 
 static struct netisr_handler rtsock_nh = {
 	.nh_name = "rtsock",
@@ -647,6 +650,25 @@ fill_addrinfo(struct rt_msghdr *rtm, int len, u_int fibnum, struct rt_addrinfo *
 	return (0);
 }
 
+static struct nhop_object *
+select_nhop(struct nhop_object *nh, const struct sockaddr *gw)
+{
+	if (!NH_IS_NHGRP(nh))
+		return (nh);
+#ifdef ROUTE_MPATH
+	struct weightened_nhop *wn;
+	uint32_t num_nhops;
+	wn = nhgrp_get_nhops((struct nhgrp_object *)nh, &num_nhops);
+	if (gw == NULL)
+		return (wn[0].nh);
+	for (int i = 0; i < num_nhops; i++) {
+		if (match_nhop_gw(wn[i].nh, gw))
+			return (wn[i].nh);
+	}
+#endif
+	return (NULL);
+}
+
 /*
  * Handles RTM_GET message from routing socket, returning matching rt.
  *
@@ -656,11 +678,11 @@ fill_addrinfo(struct rt_msghdr *rtm, int len, u_int fibnum, struct rt_addrinfo *
  */
 static int
 handle_rtm_get(struct rt_addrinfo *info, u_int fibnum,
-    struct rt_msghdr *rtm, struct rtentry **ret_nrt)
+    struct rt_msghdr *rtm, struct rib_cmd_info *rc)
 {
 	RIB_RLOCK_TRACKER;
-	struct rtentry *rt;
 	struct rib_head *rnh;
+	struct nhop_object *nh;
 	sa_family_t saf;
 
 	saf = info->rti_info[RTAX_DST]->sa_family;
@@ -677,31 +699,23 @@ handle_rtm_get(struct rt_addrinfo *info, u_int fibnum,
 		 * address lookup (no mask).
 		 * 'route -n get addr'
 		 */
-		rt = (struct rtentry *) rnh->rnh_matchaddr(
+		rc->rc_rt = (struct rtentry *) rnh->rnh_matchaddr(
 		    info->rti_info[RTAX_DST], &rnh->head);
 	} else
-		rt = (struct rtentry *) rnh->rnh_lookup(
+		rc->rc_rt = (struct rtentry *) rnh->rnh_lookup(
 		    info->rti_info[RTAX_DST],
 		    info->rti_info[RTAX_NETMASK], &rnh->head);
 
-	if (rt == NULL) {
+	if (rc->rc_rt == NULL) {
 		RIB_RUNLOCK(rnh);
 		return (ESRCH);
 	}
-#ifdef RADIX_MPATH
-	/*
-	 * for RTM_GET, gate is optional even with multipath.
-	 * if gate == NULL the first match is returned.
-	 * (no need to call rt_mpath_matchgate if gate == NULL)
-	 */
-	if (rt_mpath_capable(rnh) && info->rti_info[RTAX_GATEWAY]) {
-		rt = rt_mpath_matchgate(rt, info->rti_info[RTAX_GATEWAY]);
-		if (!rt) {
-			RIB_RUNLOCK(rnh);
-			return (ESRCH);
-		}
+
+	nh = select_nhop(rt_get_raw_nhop(rc->rc_rt), info->rti_info[RTAX_GATEWAY]);
+	if (nh == NULL) {
+		RIB_RUNLOCK(rnh);
+		return (ESRCH);
 	}
-#endif
 	/*
 	 * If performing proxied L2 entry insertion, and
 	 * the actual PPP host entry is found, perform
@@ -711,18 +725,13 @@ handle_rtm_get(struct rt_addrinfo *info, u_int fibnum,
 	 */
 	if (rtm->rtm_flags & RTF_ANNOUNCE) {
 		struct sockaddr laddr;
-		struct nhop_object *nh;
 
-		nh = rt->rt_nhop;
 		if (nh->nh_ifp != NULL &&
 		    nh->nh_ifp->if_type == IFT_PROPVIRTUAL) {
-			struct epoch_tracker et;
 			struct ifaddr *ifa;
 
-			NET_EPOCH_ENTER(et);
 			ifa = ifa_ifwithnet(info->rti_info[RTAX_DST], 1,
 					RT_ALL_FIBS);
-			NET_EPOCH_EXIT(et);
 			if (ifa != NULL)
 				rt_maskedcopy(ifa->ifa_addr,
 					      &laddr,
@@ -734,25 +743,87 @@ handle_rtm_get(struct rt_addrinfo *info, u_int fibnum,
 		/* 
 		 * refactor rt and no lock operation necessary
 		 */
-		rt = (struct rtentry *)rnh->rnh_matchaddr(&laddr,
+		rc->rc_rt = (struct rtentry *)rnh->rnh_matchaddr(&laddr,
 		    &rnh->head);
-		if (rt == NULL) {
+		if (rc->rc_rt == NULL) {
+			RIB_RUNLOCK(rnh);
+			return (ESRCH);
+		}
+		nh = select_nhop(rt_get_raw_nhop(rc->rc_rt), info->rti_info[RTAX_GATEWAY]);
+		if (nh == NULL) {
 			RIB_RUNLOCK(rnh);
 			return (ESRCH);
 		}
 	}
-	RT_LOCK(rt);
-	RT_ADDREF(rt);
+	rc->rc_nh_new = nh;
+	rc->rc_nh_weight = rc->rc_rt->rt_weight;
 	RIB_RUNLOCK(rnh);
-
-	*ret_nrt = rt;
 
 	return (0);
 }
 
+static void
+init_sockaddrs_family(int family, struct sockaddr *dst, struct sockaddr *mask)
+{
+#ifdef INET
+	if (family == AF_INET) {
+		struct sockaddr_in *dst4 = (struct sockaddr_in *)dst;
+		struct sockaddr_in *mask4 = (struct sockaddr_in *)mask;
+
+		bzero(dst4, sizeof(struct sockaddr_in));
+		bzero(mask4, sizeof(struct sockaddr_in));
+
+		dst4->sin_family = AF_INET;
+		dst4->sin_len = sizeof(struct sockaddr_in);
+		mask4->sin_family = AF_INET;
+		mask4->sin_len = sizeof(struct sockaddr_in);
+	}
+#endif
+#ifdef INET6
+	if (family == AF_INET6) {
+		struct sockaddr_in6 *dst6 = (struct sockaddr_in6 *)dst;
+		struct sockaddr_in6 *mask6 = (struct sockaddr_in6 *)mask;
+
+		bzero(dst6, sizeof(struct sockaddr_in6));
+		bzero(mask6, sizeof(struct sockaddr_in6));
+
+		dst6->sin6_family = AF_INET6;
+		dst6->sin6_len = sizeof(struct sockaddr_in6);
+		mask6->sin6_family = AF_INET6;
+		mask6->sin6_len = sizeof(struct sockaddr_in6);
+	}
+#endif
+}
+
+static void
+export_rtaddrs(const struct rtentry *rt, struct sockaddr *dst,
+    struct sockaddr *mask)
+{
+	uint32_t scopeid = 0;
+#ifdef INET
+	if (dst->sa_family == AF_INET) {
+		struct sockaddr_in *dst4 = (struct sockaddr_in *)dst;
+		struct sockaddr_in *mask4 = (struct sockaddr_in *)mask;
+		rt_get_inet_prefix_pmask(rt, &dst4->sin_addr, &mask4->sin_addr,
+		    &scopeid);
+		return;
+	}
+#endif
+#ifdef INET6
+	if (dst->sa_family == AF_INET6) {
+		struct sockaddr_in6 *dst6 = (struct sockaddr_in6 *)dst;
+		struct sockaddr_in6 *mask6 = (struct sockaddr_in6 *)mask;
+		rt_get_inet6_prefix_pmask(rt, &dst6->sin6_addr, &mask6->sin6_addr,
+		    &scopeid);
+		dst6->sin6_scope_id = scopeid;
+		return;
+	}
+#endif
+}
+
+
 /*
- * Update sockaddrs, flags, etc in @prtm based on @rt data.
- * Assumes @rt is locked.
+ * Update sockaddrs, flags, etc in @prtm based on @rc data.
  * rtm can be reallocated.
  *
  * Returns 0 on success, along with pointer to (potentially reallocated)
@@ -760,26 +831,24 @@ handle_rtm_get(struct rt_addrinfo *info, u_int fibnum,
  *
  */
 static int
-update_rtm_from_rte(struct rt_addrinfo *info, struct rt_msghdr **prtm,
-    int alloc_len, struct rtentry *rt)
+update_rtm_from_rc(struct rt_addrinfo *info, struct rt_msghdr **prtm,
+    int alloc_len, struct rib_cmd_info *rc, struct nhop_object *nh)
 {
-	struct sockaddr_storage netmask_ss;
 	struct walkarg w;
 	union sockaddr_union saun;
 	struct rt_msghdr *rtm, *orig_rtm = NULL;
-	struct nhop_object *nh;
 	struct ifnet *ifp;
 	int error, len;
 
-	RT_LOCK_ASSERT(rt);
-
 	rtm = *prtm;
+	union sockaddr_union sa_dst, sa_mask;
+	int family = info->rti_info[RTAX_DST]->sa_family;
+	init_sockaddrs_family(family, &sa_dst.sa, &sa_mask.sa);
+	export_rtaddrs(rc->rc_rt, &sa_dst.sa, &sa_mask.sa);
 
-	nh = rt->rt_nhop;
-	info->rti_info[RTAX_DST] = rt_key(rt);
+	info->rti_info[RTAX_DST] = &sa_dst.sa;
+	info->rti_info[RTAX_NETMASK] = rt_is_host(rc->rc_rt) ? NULL : &sa_mask.sa;
 	info->rti_info[RTAX_GATEWAY] = &nh->gw_sa;
-	info->rti_info[RTAX_NETMASK] = rtsock_fix_netmask(rt_key(rt),
-	    rt_mask(rt), &netmask_ss);
 	info->rti_info[RTAX_GENMASK] = 0;
 	ifp = nh->nh_ifp;
 	if (rtm->rtm_addrs & (RTA_IFP | RTA_IFA)) {
@@ -824,12 +893,12 @@ update_rtm_from_rte(struct rt_addrinfo *info, struct rt_msghdr **prtm,
 	w.w_tmemsize = alloc_len;
 	rtsock_msg_buffer(rtm->rtm_type, info, &w, &len);
 
-	if (rt->rt_flags & RTF_GWFLAG_COMPAT)
+	rtm->rtm_flags = rc->rc_rt->rte_flags | nhop_get_rtflags(nh);
+	if (rtm->rtm_flags & RTF_GWFLAG_COMPAT)
 		rtm->rtm_flags = RTF_GATEWAY | 
-			(rt->rt_flags & ~RTF_GWFLAG_COMPAT);
-	else
-		rtm->rtm_flags = rt->rt_flags;
-	rt_getmetrics(rt, &rtm->rtm_rmx);
+			(rtm->rtm_flags & ~RTF_GWFLAG_COMPAT);
+	rt_getmetrics(rc->rc_rt, nh, &rtm->rtm_rmx);
+	rtm->rtm_rmx.rmx_weight = rc->rc_nh_weight;
 	rtm->rtm_addrs = info->rti_addrs;
 
 	if (orig_rtm != NULL)
@@ -838,6 +907,26 @@ update_rtm_from_rte(struct rt_addrinfo *info, struct rt_msghdr **prtm,
 
 	return (0);
 }
+
+#ifdef ROUTE_MPATH
+static void
+save_del_notification(struct rib_cmd_info *rc, void *_cbdata)
+{
+	struct rib_cmd_info *rc_new = (struct rib_cmd_info *)_cbdata;
+
+	if (rc->rc_cmd == RTM_DELETE)
+		*rc_new = *rc;
+}
+
+static void
+save_add_notification(struct rib_cmd_info *rc, void *_cbdata)
+{
+	struct rib_cmd_info *rc_new = (struct rib_cmd_info *)_cbdata;
+
+	if (rc->rc_cmd == RTM_ADD)
+		*rc_new = *rc;
+}
+#endif
 
 /*ARGSUSED*/
 static int
@@ -855,9 +944,10 @@ route_output(struct mbuf *m, struct socket *so, ...)
 	int alloc_len = 0, len, error = 0, fibnum;
 	sa_family_t saf = AF_UNSPEC;
 	struct walkarg w;
+	struct rib_cmd_info rc;
+	struct nhop_object *nh;
 
 	fibnum = so->so_fibnum;
-
 #define senderr(e) { error = e; goto flush;}
 	if (m == NULL || ((m->m_len < sizeof(long)) &&
 		       (m = m_pullup(m, sizeof(long))) == NULL))
@@ -882,6 +972,7 @@ route_output(struct mbuf *m, struct socket *so, ...)
 	m_copydata(m, 0, len, (caddr_t)rtm);
 	bzero(&info, sizeof(info));
 	bzero(&w, sizeof(w));
+	nh = NULL;
 
 	if (rtm->rtm_version != RTM_VERSION) {
 		/* Do not touch message since format is unknown */
@@ -907,60 +998,73 @@ route_output(struct mbuf *m, struct socket *so, ...)
 		error = lla_rt_output(rtm, &info);
 #ifdef INET6
 		if (error == 0)
-			rti_need_deembed = (V_deembed_scopeid) ? 1 : 0;
+			rti_need_deembed = 1;
 #endif
 		goto flush;
 	}
 
 	switch (rtm->rtm_type) {
-		struct rtentry *saved_nrt;
-
 	case RTM_ADD:
 	case RTM_CHANGE:
 		if (rtm->rtm_type == RTM_ADD) {
 			if (info.rti_info[RTAX_GATEWAY] == NULL)
 				senderr(EINVAL);
 		}
-		saved_nrt = NULL;
-		error = rtrequest1_fib(rtm->rtm_type, &info, &saved_nrt,
-		    fibnum);
-		if (error == 0 && saved_nrt != NULL) {
+		error = rib_action(fibnum, rtm->rtm_type, &info, &rc);
+		if (error == 0) {
 #ifdef INET6
-			rti_need_deembed = (V_deembed_scopeid) ? 1 : 0;
+			rti_need_deembed = 1;
 #endif
-			RT_LOCK(saved_nrt);
-			rtm->rtm_index = saved_nrt->rt_nhop->nh_ifp->if_index;
-			RT_REMREF(saved_nrt);
-			RT_UNLOCK(saved_nrt);
+#ifdef ROUTE_MPATH
+			if (NH_IS_NHGRP(rc.rc_nh_new) ||
+			    (rc.rc_nh_old && NH_IS_NHGRP(rc.rc_nh_old))) {
+				struct rib_cmd_info rc_simple = {};
+				rib_decompose_notification(&rc,
+				    save_add_notification, (void *)&rc_simple);
+				rc = rc_simple;
+			}
+#endif
+			nh = rc.rc_nh_new;
+			rtm->rtm_index = nh->nh_ifp->if_index;
+			rtm->rtm_flags = rc.rc_rt->rte_flags | nhop_get_rtflags(nh);
 		}
 		break;
 
 	case RTM_DELETE:
-		saved_nrt = NULL;
-		error = rtrequest1_fib(RTM_DELETE, &info, &saved_nrt, fibnum);
+		error = rib_action(fibnum, RTM_DELETE, &info, &rc);
 		if (error == 0) {
-			RT_LOCK(saved_nrt);
-			rt = saved_nrt;
+#ifdef ROUTE_MPATH
+			if (NH_IS_NHGRP(rc.rc_nh_old) ||
+			    (rc.rc_nh_new && NH_IS_NHGRP(rc.rc_nh_new))) {
+				struct rib_cmd_info rc_simple = {};
+				rib_decompose_notification(&rc,
+				    save_del_notification, (void *)&rc_simple);
+				rc = rc_simple;
+			}
+#endif
+			nh = rc.rc_nh_old;
 			goto report;
 		}
 #ifdef INET6
 		/* rt_msg2() will not be used when RTM_DELETE fails. */
-		rti_need_deembed = (V_deembed_scopeid) ? 1 : 0;
+		rti_need_deembed = 1;
 #endif
 		break;
 
 	case RTM_GET:
-		error = handle_rtm_get(&info, fibnum, rtm, &rt);
+		error = handle_rtm_get(&info, fibnum, rtm, &rc);
 		if (error != 0)
 			senderr(error);
+		nh = rc.rc_nh_new;
 
 report:
-		RT_LOCK_ASSERT(rt);
-		if (!can_export_rte(curthread->td_ucred, rt)) {
-			RT_UNLOCK(rt);
+		if (!can_export_rte(curthread->td_ucred,
+		    info.rti_info[RTAX_NETMASK] == NULL,
+		    info.rti_info[RTAX_DST])) {
 			senderr(ESRCH);
 		}
-		error = update_rtm_from_rte(&info, &rtm, alloc_len, rt);
+
+		error = update_rtm_from_rc(&info, &rtm, alloc_len, &rc, nh);
 		/*
 		 * Note that some sockaddr pointers may have changed to
 		 * point to memory outsize @rtm. Some may be pointing
@@ -976,7 +1080,6 @@ report:
 #ifdef INET6
 		rti_need_deembed = 0;
 #endif
-		RT_UNLOCK(rt);
 		if (error != 0)
 			senderr(error);
 		break;
@@ -987,8 +1090,7 @@ report:
 
 flush:
 	NET_EPOCH_EXIT(et);
-	if (rt != NULL)
-		RTFREE(rt);
+	rt = NULL;
 
 #ifdef INET6
 	if (rtm != NULL) {
@@ -1070,16 +1172,15 @@ send_rtm_reply(struct socket *so, struct rt_msghdr *rtm, struct mbuf *m,
 	}
 }
 
-
 static void
-rt_getmetrics(const struct rtentry *rt, struct rt_metrics *out)
+rt_getmetrics(const struct rtentry *rt, const struct nhop_object *nh,
+    struct rt_metrics *out)
 {
 
 	bzero(out, sizeof(*out));
-	out->rmx_mtu = rt->rt_nhop->nh_mtu;
+	out->rmx_mtu = nh->nh_mtu;
 	out->rmx_weight = rt->rt_weight;
-	out->rmx_pksent = counter_u64_fetch(rt->rt_pksent);
-	out->rmx_nhidx = nhop_get_idx(rt->rt_nhop);
+	out->rmx_nhidx = nhop_get_idx(nh);
 	/* Kernel -> userland timebase conversion. */
 	out->rmx_expire = rt->rt_expire ?
 	    rt->rt_expire - time_uptime + time_second : 0;
@@ -1168,7 +1269,6 @@ rtsock_msg_mbuf(int type, struct rt_addrinfo *rtinfo)
 	int len, dlen;
 
 	switch (type) {
-
 	case RTM_DELADDR:
 	case RTM_NEWADDR:
 		len = sizeof(struct ifa_msghdr);
@@ -1210,7 +1310,7 @@ rtsock_msg_mbuf(int type, struct rt_addrinfo *rtinfo)
 		rtinfo->rti_addrs |= (1 << i);
 		dlen = SA_SIZE(sa);
 #ifdef INET6
-		if (V_deembed_scopeid && sa->sa_family == AF_INET6) {
+		if (sa->sa_family == AF_INET6) {
 			sin6 = (struct sockaddr_in6 *)&ss;
 			bcopy(sa, sin6, sizeof(*sin6));
 			if (sa6_recoverscope(sin6) == 0)
@@ -1255,7 +1355,6 @@ rtsock_msg_buffer(int type, struct rt_addrinfo *rtinfo, struct walkarg *w, int *
 #endif
 
 	switch (type) {
-
 	case RTM_DELADDR:
 	case RTM_NEWADDR:
 		if (w != NULL && w->w_op == NET_RT_IFLISTL) {
@@ -1316,7 +1415,7 @@ rtsock_msg_buffer(int type, struct rt_addrinfo *rtinfo, struct walkarg *w, int *
 			dlen = SA_SIZE(sa);
 		if (cp != NULL && buflen >= dlen) {
 #ifdef INET6
-			if (V_deembed_scopeid && sa->sa_family == AF_INET6) {
+			if (sa->sa_family == AF_INET6) {
 				sin6 = (struct sockaddr_in6 *)&ss;
 				bcopy(sa, sin6, sizeof(*sin6));
 				if (sa6_recoverscope(sin6) == 0)
@@ -1490,15 +1589,17 @@ rtsock_routemsg(int cmd, struct rtentry *rt, struct ifnet *ifp, int rti_addrs,
 {
 	struct sockaddr_storage ss;
 	struct rt_addrinfo info;
+	struct nhop_object *nh;
 
 	if (V_route_cb.any_count == 0)
 		return (0);
 
+	nh = rt->rt_nhop;
 	bzero((caddr_t)&info, sizeof(info));
 	info.rti_info[RTAX_DST] = rt_key(rt);
 	info.rti_info[RTAX_NETMASK] = rtsock_fix_netmask(rt_key(rt), rt_mask(rt), &ss);
-	info.rti_info[RTAX_GATEWAY] = &rt->rt_nhop->gw_sa;
-	info.rti_flags = rt->rt_flags;
+	info.rti_info[RTAX_GATEWAY] = &nh->gw_sa;
+	info.rti_flags = rt->rte_flags | nhop_get_rtflags(nh);
 	info.rti_ifp = ifp;
 
 	return (rtsock_routemsg_info(cmd, &info, fibnum));
@@ -1695,43 +1796,70 @@ rt_dispatch(struct mbuf *m, sa_family_t saf)
  *
  * Returns 1 if it can, 0 otherwise.
  */
-static int
-can_export_rte(struct ucred *td_ucred, const struct rtentry *rt)
+static bool
+can_export_rte(struct ucred *td_ucred, bool rt_is_host,
+    const struct sockaddr *rt_dst)
 {
 
-	if ((rt->rt_flags & RTF_HOST) == 0
-	    ? jailed_without_vnet(td_ucred)
-	    : prison_if(td_ucred, rt_key_const(rt)) != 0)
-		return (0);
-	return (1);
+	if ((!rt_is_host) ? jailed_without_vnet(td_ucred)
+	    : prison_if(td_ucred, rt_dst) != 0)
+		return (false);
+	return (true);
 }
+
 
 /*
  * This is used in dumping the kernel table via sysctl().
  */
 static int
-sysctl_dumpentry(struct radix_node *rn, void *vw)
+sysctl_dumpentry(struct rtentry *rt, void *vw)
 {
 	struct walkarg *w = vw;
-	struct rtentry *rt = (struct rtentry *)rn;
 	struct nhop_object *nh;
-	int error = 0, size;
-	struct rt_addrinfo info;
-	struct sockaddr_storage ss;
+	int error = 0;
 
 	NET_EPOCH_ASSERT();
 
-	if (w->w_op == NET_RT_FLAGS && !(rt->rt_flags & w->w_arg))
-		return 0;
-	if (!can_export_rte(w->w_req->td->td_ucred, rt))
+	export_rtaddrs(rt, w->dst, w->mask);
+	if (!can_export_rte(w->w_req->td->td_ucred, rt_is_host(rt), w->dst))
 		return (0);
+	nh = rt_get_raw_nhop(rt);
+#ifdef ROUTE_MPATH
+	if (NH_IS_NHGRP(nh)) {
+		struct weightened_nhop *wn;
+		uint32_t num_nhops;
+		wn = nhgrp_get_nhops((struct nhgrp_object *)nh, &num_nhops);
+		for (int i = 0; i < num_nhops; i++) {
+			error = sysctl_dumpnhop(rt, wn[i].nh, wn[i].weight, w);
+			if (error != 0)
+				return (error);
+		}
+	} else
+#endif
+		error = sysctl_dumpnhop(rt, nh, rt->rt_weight, w);
+
+	return (0);
+}
+
+
+static int
+sysctl_dumpnhop(struct rtentry *rt, struct nhop_object *nh, uint32_t weight,
+    struct walkarg *w)
+{
+	struct rt_addrinfo info;
+	int error = 0, size;
+	uint32_t rtflags;
+
+	rtflags = nhop_get_rtflags(nh);
+
+	if (w->w_op == NET_RT_FLAGS && !(rtflags & w->w_arg))
+		return (0);
+
 	bzero((caddr_t)&info, sizeof(info));
-	info.rti_info[RTAX_DST] = rt_key(rt);
-	info.rti_info[RTAX_GATEWAY] = &rt->rt_nhop->gw_sa;
-	info.rti_info[RTAX_NETMASK] = rtsock_fix_netmask(rt_key(rt),
-	    rt_mask(rt), &ss);
+	info.rti_info[RTAX_DST] = w->dst;
+	info.rti_info[RTAX_GATEWAY] = &nh->gw_sa;
+	info.rti_info[RTAX_NETMASK] = (rtflags & RTF_HOST) ? NULL : w->mask;
 	info.rti_info[RTAX_GENMASK] = 0;
-	nh = rt->rt_nhop;
 	if (nh->nh_ifp && !(nh->nh_ifp->if_flags & IFF_DYING)) {
 		info.rti_info[RTAX_IFP] = nh->nh_ifp->if_addr->ifa_addr;
 		info.rti_info[RTAX_IFA] = nh->nh_ifa->ifa_addr;
@@ -1745,13 +1873,18 @@ sysctl_dumpentry(struct radix_node *rn, void *vw)
 
 		bzero(&rtm->rtm_index,
 		    sizeof(*rtm) - offsetof(struct rt_msghdr, rtm_index));
-		if (rt->rt_flags & RTF_GWFLAG_COMPAT)
+
+		/*
+		 * rte flags may consist of RTF_HOST (duplicated in nhop rtflags)
+		 * and RTF_UP (if entry is linked, which is always true here).
+		 * Given that, use nhop rtflags & add RTF_UP.
+		 */
+		rtm->rtm_flags = rtflags | RTF_UP;
+		if (rtm->rtm_flags & RTF_GWFLAG_COMPAT)
 			rtm->rtm_flags = RTF_GATEWAY | 
-				(rt->rt_flags & ~RTF_GWFLAG_COMPAT);
-		else
-			rtm->rtm_flags = rt->rt_flags;
-		rtm->rtm_flags |= nhop_get_rtflags(nh);
-		rt_getmetrics(rt, &rtm->rtm_rmx);
+				(rtm->rtm_flags & ~RTF_GWFLAG_COMPAT);
+		rt_getmetrics(rt, nh, &rtm->rtm_rmx);
+		rtm->rtm_rmx.rmx_weight = weight;
 		rtm->rtm_index = nh->nh_ifp->if_index;
 		rtm->rtm_addrs = info.rti_addrs;
 		error = SYSCTL_OUT(w->w_req, (caddr_t)rtm, size);
@@ -2015,10 +2148,23 @@ sysctl_ifmalist(int af, struct walkarg *w)
 	return (error);
 }
 
+static void
+rtable_sysctl_dump(uint32_t fibnum, int family, struct walkarg *w)
+{
+	union sockaddr_union sa_dst, sa_mask;
+
+	w->family = family;
+	w->dst = (struct sockaddr *)&sa_dst;
+	w->mask = (struct sockaddr *)&sa_mask;
+
+	init_sockaddrs_family(family, w->dst, w->mask);
+
+	rib_walk(fibnum, family, false, sysctl_dumpentry, w);
+}
+
 static int
 sysctl_rtsock(SYSCTL_HANDLER_ARGS)
 {
-	RIB_RLOCK_TRACKER;
 	struct epoch_tracker et;
 	int	*name = (int *)arg1;
 	u_int	namelen = arg2;
@@ -2032,7 +2178,7 @@ sysctl_rtsock(SYSCTL_HANDLER_ARGS)
 	namelen--;
 	if (req->newptr)
 		return (EPERM);
-	if (name[1] == NET_RT_DUMP || name[1] == NET_RT_NHOP) {
+	if (name[1] == NET_RT_DUMP || name[1] == NET_RT_NHOP || name[1] == NET_RT_NHGRP) {
 		if (namelen == 3)
 			fib = req->td->td_proc->p_fibnum;
 		else if (namelen == 4)
@@ -2055,7 +2201,7 @@ sysctl_rtsock(SYSCTL_HANDLER_ARGS)
 	error = sysctl_wire_old_buffer(req, 0);
 	if (error)
 		return (error);
-	
+
 	/*
 	 * Allocate reply buffer in advance.
 	 * All rtsock messages has maximum length of u_short.
@@ -2091,15 +2237,13 @@ sysctl_rtsock(SYSCTL_HANDLER_ARGS)
 		for (error = 0; error == 0 && i <= lim; i++) {
 			rnh = rt_tables_get_rnh(fib, i);
 			if (rnh != NULL) {
-				RIB_RLOCK(rnh); 
-			    	error = rnh->rnh_walktree(&rnh->head,
-				    sysctl_dumpentry, &w);
-				RIB_RUNLOCK(rnh);
+				rtable_sysctl_dump(fib, i, &w);
 			} else if (af != 0)
 				error = EAFNOSUPPORT;
 		}
 		break;
 	case NET_RT_NHOP:
+	case NET_RT_NHGRP:
 		/* Allow dumping one specific af/fib at a time */
 		if (namelen < 4) {
 			error = EINVAL;
@@ -2117,6 +2261,12 @@ sysctl_rtsock(SYSCTL_HANDLER_ARGS)
 		}
 		if (w.w_op == NET_RT_NHOP)
 			error = nhops_dump_sysctl(rnh, w.w_req);
+		else
+#ifdef ROUTE_MPATH
+			error = nhgrp_dump_sysctl(rnh, w.w_req);
+#else
+			error = ENOTSUP;
+#endif
 		break;
 	case NET_RT_IFLIST:
 	case NET_RT_IFLISTL:
@@ -2156,10 +2306,9 @@ static struct protosw routesw[] = {
 
 static struct domain routedomain = {
 	.dom_family =		PF_ROUTE,
-	.dom_name =		 "route",
+	.dom_name =		"route",
 	.dom_protosw =		routesw,
 	.dom_protoswNPROTOSW =	&routesw[nitems(routesw)]
 };
 
 VNET_DOMAIN_SET(route);
-

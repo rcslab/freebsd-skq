@@ -206,7 +206,6 @@ TUNABLE_INT("hw.vtscsi.bus_reset_disable", &vtscsi_bus_reset_disable);
 static struct virtio_feature_desc vtscsi_feature_desc[] = {
 	{ VIRTIO_SCSI_F_INOUT,		"InOut"		},
 	{ VIRTIO_SCSI_F_HOTPLUG,	"Hotplug"	},
-
 	{ 0, NULL }
 };
 
@@ -228,6 +227,8 @@ static driver_t vtscsi_driver = {
 };
 static devclass_t vtscsi_devclass;
 
+DRIVER_MODULE(virtio_scsi, virtio_mmio, vtscsi_driver, vtscsi_devclass,
+    vtscsi_modevent, 0);
 DRIVER_MODULE(virtio_scsi, virtio_pci, vtscsi_driver, vtscsi_devclass,
     vtscsi_modevent, 0);
 MODULE_VERSION(virtio_scsi, 1);
@@ -235,6 +236,7 @@ MODULE_DEPEND(virtio_scsi, virtio, 1, 1, 1);
 MODULE_DEPEND(virtio_scsi, cam, 1, 1, 1);
 
 VIRTIO_SIMPLE_PNPTABLE(virtio_scsi, VIRTIO_ID_SCSI, "VirtIO SCSI Adapter");
+VIRTIO_SIMPLE_PNPINFO(virtio_mmio, virtio_scsi);
 VIRTIO_SIMPLE_PNPINFO(virtio_pci, virtio_scsi);
 
 static int
@@ -448,7 +450,7 @@ vtscsi_maximum_segments(struct vtscsi_softc *sc, int seg_max)
 	nsegs = VTSCSI_MIN_SEGMENTS;
 
 	if (seg_max > 0) {
-		nsegs += MIN(seg_max, MAXPHYS / PAGE_SIZE + 1);
+		nsegs += MIN(seg_max, maxphys / PAGE_SIZE + 1);
 		if (sc->vtscsi_flags & VTSCSI_FLAG_INDIRECT)
 			nsegs = MIN(nsegs, VIRTIO_MAX_INDIRECT);
 	} else

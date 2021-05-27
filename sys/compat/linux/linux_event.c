@@ -221,7 +221,6 @@ static int	eventfd_create(struct thread *td, uint32_t initval, int flags);
 static void	linux_timerfd_expire(void *);
 static void	linux_timerfd_curval(struct timerfd *, struct itimerspec *);
 
-
 static void
 epoll_fd_install(struct thread *td, int fd, epoll_udata_t udata)
 {
@@ -342,7 +341,7 @@ epoll_to_kevent(struct thread *td, int fd, struct epoll_event *l_event,
 		if ((pem->flags & LINUX_XUNSUP_EPOLL) == 0) {
 			pem->flags |= LINUX_XUNSUP_EPOLL;
 			LINUX_PEM_XUNLOCK(pem);
-			linux_msg(td, "epoll_ctl unsupported flags: 0x%x\n",
+			linux_msg(td, "epoll_ctl unsupported flags: 0x%x",
 			    levents);
 		} else
 			LINUX_PEM_XUNLOCK(pem);
@@ -574,7 +573,6 @@ linux_epoll_wait_common(struct thread *td, int epfd, struct epoll_event *events,
 		td->td_flags |= TDF_ASTPENDING;
 		thread_unlock(td);
 	}
-
 
 	coargs.leventlist = events;
 	coargs.p = td->td_proc;

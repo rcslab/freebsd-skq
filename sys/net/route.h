@@ -104,6 +104,10 @@ struct rt_metrics {
 /* lle state is exported in rmx_state rt_metrics field */
 #define	rmx_state	rmx_weight
 
+/* default route weight */
+#define	RT_DEFAULT_WEIGHT	1
+#define	RT_MAX_WEIGHT		16777215	/* 3 bytes */
+
 /*
  * Keep a generation count of routing table, incremented on route addition,
  * so we can invalidate caches.  This is accessed without a lock, as precision
@@ -115,10 +119,47 @@ typedef volatile u_int rt_gen_t;	/* tree generation (for adds) */
 #define	RT_DEFAULT_FIB	0	/* Explicitly mark fib=0 restricted cases */
 #define	RT_ALL_FIBS	-1	/* Announce event for every fib */
 #ifdef _KERNEL
-extern u_int rt_numfibs;	/* number of usable routing tables */
+VNET_DECLARE(uint32_t, _rt_numfibs);	/* number of existing route tables */
+#define	V_rt_numfibs		VNET(_rt_numfibs)
+/* temporary compat arg */
+#define	rt_numfibs		V_rt_numfibs
 VNET_DECLARE(u_int, rt_add_addr_allfibs); /* Announce interfaces to all fibs */
 #define	V_rt_add_addr_allfibs	VNET(rt_add_addr_allfibs)
+
+/* Calculate flowid for locally-originated packets */
+#define	V_fib_hash_outbound	VNET(fib_hash_outbound)
+VNET_DECLARE(u_int, fib_hash_outbound);
+
+/* Outbound flowid generation rules */
+#ifdef RSS
+
+#define fib4_calc_packet_hash		xps_proto_software_hash_v4
+#define fib6_calc_packet_hash		xps_proto_software_hash_v6
+#define	CALC_FLOWID_OUTBOUND_SENDTO	true
+
+#ifdef ROUTE_MPATH
+#define	CALC_FLOWID_OUTBOUND		V_fib_hash_outbound
+#else
+#define	CALC_FLOWID_OUTBOUND		false
 #endif
+
+#else /* !RSS */
+
+#define fib4_calc_packet_hash		fib4_calc_software_hash
+#define fib6_calc_packet_hash		fib6_calc_software_hash
+
+#ifdef ROUTE_MPATH
+#define	CALC_FLOWID_OUTBOUND_SENDTO	V_fib_hash_outbound
+#define	CALC_FLOWID_OUTBOUND		V_fib_hash_outbound
+#else
+#define	CALC_FLOWID_OUTBOUND_SENDTO	false
+#define	CALC_FLOWID_OUTBOUND		false
+#endif
+
+#endif /* RSS */
+
+
+#endif /* _KERNEL */
 
 /*
  * We distinguish between routes to hosts and routes to networks,
@@ -171,6 +212,7 @@ VNET_DECLARE(u_int, rt_add_addr_allfibs); /* Announce interfaces to all fibs */
  */
 
 /* Consumer-visible nexthop info flags */
+#define	NHF_MULTIPATH		0x0008	/* Nexhop is a nexthop group */
 #define	NHF_REJECT		0x0010	/* RTF_REJECT */
 #define	NHF_BLACKHOLE		0x0020	/* RTF_BLACKHOLE */
 #define	NHF_REDIRECT		0x0040	/* RTF_DYNAMIC|RTF_MODIFIED */
@@ -181,14 +223,12 @@ VNET_DECLARE(u_int, rt_add_addr_allfibs); /* Announce interfaces to all fibs */
 
 /* Nexthop request flags */
 #define	NHR_NONE		0x00	/* empty flags field */
-#define	NHR_IFAIF		0x01	/* Return ifa_ifp interface */
-#define	NHR_REF			0x02	/* For future use */
-
-/* uRPF */
-#define	NHR_NODEFAULT		0x04	/* do not consider default route */
+#define	NHR_REF			0x01	/* reference nexhop */
+#define	NHR_NODEFAULT		0x02	/* uRPF: do not consider default route */
 
 /* Control plane route request flags */
 #define	NHR_COPY		0x100	/* Copy rte data */
+#define	NHR_UNLOCKED		0x200	/* Do not lock table */
 
 /*
  * Routing statistics.
@@ -201,6 +241,10 @@ struct rtstat {
 	uint64_t rts_wildcard;		/* lookups satisfied by a wildcard */
 	uint64_t rts_nh_idx_alloc_failure;	/* nexthop index alloc failure*/
 	uint64_t rts_nh_alloc_failure;	/* nexthop allocation failure*/
+	uint64_t rts_add_failure;	/* # of route addition failures */
+	uint64_t rts_add_retry;		/* # of route addition retries */
+	uint64_t rts_del_failure;	/* # of route deletion failure */
+	uint64_t rts_del_retry;		/* # of route deletion retries */
 };
 
 /*
@@ -296,7 +340,7 @@ struct rt_msghdr {
 
 struct rtentry;
 struct nhop_object;
-typedef int rt_filter_f_t(const struct rtentry *, const struct nhop_object *,
+typedef int rib_filter_f_t(const struct rtentry *, const struct nhop_object *,
     void *);
 
 struct rt_addrinfo {
@@ -305,7 +349,7 @@ struct rt_addrinfo {
 	struct	sockaddr *rti_info[RTAX_MAX];	/* Sockaddr data */
 	struct	ifaddr *rti_ifa;		/* value of rt_ifa addr */
 	struct	ifnet *rti_ifp;			/* route interface */
-	rt_filter_f_t	*rti_filter;		/* filter function */
+	rib_filter_f_t	*rti_filter;		/* filter function */
 	void	*rti_filterdata;		/* filter paramenters */
 	u_long	rti_mflags;			/* metrics RTV_ flags */
 	u_long	rti_spare;			/* Will be used for fib */
@@ -331,8 +375,6 @@ struct rt_addrinfo {
 
 #define RT_LINK_IS_UP(ifp)	(!((ifp)->if_capabilities & IFCAP_LINKSTATE) \
 				 || (ifp)->if_link_state == LINK_STATE_UP)
-
-#define	RTFREE_FUNC(_rt)	rtfree_func(_rt)
 
 #define	RO_NHFREE(_ro) do {					\
 	if ((_ro)->ro_nh) {					\
@@ -378,11 +420,10 @@ int	 rt_addrmsg(int, struct ifaddr *, int);
 int	 rt_routemsg(int, struct rtentry *, struct ifnet *ifp, int, int);
 int	 rt_routemsg_info(int, struct rt_addrinfo *, int);
 void	 rt_newmaddrmsg(int, struct ifmultiaddr *);
-int	 rt_setgate(struct rtentry *, struct sockaddr *, struct sockaddr *);
 void 	 rt_maskedcopy(struct sockaddr *, struct sockaddr *, struct sockaddr *);
 struct rib_head *rt_table_init(int, int, u_int);
 void	rt_table_destroy(struct rib_head *);
-u_int	rt_tables_get_gen(int table, int fam);
+u_int	rt_tables_get_gen(uint32_t table, sa_family_t family);
 
 int	rtsock_addrmsg(int, struct ifaddr *, int);
 int	rtsock_routemsg(int, struct rtentry *, struct ifnet *ifp, int, int);
@@ -390,52 +431,28 @@ int	rtsock_routemsg_info(int, struct rt_addrinfo *, int);
 
 struct sockaddr *rtsock_fix_netmask(const struct sockaddr *dst,
 	    const struct sockaddr *smask, struct sockaddr_storage *dmask);
-/*
- * Note the following locking behavior:
- *
- *    rtalloc1() returns a locked rtentry
- *
- *    rtfree() and RTFREE_LOCKED() require a locked rtentry
- *
- *    RTFREE() uses an unlocked entry.
- */
 
-void	 rtfree(struct rtentry *);
-void	 rtfree_func(struct rtentry *);
 void	rt_updatemtu(struct ifnet *);
 
-typedef int rt_walktree_f_t(struct rtentry *, void *);
-typedef void rt_setwarg_t(struct rib_head *, uint32_t, int, void *);
-void	rib_walk_del(u_int fibnum, int family, rt_filter_f_t *filter_f,
-	    void *arg, bool report);
-void	rt_foreach_fib_walk(int af, rt_setwarg_t *, rt_walktree_f_t *, void *);
-void	rt_foreach_fib_walk_del(int af, rt_filter_f_t *filter_f, void *arg);
 void	rt_flushifroutes_af(struct ifnet *, int);
 void	rt_flushifroutes(struct ifnet *ifp);
 
 /* XXX MRT COMPAT VERSIONS THAT SET UNIVERSE to 0 */
 /* Thes are used by old code not yet converted to use multiple FIBS */
-struct rtentry *rtalloc1(struct sockaddr *, int, u_long);
 int	 rtinit(struct ifaddr *, int, int);
 
 /* XXX MRT NEW VERSIONS THAT USE FIBs
  * For now the protocol indepedent versions are the same as the AF_INET ones
  * but this will change.. 
  */
-struct rtentry *rtalloc1_fib(struct sockaddr *, int, u_long, u_int);
 int	 rtioctl_fib(u_long, caddr_t, u_int);
-int	 rtrequest_fib(int, struct sockaddr *,
-	    struct sockaddr *, struct sockaddr *, int, struct rtentry **, u_int);
-int	 rtrequest1_fib(int, struct rt_addrinfo *, struct rtentry **, u_int);
 int	rib_lookup_info(uint32_t, const struct sockaddr *, uint32_t, uint32_t,
 	    struct rt_addrinfo *);
 void	rib_free_info(struct rt_addrinfo *info);
-int	rib_add_redirect(u_int fibnum, struct sockaddr *dst,
-	   struct sockaddr *gateway, struct sockaddr *author, struct ifnet *ifp,
-	   int flags, int expire_sec);
 
 /* New API */
-void	rib_walk(int af, u_int fibnum, rt_walktree_f_t *wa_f, void *arg);
+struct nhop_object *rib_lookup(uint32_t fibnum, const struct sockaddr *dst,
+	    uint32_t flags, uint32_t flowid);
 #endif
 
 #endif

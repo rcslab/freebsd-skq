@@ -583,7 +583,7 @@ cfginitbar(struct vmctx *ctx, struct passthru_softc *sc)
 		sc->psc_bar[i].addr = base;
 
 		/* Allocate the BAR in the guest I/O or MMIO space */
-		error = pci_emul_alloc_pbar(pi, i, base, bartype, size);
+		error = pci_emul_alloc_bar(pi, i, bartype, size);
 		if (error)
 			return (-1);
 
@@ -811,8 +811,8 @@ passthru_cfgread(struct vmctx *ctx, int vcpu, struct pci_devinst *pi,
 	if (coff == PCIR_COMMAND) {
 		if (bytes <= 2)
 			return (-1);
-		*rv = pci_get_cfgdata16(pi, PCIR_COMMAND) << 16 |
-		    read_config(&sc->psc_sel, PCIR_STATUS, 2);
+		*rv = read_config(&sc->psc_sel, PCIR_STATUS, 2) << 16 |
+		    pci_get_cfgdata16(pi, PCIR_COMMAND);
 		return (0);
 	}
 
@@ -842,8 +842,8 @@ passthru_cfgwrite(struct vmctx *ctx, int vcpu, struct pci_devinst *pi,
 	 * MSI capability is emulated
 	 */
 	if (msicap_access(sc, coff)) {
-		msicap_cfgwrite(pi, sc->psc_msi.capoff, coff, bytes, val);
-
+		pci_emul_capwrite(pi, coff, bytes, val, sc->psc_msi.capoff,
+		    PCIY_MSI);
 		error = vm_setup_pptdev_msi(ctx, vcpu, sc->psc_sel.pc_bus,
 			sc->psc_sel.pc_dev, sc->psc_sel.pc_func,
 			pi->pi_msi.addr, pi->pi_msi.msg_data,
@@ -854,7 +854,8 @@ passthru_cfgwrite(struct vmctx *ctx, int vcpu, struct pci_devinst *pi,
 	}
 
 	if (msixcap_access(sc, coff)) {
-		msixcap_cfgwrite(pi, sc->psc_msix.capoff, coff, bytes, val);
+		pci_emul_capwrite(pi, coff, bytes, val, sc->psc_msix.capoff,
+		    PCIY_MSIX);
 		if (pi->pi_msix.enabled) {
 			msix_table_entries = pi->pi_msix.table_count;
 			for (i = 0; i < msix_table_entries; i++) {
@@ -868,6 +869,11 @@ passthru_cfgwrite(struct vmctx *ctx, int vcpu, struct pci_devinst *pi,
 				if (error)
 					err(1, "vm_setup_pptdev_msix");
 			}
+		} else {
+			error = vm_disable_pptdev_msix(ctx, sc->psc_sel.pc_bus,
+			    sc->psc_sel.pc_dev, sc->psc_sel.pc_func);
+			if (error)
+				err(1, "vm_disable_pptdev_msix");
 		}
 		return (0);
 	}

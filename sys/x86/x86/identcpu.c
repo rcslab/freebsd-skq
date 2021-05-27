@@ -779,7 +779,6 @@ printcpuinfo(void)
 		 * http://www.intel.com/assets/pdf/appnote/241618.pdf
 		 */
 		if (cpu_high > 0) {
-
 			/*
 			 * Here we should probably set up flags indicating
 			 * whether or not various features are available.
@@ -1008,7 +1007,9 @@ printcpuinfo(void)
 				       "\013VPCLMULQDQ"
 				       "\014AVX512VNNI"
 				       "\015AVX512BITALG"
-				       "\016AVX512VPOPCNTDQ"
+				       "\016TME"
+				       "\017AVX512VPOPCNTDQ"
+				       "\021LA57"
 				       "\027RDPID"
 				       "\032CLDEMOTE"
 				       "\034MOVDIRI"
@@ -1026,6 +1027,7 @@ printcpuinfo(void)
 				       "\004AVX512_4FMAPS"
 				       "\005FSRM"
 				       "\011AVX512VP2INTERSECT"
+				       "\012MCUOPT"
 				       "\013MD_CLEAR"
 				       "\016TSXFA"
 				       "\023PCONFIG"
@@ -1095,6 +1097,7 @@ printcpuinfo(void)
 				    "\021IBRS_ALWAYSON"
 				    "\022STIBP_ALWAYSON"
 				    "\023PREFER_IBRS"
+				    "\030PPIN"
 				    "\031SSBD"
 				    "\032VIRT_SSBD"
 				    "\033SSB_NO"
@@ -1272,7 +1275,6 @@ identblue(void)
 		return IDENTBLUE_CYRIXM2;
 	return IDENTBLUE_IBMCPU;
 }
-
 
 /*
  * identifycyrix() set lower 16 bits of cyrix_did as follows:

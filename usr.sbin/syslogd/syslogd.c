@@ -1871,9 +1871,9 @@ fprintlog_write(struct filed *f, struct iovlist *il, int flags)
 			STAILQ_FOREACH(sl, &shead, next) {
 				if (sl->sl_socket < 0)
 					continue;
-				if (sl->sl_sa != NULL &&
-				    (sl->sl_family == AF_LOCAL ||
-				     sl->sl_family == AF_UNSPEC))
+				if (sl->sl_sa == NULL ||
+				    sl->sl_family == AF_UNSPEC ||
+				    sl->sl_family == AF_LOCAL)
 					continue;
 				lsent = sendmsg(sl->sl_socket, &msghdr, 0);
 				if (lsent == (ssize_t)il->totalsize)
@@ -2300,7 +2300,9 @@ cvthname(struct sockaddr *f)
 	hl = strlen(hname);
 	if (hl > 0 && hname[hl-1] == '.')
 		hname[--hl] = '\0';
-	trimdomain(hname, hl);
+	/* RFC 5424 prefers logging FQDNs. */
+	if (RFC3164OutputFormat)
+		trimdomain(hname, hl);
 	return (hname);
 }
 
@@ -2759,7 +2761,7 @@ prop_filter_compile(struct prop_filter *pfilter, char *filter)
 	/*
 	 * Here's some filter examples mentioned in syslog.conf(5)
 	 * 'msg, contains, ".*Deny.*"'
-	 * 'processname, regex, "^bird6?$"'
+	 * 'programname, regex, "^bird6?$"'
 	 * 'hostname, icase_ereregex, "^server-(dcA|podB)-rack1[0-9]{2}\\..*"'
 	 */
 
@@ -2927,7 +2929,9 @@ cfline(const char *line, const char *prog, const char *host,
 		hl = strlen(f->f_host);
 		if (hl > 0 && f->f_host[hl-1] == '.')
 			f->f_host[--hl] = '\0';
-		trimdomain(f->f_host, hl);
+		/* RFC 5424 prefers logging FQDNs. */
+		if (RFC3164OutputFormat)
+			trimdomain(f->f_host, hl);
 	}
 
 	/* save program name if any */
