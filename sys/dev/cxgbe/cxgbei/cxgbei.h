@@ -96,6 +96,10 @@ struct icl_cxgbei_pdu {
 	uint32_t icp_signature;
 	uint32_t icp_seq;	/* For debug only */
 	u_int icp_flags;
+
+	u_int ref_cnt;
+	icl_pdu_cb cb;
+	int error;
 };
 
 static inline struct icl_cxgbei_pdu *
@@ -113,12 +117,6 @@ struct cxgbei_data {
 	struct ppod_region pr;
 
 	struct sysctl_ctx_list ctx;	/* from uld_activate to deactivate */
-	counter_u64_t ddp_setup_ok;
-	counter_u64_t ddp_setup_error;
-	counter_u64_t ddp_bytes;
-	counter_u64_t ddp_pdus;
-	counter_u64_t fl_bytes;
-	counter_u64_t fl_pdus;
 };
 
 /* cxgbei.c */
@@ -127,4 +125,8 @@ u_int cxgbei_select_worker_thread(struct icl_cxgbei_conn *);
 /* icl_cxgbei.c */
 int icl_cxgbei_mod_load(void);
 int icl_cxgbei_mod_unload(void);
+struct icl_pdu *icl_cxgbei_new_pdu(int);
+void icl_cxgbei_new_pdu_set_conn(struct icl_pdu *, struct icl_conn *);
+void icl_cxgbei_conn_pdu_free(struct icl_conn *, struct icl_pdu *);
+
 #endif

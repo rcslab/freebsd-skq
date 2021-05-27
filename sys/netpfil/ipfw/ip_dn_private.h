@@ -125,11 +125,24 @@ struct dn_parms {
 	struct timeval prev_t;		/* last time dummynet_tick ran */
 	struct dn_heap	evheap;		/* scheduled events */
 
+	long	tick_last;		/* Last tick duration (usec). */
+	long	tick_delta;		/* Last vs standard tick diff (usec). */
+	long	tick_delta_sum;	/* Accumulated tick difference (usec).*/
+	long	tick_adjustment;	/* Tick adjustments done. */
+	long	tick_lost;		/* Lost(coalesced) ticks number. */
+	/* Adjusted vs non-adjusted curr_time difference (ticks). */
+	long	tick_diff;
+
 	/* counters of objects -- used for reporting space */
 	int	schk_count;
 	int	si_count;
 	int	fsk_count;
 	int	queue_count;
+
+	/* packet counters */
+	unsigned long	io_pkt;
+	unsigned long	io_pkt_fast;
+	unsigned long	io_pkt_drop;
 
 	/* ticks and other stuff */
 	uint64_t	curr_time;
@@ -157,13 +170,6 @@ struct dn_parms {
 	uint32_t expire_cycle;	/* tick count */
 
 	int init_done;
-
-	/* if the upper half is busy doing something long,
-	 * can set the busy flag and we will enqueue packets in
-	 * a queue for later processing.
-	 */
-	int	busy;
-	struct	mq	pending;
 
 #ifdef _KERNEL
 	/*
