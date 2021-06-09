@@ -1134,13 +1134,14 @@ filt_timerexpire_l(struct knote *kn, bool proc_locked)
 			}
 			if (!proc_locked)
 				PROC_UNLOCK(p);
+
+			knote_leave_flux_ul(kn);
 			return;
 		}
 		if (!proc_locked)
 			PROC_UNLOCK(p);
 	}
 	kqtimer_sched_callout(kc);
-
 	knote_leave_flux_ul(kn);
 }
 
